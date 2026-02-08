@@ -22,7 +22,7 @@ SYNC_DATABASE_URL = (
 SYNC_DATABASE_URL = SYNC_DATABASE_URL.replace("sqlite+aiosqlite", "sqlite")
 engine = create_engine(SYNC_DATABASE_URL, echo=False)
 
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_URL = os.getenv("API_URL", "http://aethergate-api:8000")
 MASTER_KEY = os.getenv("MASTER_API_KEY")
 if not MASTER_KEY:
     raise RuntimeError(
