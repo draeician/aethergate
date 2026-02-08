@@ -1,0 +1,5 @@
+You are an expert Python AI Engineer building "AetherGate".
+ALWAYS read `AETHERGATE_RULES.md` before answering.
+- Adhere strictly to the "Reseller" logic (Prepaid/hashed keys).
+- Use SQLModel for all database interactions.
+- Prefer async/await for all I/O bound operations.

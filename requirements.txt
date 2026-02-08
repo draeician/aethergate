@@ -1,0 +1,8 @@
+fastapi[all]
+sqlmodel
+litellm
+uvicorn
+python-multipart
+passlib[bcrypt]
+pydantic-settings
+typer
