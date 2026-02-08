@@ -52,12 +52,28 @@ class CreateKeyRequest(BaseModel):
     rate_limit: Optional[str] = None
 
 
+class UpdateUserRequest(BaseModel):
+    balance: Optional[float] = None
+    is_active: Optional[bool] = None
+    organization: Optional[str] = None
+    email: Optional[str] = None
+
+
 class UpsertEndpointRequest(BaseModel):
     name: str
     base_url: str
     api_key: Optional[str] = None
     rpm_limit: Optional[int] = None
     day_limit: Optional[int] = None
+
+
+class UpdateEndpointRequest(BaseModel):
+    name: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    rpm_limit: Optional[int] = None
+    day_limit: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 class UpsertModelRequest(BaseModel):
@@ -68,6 +84,16 @@ class UpsertModelRequest(BaseModel):
     endpoint_id: Optional[int] = None
     rpm_limit: Optional[int] = None
     day_limit: Optional[int] = None
+
+
+class UpdateModelRequest(BaseModel):
+    litellm_name: Optional[str] = None
+    price_in: Optional[float] = None
+    price_out: Optional[float] = None
+    endpoint_id: Optional[int] = None
+    rpm_limit: Optional[int] = None
+    day_limit: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +137,40 @@ async def list_users(
         }
         for u in users
     ]
+
+
+@router.put("/users/{user_id}")
+async def update_user(
+    user_id: str,
+    body: UpdateUserRequest,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Update a user's balance, active status, org, or email."""
+    user = (await session.exec(
+        select(User).where(User.id == uuid.UUID(user_id))
+    )).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found.")
+
+    if body.balance is not None:
+        user.balance = body.balance
+    if body.is_active is not None:
+        user.is_active = body.is_active
+    if body.organization is not None:
+        user.organization = body.organization or None
+    if body.email is not None:
+        user.email = body.email or None
+
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return {
+        "id": str(user.id), "username": user.username,
+        "balance": user.balance, "is_active": user.is_active,
+        "organization": user.organization,
+        "action": "updated",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +282,43 @@ async def upsert_endpoint(
     return {"id": ep_id, "name": body.name, "action": action}
 
 
+@router.put("/endpoints/{endpoint_id}")
+async def update_endpoint(
+    endpoint_id: int,
+    body: UpdateEndpointRequest,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Update an endpoint by ID. Supports renaming."""
+    ep = (await session.exec(
+        select(LLMEndpoint).where(LLMEndpoint.id == endpoint_id)
+    )).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail=f"Endpoint ID {endpoint_id} not found.")
+
+    if body.name is not None:
+        ep.name = body.name
+    if body.base_url is not None:
+        ep.base_url = body.base_url
+    # api_key: allow explicit empty string to clear, None to skip
+    if body.api_key is not None:
+        ep.api_key = body.api_key or None
+    if body.rpm_limit is not None:
+        ep.rpm_limit = body.rpm_limit if body.rpm_limit > 0 else None
+    if body.day_limit is not None:
+        ep.day_limit = body.day_limit if body.day_limit > 0 else None
+    if body.is_active is not None:
+        ep.is_active = body.is_active
+
+    session.add(ep)
+    await session.commit()
+    await session.refresh(ep)
+    return {
+        "id": ep.id, "name": ep.name, "base_url": ep.base_url,
+        "action": "updated",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Model CRUD
 # ---------------------------------------------------------------------------
@@ -292,6 +389,49 @@ async def list_models(
         }
         for m in models
     ]
+
+
+@router.put("/models/{model_id}")
+async def update_model(
+    model_id: str,
+    body: UpdateModelRequest,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Update a model by ID. The model_id (PK) cannot be changed."""
+    model = (await session.exec(
+        select(LLMModel).where(LLMModel.id == model_id)
+    )).first()
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found.")
+
+    if body.litellm_name is not None:
+        model.litellm_name = body.litellm_name
+    if body.price_in is not None:
+        model.price_in = body.price_in
+    if body.price_out is not None:
+        model.price_out = body.price_out
+    if body.endpoint_id is not None:
+        # Validate endpoint exists (0 or negative means unlink)
+        if body.endpoint_id > 0:
+            ep = (await session.exec(
+                select(LLMEndpoint).where(LLMEndpoint.id == body.endpoint_id)
+            )).first()
+            if not ep:
+                raise HTTPException(status_code=404, detail=f"Endpoint ID {body.endpoint_id} not found.")
+            model.endpoint_id = body.endpoint_id
+        else:
+            model.endpoint_id = None
+    if body.rpm_limit is not None:
+        model.rpm_limit = body.rpm_limit if body.rpm_limit > 0 else None
+    if body.day_limit is not None:
+        model.day_limit = body.day_limit if body.day_limit > 0 else None
+    if body.is_active is not None:
+        model.is_active = body.is_active
+
+    session.add(model)
+    await session.commit()
+    return {"model": model.id, "action": "updated"}
 
 
 # ---------------------------------------------------------------------------
