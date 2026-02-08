@@ -5,6 +5,7 @@ import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import UsersPage from "./pages/UsersPage";
 import KeysPage from "./pages/KeysPage";
+import EndpointsPage from "./pages/EndpointsPage";
 import ModelsPage from "./pages/ModelsPage";
 import LogsPage from "./pages/LogsPage";
 
@@ -32,6 +33,7 @@ function AppRoutes() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="/keys" element={<KeysPage />} />
+        <Route path="/endpoints" element={<EndpointsPage />} />
         <Route path="/models" element={<ModelsPage />} />
         <Route path="/logs" element={<LogsPage />} />
       </Route>

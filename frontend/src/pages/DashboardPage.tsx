@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Users,
   KeyRound,
+  Globe,
   Cpu,
   ScrollText,
   DollarSign,
@@ -98,9 +99,10 @@ export default function DashboardPage() {
       </div>
 
       {/* Stat Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard label="Users" value={stats.users} icon={Users} />
         <StatCard label="API Keys" value={stats.api_keys} icon={KeyRound} />
+        <StatCard label="Endpoints" value={stats.endpoints} icon={Globe} />
         <StatCard label="Models" value={stats.models} icon={Cpu} />
         <StatCard label="Requests" value={stats.total_requests.toLocaleString()} icon={ScrollText} />
       </div>

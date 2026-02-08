@@ -10,14 +10,26 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from app.auth import get_current_key
 from app.database import get_session
-from app.models import APIKey, LLMModel
+from app.models import APIKey, LLMModel, LLMEndpoint
 from app.services.billing import process_transaction
 from app.services.limiter import InMemoryRateLimiter
 
 router = APIRouter()
 
-# Global rate limiter instance — persists across requests within this worker
+# Rate limiter instances — keyed separately for user-key, model, and endpoint
 limiter = InMemoryRateLimiter()
+
+# Default headers — bypass generic WAF / User-Agent blocks
+_EXTRA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/121.0.0.0 Safari/537.36",
+}
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/models — OpenAI-compatible model listing
+# ---------------------------------------------------------------------------
 
 @router.get("/v1/models")
 async def list_models(
@@ -43,16 +55,45 @@ async def list_models(
     }
 
 
+# ---------------------------------------------------------------------------
+# POST /v1/chat/completions — Inference Gateway
+# ---------------------------------------------------------------------------
+
 class Message(BaseModel):
     role: str
     content: str
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "gpt-oss-32k:latest" # Default
+    model: str = "gpt-oss-32k:latest"
     messages: List[Message]
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = None
+
+
+def _check_rate_limit(limiter: InMemoryRateLimiter, bucket_key: str, rpm: int) -> None:
+    """Check a single RPM bucket. Raises 429 if exceeded."""
+    spec = f"{rpm}/m"
+    if not limiter.check_limit(bucket_key, spec):
+        _, reset_in = limiter.get_remaining(bucket_key, spec)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded ({rpm} RPM). Retry in {reset_in:.0f}s.",
+            headers={"Retry-After": str(int(reset_in))},
+        )
+
+
+def _check_daily_limit(limiter: InMemoryRateLimiter, bucket_key: str, day_max: int) -> None:
+    """Check a daily bucket. Raises 429 if exceeded."""
+    spec = f"{day_max}/d"
+    if not limiter.check_limit(bucket_key, spec):
+        _, reset_in = limiter.get_remaining(bucket_key, spec)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily limit exceeded ({day_max}/day). Retry in {reset_in:.0f}s.",
+            headers={"Retry-After": str(int(reset_in))},
+        )
+
 
 @router.post("/v1/chat/completions")
 async def chat_completions(
@@ -61,148 +102,167 @@ async def chat_completions(
     api_key: APIKey = Depends(get_current_key),
     session: AsyncSession = Depends(get_session),
 ):
-    """
-    Authenticated & Metered Inference Gateway
-    """
-    # 1. Rate Limit Check (FIRST — before any work)
+    """Authenticated & Metered Inference Gateway"""
+
+    # =====================================================================
+    # 1. USER-KEY RATE LIMIT (per API key, as before)
+    # =====================================================================
     if not limiter.check_limit(api_key.key_hash, api_key.rate_limit_model):
-        remaining, reset_in = limiter.get_remaining(api_key.key_hash, api_key.rate_limit_model)
+        _, reset_in = limiter.get_remaining(api_key.key_hash, api_key.rate_limit_model)
         raise HTTPException(
             status_code=429,
             detail=f"Rate limit exceeded. Try again in {reset_in:.0f}s.",
             headers={"Retry-After": str(int(reset_in))},
         )
 
-    # 2. Config & Routing — resolve per-model endpoint from DB
-    model_data = (await session.exec(
+    # =====================================================================
+    # 2. RESOLVE MODEL + ENDPOINT (explicit queries — no lazy loading)
+    # =====================================================================
+    model_data: LLMModel | None = (await session.exec(
         select(LLMModel).where(LLMModel.id == request.model)
     )).first()
 
-    if model_data and model_data.api_base:
-        # Per-model override (e.g. OpenAI, Anthropic, a second Ollama host)
-        target_api_base = model_data.api_base
+    # Explicit endpoint lookup — selectinload is unreliable in async SQLModel
+    endpoint: LLMEndpoint | None = None
+    if model_data and model_data.endpoint_id is not None:
+        endpoint = (await session.exec(
+            select(LLMEndpoint).where(LLMEndpoint.id == model_data.endpoint_id)
+        )).first()
+
+    # Determine target model name for LiteLLM
+    if model_data:
         target_model = model_data.litellm_name
+    elif not request.model.startswith("ollama/"):
+        target_model = f"ollama/{request.model}"
     else:
-        # Default: fall back to the global Ollama backend
+        target_model = request.model
+
+    # Determine target base URL and API key from the endpoint hierarchy
+    if endpoint is not None:
+        target_api_base = endpoint.base_url
+        target_api_key = endpoint.api_key
+        print(f"--> [ROUTE] Endpoint #{endpoint.id} '{endpoint.name}' -> {target_api_base}")
+    else:
         target_api_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
-        if model_data:
-            target_model = model_data.litellm_name
-        elif not request.model.startswith("ollama/"):
-            target_model = f"ollama/{request.model}"
-        else:
-            target_model = request.model
+        target_api_key = None
+        print(f"--> [ROUTE] No endpoint attached, falling back to {target_api_base}")
 
-    # Per-model provider API key (e.g. OpenAI sk-... key)
-    target_api_key = model_data.api_key if model_data and model_data.api_key else None
+    # =====================================================================
+    # 3. TIERED RATE LIMITING (The Gauntlet)
+    # =====================================================================
 
-    # Default headers — bypass generic WAF / User-Agent blocks
-    extra_headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/121.0.0.0 Safari/537.36",
-    }
+    # Level 1 — Model-specific override (RPM)
+    if model_data and model_data.rpm_limit:
+        _check_rate_limit(limiter, f"model:{model_data.id}", model_data.rpm_limit)
 
-    # 3. Check Balance (Soft Limit)
-    # We allow them to go negative on the current request, but block the next one.
+    # Level 1 — Model-specific override (Daily)
+    if model_data and model_data.day_limit:
+        _check_daily_limit(limiter, f"model_day:{model_data.id}", model_data.day_limit)
+
+    # Level 2 — Endpoint global RPM (shared across all models on this endpoint)
+    if endpoint and endpoint.rpm_limit:
+        _check_rate_limit(limiter, f"ep:{endpoint.id}", endpoint.rpm_limit)
+
+    # Level 3 — Endpoint global daily limit
+    if endpoint and endpoint.day_limit:
+        _check_daily_limit(limiter, f"ep_day:{endpoint.id}", endpoint.day_limit)
+
+    # =====================================================================
+    # 4. BALANCE CHECK
+    # =====================================================================
     if api_key.user.balance <= 0:
         raise HTTPException(status_code=403, detail="Insufficient balance. Please top up.")
 
-    print(f"--> [AUTH] User: {api_key.user.username} | Model: {request.model} -> {target_model} @ {target_api_base}")
+    ep_name = endpoint.name if endpoint else "default"
+    print(f"--> [AUTH] User: {api_key.user.username} | {request.model} -> {target_model} @ {ep_name}")
 
-    # 3. Calculate Input Tokens (Pre-flight)
-    # We count them now to fail fast if the prompt is too huge (future feature)
+    # =====================================================================
+    # 5. TOKEN COUNTING (pre-flight)
+    # =====================================================================
     input_text = " ".join([m.content for m in request.messages])
     try:
         input_tokens = token_counter(model=target_model, messages=[m.dict() for m in request.messages])
-    except:
-        # Fallback if model not found in tokenizer, estimate 4 chars = 1 token
+    except Exception:
         input_tokens = len(input_text) / 4
 
+    # =====================================================================
+    # 6. LiteLLM CALL
+    # =====================================================================
     try:
         # --- STREAMING PATH ---
         if request.stream:
             async def billing_stream_wrapper():
                 accumulated_content = []
                 try:
-                    completion_kwargs = dict(
+                    kwargs = dict(
                         model=target_model,
                         messages=[m.dict() for m in request.messages],
                         api_base=target_api_base,
                         stream=True,
-                        extra_headers=extra_headers,
+                        extra_headers=_EXTRA_HEADERS,
                     )
                     if target_api_key:
-                        completion_kwargs["api_key"] = target_api_key
-                    response = await acompletion(**completion_kwargs)
+                        kwargs["api_key"] = target_api_key
+                    response = await acompletion(**kwargs)
+
                     async for chunk in response:
-                        # 1. Extract content to accumulate
                         if hasattr(chunk, "choices") and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
                             if delta and delta.content:
                                 accumulated_content.append(delta.content)
-                        
-                        # 2. Yield to user immediately
+
                         if hasattr(chunk, "json"):
                             content = chunk.json()
                         else:
                             content = json.dumps(chunk)
                         yield f"data: {content}\n\n"
-                    
+
                     yield "data: [DONE]\n\n"
 
                 except Exception as stream_e:
                     print(f"!!! Stream Error: {stream_e}")
                     yield f"data: {json.dumps({'error': str(stream_e)})}\n\n"
-                
+
                 finally:
-                    # --- BILLING TRIGGER (Post-Stream) ---
                     full_response_text = "".join(accumulated_content)
-                    
-                    # Calculate Output Tokens
                     try:
                         output_tokens = token_counter(model=target_model, text=full_response_text)
-                    except:
+                    except Exception:
                         output_tokens = len(full_response_text) / 4
 
-                    # Queue DB Write (Fire and Forget)
                     print(f"--> [STREAM END] Tokens: {input_tokens} in / {output_tokens} out")
-                    # Note: We can't use FastAPI 'BackgroundTasks' inside a generator easily.
-                    # We must call the service directly or use an async task.
-                    # For stability, we await it here (it's fast) or spawn a task.
                     import asyncio
                     asyncio.create_task(process_transaction(
                         user_id=api_key.user_id,
                         api_key_id=api_key.id,
-                        model_id=request.model, # Use the ID they asked for (e.g. "qwen2.5:3b")
+                        model_id=request.model,
                         input_tokens=int(input_tokens),
                         output_tokens=int(output_tokens),
                         prompt_text=input_text if api_key.log_content else None,
-                        completion_text=full_response_text if api_key.log_content else None
+                        completion_text=full_response_text if api_key.log_content else None,
                     ))
 
             return StreamingResponse(billing_stream_wrapper(), media_type="text/event-stream")
 
         # --- NON-STREAMING PATH ---
         else:
-            completion_kwargs = dict(
+            kwargs = dict(
                 model=target_model,
                 messages=[m.dict() for m in request.messages],
                 api_base=target_api_base,
                 stream=False,
-                extra_headers=extra_headers,
+                extra_headers=_EXTRA_HEADERS,
             )
             if target_api_key:
-                completion_kwargs["api_key"] = target_api_key
-            response = await acompletion(**completion_kwargs)
-            
-            # Calculate Output Tokens
+                kwargs["api_key"] = target_api_key
+            response = await acompletion(**kwargs)
+
             content = response.choices[0].message.content
             try:
                 output_tokens = token_counter(model=target_model, text=content)
-            except:
+            except Exception:
                 output_tokens = len(content) / 4
 
-            # Queue DB Write
             background_tasks.add_task(
                 process_transaction,
                 user_id=api_key.user_id,
@@ -211,11 +271,13 @@ async def chat_completions(
                 input_tokens=int(input_tokens),
                 output_tokens=int(output_tokens),
                 prompt_text=input_text if api_key.log_content else None,
-                completion_text=content if api_key.log_content else None
+                completion_text=content if api_key.log_content else None,
             )
-            
+
             return response.json()
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"!!! Request Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

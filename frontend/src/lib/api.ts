@@ -2,6 +2,7 @@ import type {
   User,
   APIKeyInfo,
   GeneratedKey,
+  LLMEndpoint,
   LLMModel,
   PaginatedLogs,
   Stats,
@@ -77,6 +78,29 @@ export function createKey(
   });
 }
 
+// ---- Endpoints (Providers) ----
+
+export function listEndpoints(key: string) {
+  return apiFetch<LLMEndpoint[]>("/admin/endpoints", key);
+}
+
+export function upsertEndpoint(
+  key: string,
+  data: {
+    name: string;
+    base_url: string;
+    api_key?: string | null;
+    rpm_limit?: number | null;
+    day_limit?: number | null;
+  }
+) {
+  return apiFetch<{ id: number; name: string; action: string }>(
+    "/admin/endpoints",
+    key,
+    { method: "POST", body: JSON.stringify(data) }
+  );
+}
+
 // ---- Models ----
 
 export function listModels(key: string) {
@@ -85,7 +109,15 @@ export function listModels(key: string) {
 
 export function upsertModel(
   key: string,
-  data: { id: string; litellm_name: string; price_in: number; price_out: number }
+  data: {
+    id: string;
+    litellm_name: string;
+    price_in: number;
+    price_out: number;
+    endpoint_id?: number | null;
+    rpm_limit?: number | null;
+    day_limit?: number | null;
+  }
 ) {
   return apiFetch<{ model: string; litellm_name: string; action: string }>(
     "/admin/models",
