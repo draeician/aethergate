@@ -8,8 +8,12 @@ from typing import List, Optional
 from app.auth import get_current_key
 from app.models import APIKey
 from app.services.billing import process_transaction
+from app.services.limiter import InMemoryRateLimiter
 
 router = APIRouter()
+
+# Global rate limiter instance — persists across requests within this worker
+limiter = InMemoryRateLimiter()
 
 class Message(BaseModel):
     role: str
@@ -31,7 +35,16 @@ async def chat_completions(
     """
     Authenticated & Metered Inference Gateway
     """
-    # 1. Config & Routing
+    # 1. Rate Limit Check (FIRST — before any work)
+    if not limiter.check_limit(api_key.key_hash, api_key.rate_limit_model):
+        remaining, reset_in = limiter.get_remaining(api_key.key_hash, api_key.rate_limit_model)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {reset_in:.0f}s.",
+            headers={"Retry-After": str(int(reset_in))},
+        )
+
+    # 2. Config & Routing
     ollama_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
     
     # Force "ollama/" prefix for LiteLLM if missing
@@ -40,7 +53,7 @@ async def chat_completions(
     else:
         target_model = request.model
 
-    # 2. Check Balance (Soft Limit)
+    # 3. Check Balance (Soft Limit)
     # We allow them to go negative on the current request, but block the next one.
     if api_key.user.balance <= 0:
         raise HTTPException(status_code=403, detail="Insufficient balance. Please top up.")

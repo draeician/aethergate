@@ -42,6 +42,7 @@ class APIKey(SQLModel, table=True):
     name: str = Field(default="default")
     is_active: bool = Field(default=True)
     log_content: bool = Field(default=True)
+    rate_limit_model: Optional[str] = Field(default=None, description="Rate limit, e.g. '60/m', '1000/h', '5000/d'")
     allowed_capabilities: List[str] = Field(default=[], sa_column=Column(JSON))
     
     # Relationships
