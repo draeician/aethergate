@@ -23,22 +23,20 @@ services:
   dashboard:
     container_name: aethergate-dashboard
     build: .
-#    command: streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501 --server.baseUrlPath admin
-    command: streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501 --server.enableCORS=false --server.enableXsrfProtection=false
-
+    command: >
+      streamlit run dashboard.py
+      --server.address 0.0.0.0
+      --server.port 8501
+      --server.enableCORS=false
+      --server.enableXsrfProtection=false
+      --server.baseUrlPath=admin
     ports:
       - "8501:8501"
     volumes:
-      # ✅ FIX: Share the same named volume so it sees the same DB
       - /opt/aethergate/data:/app/data
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
-      - DATABASE_URL_SYNC=sqlite:////app/data/aethergate.db
-      - MASTER_API_KEY=${ADMIN_KEY}
       - API_URL=http://aethergate-api:8000
-      # Allow Nginx to handle the connection
-      - STREAMLIT_SERVER_ENABLE_CORS=false
-      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
     restart: unless-stopped
     depends_on:
       - api
