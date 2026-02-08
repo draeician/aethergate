@@ -3,6 +3,7 @@ AetherGate Mission Control — Streamlit Dashboard
 Usage: streamlit run dashboard.py
 """
 
+import json
 import streamlit as st
 import pandas as pd
 import requests as http_requests
@@ -32,10 +33,17 @@ def check_api_health() -> bool:
         return False
 
 
+def api_get(path: str) -> http_requests.Response:
+    return http_requests.get(
+        f"{API_URL}{path}",
+        headers={"x-admin-key": MASTER_KEY}, timeout=30,
+    )
+
+
 def api_post(path: str, payload: dict) -> http_requests.Response:
     return http_requests.post(
         f"{API_URL}{path}", json=payload,
-        headers={"x-admin-key": MASTER_KEY}, timeout=10,
+        headers={"x-admin-key": MASTER_KEY}, timeout=30,
     )
 
 
@@ -106,7 +114,7 @@ st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "Users", "Endpoints", "Models", "Logs"],
+    ["Overview", "Users", "Endpoints", "Models", "Logs", "Backup"],
     label_visibility="collapsed",
 )
 
@@ -471,3 +479,111 @@ elif page == "Logs":
         s3.metric("Page Cost", f"${sum(l.total_cost for l in logs):,.6f}")
     else:
         st.info("No logs matching the current filters.")
+
+
+# =========================================================================
+# Page: Backup & Restore
+# =========================================================================
+
+elif page == "Backup":
+    st.title("Backup & Restore")
+    st.caption("Export or import your full system configuration")
+
+    # --- Section 1: Export / Download ---
+    st.subheader("Download Backup")
+    st.markdown(
+        "Export all **endpoints, models, users, and API keys** as a single JSON file. "
+        "Use this to migrate to a new server or recover from a disaster."
+    )
+
+    if st.button("Generate Backup"):
+        with st.spinner("Exporting configuration..."):
+            try:
+                resp = api_get("/admin/backup/export")
+                if resp.ok:
+                    backup_data = resp.json()
+                    backup_json = json.dumps(backup_data, indent=2)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"aethergate_backup_{ts}.json"
+
+                    ep_count = len(backup_data["data"].get("endpoints", []))
+                    m_count = len(backup_data["data"].get("models", []))
+                    u_count = len(backup_data["data"].get("users", []))
+                    k_count = len(backup_data["data"].get("api_keys", []))
+
+                    st.success(
+                        f"Backup ready: **{ep_count}** endpoints, **{m_count}** models, "
+                        f"**{u_count}** users, **{k_count}** API keys."
+                    )
+                    st.download_button(
+                        label="Download JSON",
+                        data=backup_json,
+                        file_name=filename,
+                        mime="application/json",
+                    )
+                else:
+                    st.error(f"Export failed: {resp.json().get('detail', resp.text)}")
+            except Exception as ex:
+                st.error(f"Connection error: {ex}")
+
+    st.divider()
+
+    # --- Section 2: Import / Restore ---
+    st.subheader("Restore from Backup")
+    st.markdown(
+        "Upload a previously exported JSON backup file. "
+        "Existing records are **updated** (smart upsert); new records are created."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Choose a backup JSON file",
+        type=["json"],
+        help="Must be a file exported via the backup button above.",
+    )
+
+    if uploaded_file is not None:
+        try:
+            raw = uploaded_file.read().decode("utf-8")
+            backup_data = json.loads(raw)
+
+            # Quick validation
+            if "version" not in backup_data or "data" not in backup_data:
+                st.error("Invalid backup file — missing 'version' or 'data' key.")
+            else:
+                ep_count = len(backup_data["data"].get("endpoints", []))
+                m_count = len(backup_data["data"].get("models", []))
+                u_count = len(backup_data["data"].get("users", []))
+                k_count = len(backup_data["data"].get("api_keys", []))
+
+                st.info(
+                    f"Backup v{backup_data['version']} from **{backup_data.get('timestamp', 'unknown')}** — "
+                    f"{ep_count} endpoints, {m_count} models, {u_count} users, {k_count} API keys."
+                )
+
+                if st.button("Restore Now"):
+                    with st.spinner("Importing configuration..."):
+                        try:
+                            resp = api_post("/admin/backup/import", backup_data)
+                            if resp.ok:
+                                result = resp.json()
+                                restored = result.get("restored", {})
+                                lines = []
+                                for entity, counts in restored.items():
+                                    c = counts.get("created", 0)
+                                    u = counts.get("updated", 0)
+                                    if c or u:
+                                        parts = []
+                                        if c:
+                                            parts.append(f"{c} created")
+                                        if u:
+                                            parts.append(f"{u} updated")
+                                        lines.append(f"**{entity}**: {', '.join(parts)}")
+                                summary = "  \n".join(lines) if lines else "No changes needed."
+                                st.success(f"Restore complete!  \n{summary}")
+                                st.rerun()
+                            else:
+                                st.error(f"Import failed: {resp.json().get('detail', resp.text)}")
+                        except Exception as ex:
+                            st.error(f"Connection error: {ex}")
+        except json.JSONDecodeError:
+            st.error("Invalid JSON file. Please upload a valid backup.")

@@ -9,3 +9,5 @@ __pycache__/
 
 test.bash
 aethergate.db
+check.bash
+stream-v2.json
