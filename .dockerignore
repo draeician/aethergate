@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.env
+aethergate.db
+*.md
+.pytest_cache/
+.ruff_cache/
