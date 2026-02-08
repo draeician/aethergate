@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   api:
     container_name: aethergate-api
@@ -6,9 +8,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./aethergate.db:/app/aethergate.db
-    env_file:
-      - .env
+      # ✅ FIX: Use a named volume instead of a bind mount
+      - aethergate_data:/app/data
+      # Map the DB file path in the container to this volume
+    environment:
+      - DATABASE_URL=sqlite:////app/data/aethergate.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -23,11 +27,16 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./aethergate.db:/app/aethergate.db
-    env_file:
-      - .env
+      # ✅ FIX: Share the same named volume so it sees the same DB
+      - aethergate_data:/app/data
     environment:
+      - DATABASE_URL=sqlite:////app/data/aethergate.db
       - API_URL=http://aethergate-api:8000
+      # ✅ FIX: Tell Streamlit it lives at /admin
+      - STREAMLIT_SERVER_BASE_URL_PATH=admin
+      # ✅ FIX: Allow Nginx to handle the connection
+      - STREAMLIT_SERVER_ENABLE_CORS=false
+      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
     restart: unless-stopped
     depends_on:
       - api
@@ -40,3 +49,7 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+
+# Define the persistent volume
+volumes:
+  aethergate_data:
