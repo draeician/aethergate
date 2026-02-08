@@ -2,8 +2,6 @@
 
 A self-hosted, OpenAI-compatible AI Gateway designed to monetize local inference. AetherGate sits between your users and your local LLM server (e.g., Ollama), adding Authentication, Billing, Rate Limiting, and Logging.
 
-
-
 ## Features
 * **OpenAI-Compatible Proxy:** Drop-in replacement for `openai.api_base`.
 * **User Management:** Create users, manage balances, and issue API keys.
@@ -24,13 +22,16 @@ OLLAMA_API_BASE="http://nomnom:11434" # Your backend URL
 ```
 
 ### 2. Run with Docker (Recommended)
+
 ```bash
 docker compose up -d
 ```
+
 * **API:** `http://localhost:8000`
 * **Dashboard:** `http://localhost:8501`
 
 ### 3. Run Manually (Development)
+
 ```bash
 # Install dependencies
 pip install -r requirements.txt
@@ -46,6 +47,7 @@ streamlit run dashboard.py
 ```
 
 ## Administration (CLI)
+
 Manage the system using the `manage.py` utility inside the container or venv.
 
 ```bash
@@ -63,6 +65,7 @@ python manage.py check-balance <Username>
 ```
 
 ## Administration (HTTP API)
+
 You can also manage the system remotely using the Admin Endpoints.
 **Header Required:** `x-admin-key: <MASTER_API_KEY>`
 
