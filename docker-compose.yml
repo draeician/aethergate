@@ -1,5 +1,6 @@
 services:
   api:
+    container_name: aethergate-api
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
@@ -16,6 +17,7 @@ services:
       retries: 3
 
   dashboard:
+    container_name: aethergate-dashboard
     build: .
     command: streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501
     ports:
@@ -24,6 +26,17 @@ services:
       - ./aethergate.db:/app/aethergate.db
     env_file:
       - .env
+    environment:
+      - API_URL=http://aethergate-api:8000
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  frontend:
+    container_name: aethergate-frontend
+    build: ./frontend
+    ports:
+      - "3080:80"
     restart: unless-stopped
     depends_on:
       - api

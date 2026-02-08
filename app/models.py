@@ -57,6 +57,8 @@ class LLMModel(SQLModel, table=True):
     price_out: float = Field(default=0.0)
     is_active: bool = Field(default=True)
     fallback_model_id: Optional[str] = Field(default=None, foreign_key="llmmodel.id")
+    api_base: Optional[str] = Field(default=None, description="Per-model API base URL (overrides OLLAMA_API_BASE)")
+    api_key: Optional[str] = Field(default=None, description="Per-model provider API key")
 
 class RequestLog(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)

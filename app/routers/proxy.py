@@ -3,10 +3,14 @@ from fastapi.responses import StreamingResponse
 from litellm import acompletion, token_counter
 import os
 import json
+import time
 from pydantic import BaseModel
 from typing import List, Optional
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 from app.auth import get_current_key
-from app.models import APIKey
+from app.database import get_session
+from app.models import APIKey, LLMModel
 from app.services.billing import process_transaction
 from app.services.limiter import InMemoryRateLimiter
 
@@ -14,6 +18,30 @@ router = APIRouter()
 
 # Global rate limiter instance — persists across requests within this worker
 limiter = InMemoryRateLimiter()
+
+@router.get("/v1/models")
+async def list_models(
+    api_key: APIKey = Depends(get_current_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """OpenAI-compatible model listing endpoint."""
+    models = (await session.exec(
+        select(LLMModel).where(LLMModel.is_active == True)  # noqa: E712
+    )).all()
+
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": m.id,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "aethergate",
+            }
+            for m in models
+        ],
+    }
+
 
 class Message(BaseModel):
     role: str
@@ -30,7 +58,8 @@ class ChatCompletionRequest(BaseModel):
 async def chat_completions(
     request: ChatCompletionRequest,
     background_tasks: BackgroundTasks,
-    api_key: APIKey = Depends(get_current_key)
+    api_key: APIKey = Depends(get_current_key),
+    session: AsyncSession = Depends(get_session),
 ):
     """
     Authenticated & Metered Inference Gateway
@@ -44,21 +73,41 @@ async def chat_completions(
             headers={"Retry-After": str(int(reset_in))},
         )
 
-    # 2. Config & Routing
-    ollama_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
-    
-    # Force "ollama/" prefix for LiteLLM if missing
-    if not request.model.startswith("ollama/"):
-        target_model = f"ollama/{request.model}"
+    # 2. Config & Routing — resolve per-model endpoint from DB
+    model_data = (await session.exec(
+        select(LLMModel).where(LLMModel.id == request.model)
+    )).first()
+
+    if model_data and model_data.api_base:
+        # Per-model override (e.g. OpenAI, Anthropic, a second Ollama host)
+        target_api_base = model_data.api_base
+        target_model = model_data.litellm_name
     else:
-        target_model = request.model
+        # Default: fall back to the global Ollama backend
+        target_api_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+        if model_data:
+            target_model = model_data.litellm_name
+        elif not request.model.startswith("ollama/"):
+            target_model = f"ollama/{request.model}"
+        else:
+            target_model = request.model
+
+    # Per-model provider API key (e.g. OpenAI sk-... key)
+    target_api_key = model_data.api_key if model_data and model_data.api_key else None
+
+    # Default headers — bypass generic WAF / User-Agent blocks
+    extra_headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/121.0.0.0 Safari/537.36",
+    }
 
     # 3. Check Balance (Soft Limit)
     # We allow them to go negative on the current request, but block the next one.
     if api_key.user.balance <= 0:
         raise HTTPException(status_code=403, detail="Insufficient balance. Please top up.")
 
-    print(f"--> [AUTH] User: {api_key.user.username} | Model: {request.model}")
+    print(f"--> [AUTH] User: {api_key.user.username} | Model: {request.model} -> {target_model} @ {target_api_base}")
 
     # 3. Calculate Input Tokens (Pre-flight)
     # We count them now to fail fast if the prompt is too huge (future feature)
@@ -75,12 +124,16 @@ async def chat_completions(
             async def billing_stream_wrapper():
                 accumulated_content = []
                 try:
-                    response = await acompletion(
+                    completion_kwargs = dict(
                         model=target_model,
                         messages=[m.dict() for m in request.messages],
-                        api_base=ollama_url,
+                        api_base=target_api_base,
                         stream=True,
+                        extra_headers=extra_headers,
                     )
+                    if target_api_key:
+                        completion_kwargs["api_key"] = target_api_key
+                    response = await acompletion(**completion_kwargs)
                     async for chunk in response:
                         # 1. Extract content to accumulate
                         if hasattr(chunk, "choices") and len(chunk.choices) > 0:
@@ -131,12 +184,16 @@ async def chat_completions(
 
         # --- NON-STREAMING PATH ---
         else:
-            response = await acompletion(
+            completion_kwargs = dict(
                 model=target_model,
                 messages=[m.dict() for m in request.messages],
-                api_base=ollama_url,
-                stream=False
+                api_base=target_api_base,
+                stream=False,
+                extra_headers=extra_headers,
             )
+            if target_api_key:
+                completion_kwargs["api_key"] = target_api_key
+            response = await acompletion(**completion_kwargs)
             
             # Calculate Output Tokens
             content = response.choices[0].message.content
