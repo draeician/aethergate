@@ -12,7 +12,8 @@ services:
       - aethergate_data:/app/data
       # Map the DB file path in the container to this volume
     environment:
-      - DATABASE_URL=sqlite:////app/data/aethergate.db
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
+      - MASTER_API_KEY=${ADMIN_KEY}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -30,11 +31,13 @@ services:
       # ✅ FIX: Share the same named volume so it sees the same DB
       - aethergate_data:/app/data
     environment:
-      - DATABASE_URL=sqlite:////app/data/aethergate.db
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
+      - DATABASE_URL_SYNC=sqlite:////app/data/aethergate.db
+      - MASTER_API_KEY=${ADMIN_KEY}
       - API_URL=http://aethergate-api:8000
-      # ✅ FIX: Tell Streamlit it lives at /admin
+      # Tell Streamlit it lives at /admin
       - STREAMLIT_SERVER_BASE_URL_PATH=admin
-      # ✅ FIX: Allow Nginx to handle the connection
+      # Allow Nginx to handle the connection
       - STREAMLIT_SERVER_ENABLE_CORS=false
       - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
     restart: unless-stopped
