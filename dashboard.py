@@ -8,6 +8,7 @@ import pandas as pd
 import requests as http_requests
 import os
 from sqlmodel import Session, create_engine, select
+from sqlalchemy.orm import selectinload
 from datetime import datetime
 
 # --- Config ---
@@ -17,8 +18,7 @@ engine = create_engine(SYNC_DATABASE_URL, echo=False)
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 MASTER_KEY = os.getenv("MASTER_API_KEY", "sk-admin-master-key")
 
-# Import DB models (registers them with SQLModel.metadata)
-from app.models import User, RequestLog, LLMModel, APIKey  # noqa: E402
+from app.models import User, RequestLog, LLMModel, LLMEndpoint, APIKey  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -32,21 +32,29 @@ def check_api_health() -> bool:
         return False
 
 
+def api_post(path: str, payload: dict) -> http_requests.Response:
+    return http_requests.post(
+        f"{API_URL}{path}", json=payload,
+        headers={"x-admin-key": MASTER_KEY}, timeout=10,
+    )
+
+
 def get_all_users() -> list[User]:
     with Session(engine) as s:
         return list(s.exec(select(User).order_by(User.created_at.desc())).all())
 
 
+def get_all_endpoints() -> list[LLMEndpoint]:
+    with Session(engine) as s:
+        return list(s.exec(select(LLMEndpoint)).all())
+
+
 def get_all_models() -> list[LLMModel]:
     with Session(engine) as s:
-        return list(s.exec(select(LLMModel)).all())
+        return list(s.exec(select(LLMModel).options(selectinload(LLMModel.endpoint))).all())
 
 
-def get_all_logs(
-    limit: int = 50,
-    user_id: str | None = None,
-    model: str | None = None,
-) -> list[RequestLog]:
+def get_all_logs(limit: int = 50, user_id: str | None = None, model: str | None = None) -> list[RequestLog]:
     with Session(engine) as s:
         stmt = select(RequestLog).order_by(RequestLog.timestamp.desc())
         if user_id:
@@ -81,15 +89,6 @@ def get_user_map() -> dict[str, str]:
         return {str(u.id): u.username for u in s.exec(select(User)).all()}
 
 
-def api_post(path: str, payload: dict) -> http_requests.Response:
-    return http_requests.post(
-        f"{API_URL}{path}",
-        json=payload,
-        headers={"x-admin-key": MASTER_KEY},
-        timeout=10,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Page Config
 # ---------------------------------------------------------------------------
@@ -101,21 +100,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-
 st.sidebar.title("⚡ AetherGate")
 st.sidebar.caption("Mission Control")
 st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "Users", "Logs", "Models"],
+    ["Overview", "Users", "Endpoints", "Models", "Logs"],
     label_visibility="collapsed",
 )
 
-# --- System Status in sidebar ---
 if check_api_health():
     st.sidebar.success("System Status: **Online**")
 else:
@@ -133,10 +127,14 @@ if page == "Overview":
     st.title("Overview")
     st.caption("System-wide metrics at a glance")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Revenue", f"${get_total_revenue():,.6f}")
-    col2.metric("Total Requests", f"{get_total_requests():,}")
-    col3.metric("Active Users", f"{get_active_user_count()}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Revenue", f"${get_total_revenue():,.6f}")
+    c2.metric("Total Requests", f"{get_total_requests():,}")
+    c3.metric("Active Users", f"{get_active_user_count()}")
+
+    c4, c5 = st.columns(2)
+    c4.metric("Endpoints", f"{len(get_all_endpoints())}")
+    c5.metric("Models", f"{len(get_all_models())}")
 
 
 # =========================================================================
@@ -148,14 +146,11 @@ elif page == "Users":
     st.caption("Manage registered user accounts")
 
     users = get_all_users()
-
     if users:
         rows = [
             {
-                "Username": u.username,
-                "Balance": u.balance,
-                "Active": u.is_active,
-                "Organization": u.organization or "—",
+                "Username": u.username, "Balance": u.balance,
+                "Active": u.is_active, "Organization": u.organization or "—",
                 "Created": u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "—",
             }
             for u in users
@@ -167,23 +162,19 @@ elif page == "Users":
 
         st.dataframe(
             df.style.applymap(_hl, subset=["Balance"]).format({"Balance": "${:,.6f}"}),
-            use_container_width=True,
-            hide_index=True,
+            use_container_width=True, hide_index=True,
         )
     else:
         st.info("No users yet.")
 
-    # --- Add User ---
     st.divider()
     st.subheader("Add User")
-
     with st.form("add_user_form", clear_on_submit=True):
         uc1, uc2 = st.columns(2)
         with uc1:
             new_username = st.text_input("Username", placeholder="client_name")
         with uc2:
             new_balance = st.number_input("Initial Balance ($)", value=10.00, step=1.00, format="%.2f")
-
         if st.form_submit_button("Create User"):
             if not new_username.strip():
                 st.error("Username is required.")
@@ -192,6 +183,237 @@ elif page == "Users":
                     resp = api_post("/admin/users", {"username": new_username.strip(), "balance": new_balance})
                     if resp.ok:
                         st.success(f"User **{new_username.strip()}** created.")
+                        st.rerun()
+                    else:
+                        st.error(f"API Error: {resp.json().get('detail', resp.text)}")
+                except Exception as ex:
+                    st.error(f"Connection error: {ex}")
+
+
+# =========================================================================
+# Page: Endpoints (Providers)
+# =========================================================================
+
+elif page == "Endpoints":
+    st.title("Endpoints (Providers)")
+    st.caption("Manage API provider connections and global rate limits")
+
+    endpoints = get_all_endpoints()
+
+    if endpoints:
+        rows = [
+            {
+                "ID": ep.id, "Name": ep.name, "Base URL": ep.base_url,
+                "Key Set": "Yes" if ep.api_key else "No",
+                "RPM Limit": ep.rpm_limit or "—",
+                "Daily Limit": ep.day_limit or "—",
+                "Active": ep.is_active,
+            }
+            for ep in endpoints
+        ]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No endpoints configured. Add one below.")
+
+    st.divider()
+
+    # --- Load for editing ---
+    ep_names = [ep.name for ep in endpoints]
+    if ep_names:
+        selected_ep = st.selectbox(
+            "Load Endpoint for Editing",
+            ["— New Endpoint —"] + ep_names,
+        )
+    else:
+        selected_ep = "— New Endpoint —"
+
+    editing_ep = selected_ep != "— New Endpoint —"
+    edit_ep_obj: LLMEndpoint | None = None
+    if editing_ep:
+        edit_ep_obj = next((ep for ep in endpoints if ep.name == selected_ep), None)
+
+    st.subheader("Edit Endpoint" if edit_ep_obj else "Add Endpoint")
+
+    with st.form("endpoint_form", clear_on_submit=False):
+        ec1, ec2 = st.columns(2)
+        with ec1:
+            ep_name = st.text_input(
+                "Name", value=edit_ep_obj.name if edit_ep_obj else "",
+                placeholder="OpenAI", disabled=bool(edit_ep_obj),
+            )
+            ep_base = st.text_input(
+                "Base URL", value=edit_ep_obj.base_url if edit_ep_obj else "",
+                placeholder="https://api.openai.com/v1",
+            )
+        with ec2:
+            ep_key = st.text_input(
+                "API Key", value=(edit_ep_obj.api_key or "") if edit_ep_obj else "",
+                placeholder="sk-...", type="password",
+                help="Provider authentication key. Leave empty if not required.",
+            )
+            ep_rpm = st.number_input(
+                "Global RPM Limit", value=edit_ep_obj.rpm_limit or 0 if edit_ep_obj else 0,
+                min_value=0, step=10, help="0 = unlimited",
+            )
+            ep_day = st.number_input(
+                "Global Daily Limit", value=edit_ep_obj.day_limit or 0 if edit_ep_obj else 0,
+                min_value=0, step=100, help="0 = unlimited",
+            )
+
+        if st.form_submit_button("Save Endpoint"):
+            final_name = edit_ep_obj.name if edit_ep_obj else ep_name.strip()
+            if not final_name or not ep_base.strip():
+                st.error("Name and Base URL are required.")
+            else:
+                payload = {
+                    "name": final_name,
+                    "base_url": ep_base.strip(),
+                    "api_key": ep_key.strip() or None,
+                    "rpm_limit": ep_rpm if ep_rpm > 0 else None,
+                    "day_limit": ep_day if ep_day > 0 else None,
+                }
+                try:
+                    resp = api_post("/admin/endpoints", payload)
+                    if resp.ok:
+                        result = resp.json()
+                        st.success(f"Endpoint **{result['name']}** {result['action']}.")
+                        st.rerun()
+                    else:
+                        st.error(f"API Error: {resp.json().get('detail', resp.text)}")
+                except Exception as ex:
+                    st.error(f"Connection error: {ex}")
+
+
+# =========================================================================
+# Page: Models
+# =========================================================================
+
+elif page == "Models":
+    st.title("Model Registry")
+    st.caption("Configure model routing — models belong to endpoints")
+
+    models = get_all_models()
+    endpoints = get_all_endpoints()
+    model_ids = [m.id for m in models]
+
+    # Build endpoint lookup for the selectbox
+    ep_map: dict[int, str] = {ep.id: ep.name for ep in endpoints}
+    ep_options = ["— None (global default) —"] + [f"{ep.name} (#{ep.id})" for ep in endpoints]
+    ep_id_list: list[int | None] = [None] + [ep.id for ep in endpoints]
+
+    if models:
+        rows = [
+            {
+                "Model ID": m.id,
+                "LiteLLM Name": m.litellm_name,
+                "Price In": m.price_in,
+                "Price Out": m.price_out,
+                "Endpoint": ep_map.get(m.endpoint_id, "— default —") if m.endpoint_id else "— default —",
+                "RPM Override": m.rpm_limit or "—",
+                "Daily Override": m.day_limit or "—",
+                "Active": m.is_active,
+            }
+            for m in models
+        ]
+        st.dataframe(
+            pd.DataFrame(rows).style.format({"Price In": "${:,.6f}", "Price Out": "${:,.6f}"}),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("No models configured. Add one below.")
+
+    st.divider()
+
+    # --- Load for editing ---
+    if model_ids:
+        selected = st.selectbox(
+            "Load Model for Editing",
+            ["— New Model —"] + model_ids,
+        )
+    else:
+        selected = "— New Model —"
+
+    editing = selected != "— New Model —"
+    edit_obj: LLMModel | None = None
+    if editing:
+        edit_obj = next((m for m in models if m.id == selected), None)
+
+    st.subheader("Edit Model" if edit_obj else "Configure Model")
+
+    # Determine default index for endpoint selectbox
+    default_ep_idx = 0
+    if edit_obj and edit_obj.endpoint_id is not None:
+        try:
+            default_ep_idx = ep_id_list.index(edit_obj.endpoint_id)
+        except ValueError:
+            default_ep_idx = 0
+
+    with st.form("model_config_form", clear_on_submit=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            fm_id = st.text_input(
+                "Public Model ID",
+                value=edit_obj.id if edit_obj else "",
+                placeholder="gpt-4-turbo", disabled=bool(edit_obj),
+            )
+            fm_litellm = st.text_input(
+                "LiteLLM Internal Name",
+                value=edit_obj.litellm_name if edit_obj else "",
+                placeholder="ollama/llama3",
+            )
+        with c2:
+            fm_price_in = st.number_input(
+                "Price / Input Token ($)",
+                value=edit_obj.price_in if edit_obj else 0.000001,
+                format="%.6f", step=0.000001,
+            )
+            fm_price_out = st.number_input(
+                "Price / Output Token ($)",
+                value=edit_obj.price_out if edit_obj else 0.000002,
+                format="%.6f", step=0.000001,
+            )
+
+        # Endpoint selector (replaces old api_base / api_key inputs)
+        fm_ep_idx = st.selectbox("Endpoint (Provider)", range(len(ep_options)),
+                                  format_func=lambda i: ep_options[i],
+                                  index=default_ep_idx)
+        fm_endpoint_id = ep_id_list[fm_ep_idx]
+
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            fm_rpm = st.number_input(
+                "RPM Override (0 = inherit from endpoint)",
+                value=edit_obj.rpm_limit or 0 if edit_obj else 0,
+                min_value=0, step=10,
+            )
+        with rc2:
+            fm_day = st.number_input(
+                "Daily Override (0 = inherit from endpoint)",
+                value=edit_obj.day_limit or 0 if edit_obj else 0,
+                min_value=0, step=100,
+            )
+
+        if st.form_submit_button("Save Configuration"):
+            final_id = edit_obj.id if edit_obj else fm_id.strip().lower().replace(" ", "-")
+            if not final_id or not fm_litellm.strip():
+                st.error("Model ID and LiteLLM Name are required.")
+            else:
+                if not edit_obj and final_id != fm_id.strip():
+                    st.info(f"Model ID normalized to `{final_id}`.")
+                payload = {
+                    "id": final_id,
+                    "litellm_name": fm_litellm.strip(),
+                    "price_in": fm_price_in,
+                    "price_out": fm_price_out,
+                    "endpoint_id": fm_endpoint_id,
+                    "rpm_limit": fm_rpm if fm_rpm > 0 else None,
+                    "day_limit": fm_day if fm_day > 0 else None,
+                }
+                try:
+                    resp = api_post("/admin/models", payload)
+                    if resp.ok:
+                        result = resp.json()
+                        st.success(f"Model `{result['model']}` **{result['action']}**.")
                         st.rerun()
                     else:
                         st.error(f"API Error: {resp.json().get('detail', resp.text)}")
@@ -239,8 +461,7 @@ elif page == "Logs":
         ]
         st.dataframe(
             pd.DataFrame(rows).style.format({"Cost ($)": "${:,.6f}"}),
-            use_container_width=True,
-            hide_index=True,
+            use_container_width=True, hide_index=True,
         )
 
         st.divider()
@@ -250,131 +471,3 @@ elif page == "Logs":
         s3.metric("Page Cost", f"${sum(l.total_cost for l in logs):,.6f}")
     else:
         st.info("No logs matching the current filters.")
-
-
-# =========================================================================
-# Page: Models
-# =========================================================================
-
-elif page == "Models":
-    st.title("Model Registry")
-    st.caption("Configure model routing and per-provider settings")
-
-    models = get_all_models()
-    model_ids = [m.id for m in models]
-
-    # --- Existing Models Table ---
-    if models:
-        rows = [
-            {
-                "Model ID": m.id,
-                "LiteLLM Name": m.litellm_name,
-                "Price In": m.price_in,
-                "Price Out": m.price_out,
-                "API Base": m.api_base or "— (default)",
-                "Key Set": "Yes" if m.api_key else "No",
-                "Active": m.is_active,
-            }
-            for m in models
-        ]
-        st.dataframe(
-            pd.DataFrame(rows).style.format({
-                "Price In": "${:,.6f}",
-                "Price Out": "${:,.6f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No models configured yet. Use the form below to add one.")
-
-    st.divider()
-
-    # --- Load Model for Editing ---
-    if model_ids:
-        selected = st.selectbox(
-            "Load Model for Editing",
-            ["— New Model —"] + model_ids,
-            help="Pick an existing model to pre-fill the form, or choose '— New Model —' to add a fresh one.",
-        )
-    else:
-        selected = "— New Model —"
-
-    editing = selected != "— New Model —"
-    edit_obj: LLMModel | None = None
-    if editing:
-        edit_obj = next((m for m in models if m.id == selected), None)
-
-    st.subheader("Edit Model" if edit_obj else "Configure Model")
-
-    # --- Form ---
-    with st.form("model_config_form", clear_on_submit=False):
-        c1, c2 = st.columns(2)
-        with c1:
-            fm_id = st.text_input(
-                "Public Model ID",
-                value=edit_obj.id if edit_obj else "",
-                placeholder="gpt-4-turbo",
-                disabled=bool(edit_obj),
-            )
-            fm_litellm = st.text_input(
-                "LiteLLM Internal Name",
-                value=edit_obj.litellm_name if edit_obj else "",
-                placeholder="ollama/llama3",
-            )
-        with c2:
-            fm_price_in = st.number_input(
-                "Price / Input Token ($)",
-                value=edit_obj.price_in if edit_obj else 0.000001,
-                format="%.6f",
-                step=0.000001,
-            )
-            fm_price_out = st.number_input(
-                "Price / Output Token ($)",
-                value=edit_obj.price_out if edit_obj else 0.000002,
-                format="%.6f",
-                step=0.000001,
-            )
-
-        c3, c4 = st.columns(2)
-        with c3:
-            fm_api_base = st.text_input(
-                "API Base URL",
-                value=(edit_obj.api_base or "") if edit_obj else "",
-                placeholder="https://api.openai.com/v1",
-                help="Optional: endpoint URL for this specific provider. Leave empty to use the global default.",
-            )
-        with c4:
-            fm_api_key = st.text_input(
-                "Provider API Key",
-                value=(edit_obj.api_key or "") if edit_obj else "",
-                placeholder="sk-...",
-                type="password",
-                help="Optional: authentication key for this provider. Leave empty if not required.",
-            )
-
-        if st.form_submit_button("Save Configuration"):
-            final_id = edit_obj.id if edit_obj else fm_id.strip().lower().replace(" ", "-")
-            if not final_id or not fm_litellm.strip():
-                st.error("Model ID and LiteLLM Name are required.")
-            else:
-                if not edit_obj and final_id != fm_id.strip():
-                    st.info(f"Model ID normalized to `{final_id}` (lowercase, no spaces).")
-                payload = {
-                    "id": final_id,
-                    "litellm_name": fm_litellm.strip(),
-                    "price_in": fm_price_in,
-                    "price_out": fm_price_out,
-                    "api_base": fm_api_base.strip() or None,
-                    "api_key": fm_api_key.strip() or None,
-                }
-                try:
-                    resp = api_post("/admin/models", payload)
-                    if resp.ok:
-                        result = resp.json()
-                        st.success(f"Model `{result['model']}` **{result['action']}** successfully.")
-                        st.rerun()
-                    else:
-                        st.error(f"API Error: {resp.json().get('detail', resp.text)}")
-                except Exception as ex:
-                    st.error(f"Connection error: {ex}")

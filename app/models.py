@@ -25,7 +25,7 @@ class User(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     username: str = Field(index=True, unique=True)
     email: Optional[str] = None
-    balance: float = Field(default=0.00)  # Using float for SQLite simplicity, Decimal in Prod
+    balance: float = Field(default=0.00)
     is_active: bool = Field(default=True)
     organization: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -48,6 +48,21 @@ class APIKey(SQLModel, table=True):
     # Relationships
     user: User = Relationship(back_populates="api_keys")
 
+
+class LLMEndpoint(SQLModel, table=True):
+    """A provider endpoint (e.g. OpenAI, local Ollama, vLLM)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, description="Human-readable name, e.g. 'OpenAI', 'Local vLLM'")
+    base_url: str = Field(description="Provider API URL, e.g. 'https://api.openai.com/v1'")
+    api_key: Optional[str] = Field(default=None, description="Provider authentication key")
+    rpm_limit: Optional[int] = Field(default=None, description="Global requests-per-minute for this endpoint")
+    day_limit: Optional[int] = Field(default=None, description="Global requests-per-day for this endpoint")
+    is_active: bool = Field(default=True)
+
+    # Relationships
+    models: List["LLMModel"] = Relationship(back_populates="endpoint")
+
+
 class LLMModel(SQLModel, table=True):
     id: str = Field(primary_key=True, description="The public model ID, e.g., 'gpt-4o'")
     litellm_name: str = Field(description="The internal LiteLLM name")
@@ -57,8 +72,17 @@ class LLMModel(SQLModel, table=True):
     price_out: float = Field(default=0.0)
     is_active: bool = Field(default=True)
     fallback_model_id: Optional[str] = Field(default=None, foreign_key="llmmodel.id")
-    api_base: Optional[str] = Field(default=None, description="Per-model API base URL (overrides OLLAMA_API_BASE)")
-    api_key: Optional[str] = Field(default=None, description="Per-model provider API key")
+
+    # Per-model rate limit overrides (take precedence over endpoint limits)
+    rpm_limit: Optional[int] = Field(default=None, description="Model-specific RPM override")
+    day_limit: Optional[int] = Field(default=None, description="Model-specific daily limit override")
+
+    # FK to endpoint
+    endpoint_id: Optional[int] = Field(default=None, foreign_key="llmendpoint.id")
+
+    # Relationships
+    endpoint: Optional[LLMEndpoint] = Relationship(back_populates="models")
+
 
 class RequestLog(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)

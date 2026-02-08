@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   Users,
   KeyRound,
+  Globe,
   Cpu,
   ScrollText,
   LogOut,
@@ -13,6 +14,7 @@ const links = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/users", label: "Users", icon: Users },
   { to: "/keys", label: "API Keys", icon: KeyRound },
+  { to: "/endpoints", label: "Endpoints", icon: Globe },
   { to: "/models", label: "Models", icon: Cpu },
   { to: "/logs", label: "Logs", icon: ScrollText },
 ];

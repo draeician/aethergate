@@ -26,6 +26,16 @@ export interface GeneratedKey {
   user: string;
 }
 
+export interface LLMEndpoint {
+  id: number;
+  name: string;
+  base_url: string;
+  has_api_key: boolean;
+  rpm_limit: number | null;
+  day_limit: number | null;
+  is_active: boolean;
+}
+
 export interface LLMModel {
   id: string;
   litellm_name: string;
@@ -34,6 +44,10 @@ export interface LLMModel {
   price_in: number;
   price_out: number;
   is_active: boolean;
+  endpoint_id: number | null;
+  endpoint_name: string | null;
+  rpm_limit: number | null;
+  day_limit: number | null;
 }
 
 export interface RequestLogEntry {
@@ -57,6 +71,7 @@ export interface Stats {
   users: number;
   api_keys: number;
   models: number;
+  endpoints: number;
   total_requests: number;
   total_revenue: number;
   total_input_tokens: number;
