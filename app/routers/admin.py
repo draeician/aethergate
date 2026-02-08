@@ -7,7 +7,9 @@ All endpoints require the `x-admin-key` header matching MASTER_API_KEY.
 import hashlib
 import os
 import secrets
-from typing import Optional
+import uuid
+from datetime import datetime
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -357,4 +359,252 @@ async def get_stats(
         "total_revenue": float(total_revenue),
         "total_input_tokens": float(total_input),
         "total_output_tokens": float(total_output),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Backup & Restore
+# ---------------------------------------------------------------------------
+
+BACKUP_VERSION = 1
+
+
+@router.get("/backup/export")
+async def export_backup(
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Export all configuration data as a portable JSON snapshot."""
+
+    endpoints = (await session.exec(select(LLMEndpoint))).all()
+    models = (await session.exec(select(LLMModel))).all()
+    users = (await session.exec(select(User))).all()
+    keys = (await session.exec(select(APIKey))).all()
+
+    return {
+        "version": BACKUP_VERSION,
+        "timestamp": datetime.utcnow().isoformat(),
+        "data": {
+            "endpoints": [
+                {
+                    "id": ep.id, "name": ep.name, "base_url": ep.base_url,
+                    "api_key": ep.api_key, "rpm_limit": ep.rpm_limit,
+                    "day_limit": ep.day_limit, "is_active": ep.is_active,
+                }
+                for ep in endpoints
+            ],
+            "models": [
+                {
+                    "id": m.id, "litellm_name": m.litellm_name,
+                    "capability": m.capability.value,
+                    "billing_unit": m.billing_unit.value,
+                    "price_in": m.price_in, "price_out": m.price_out,
+                    "is_active": m.is_active,
+                    "fallback_model_id": m.fallback_model_id,
+                    "endpoint_id": m.endpoint_id,
+                    "rpm_limit": m.rpm_limit, "day_limit": m.day_limit,
+                }
+                for m in models
+            ],
+            "users": [
+                {
+                    "id": str(u.id), "username": u.username,
+                    "email": u.email, "balance": u.balance,
+                    "is_active": u.is_active, "organization": u.organization,
+                    "created_at": u.created_at.isoformat() if u.created_at else None,
+                }
+                for u in users
+            ],
+            "api_keys": [
+                {
+                    "id": str(k.id), "key_hash": k.key_hash,
+                    "key_prefix": k.key_prefix, "user_id": str(k.user_id),
+                    "name": k.name, "is_active": k.is_active,
+                    "log_content": k.log_content,
+                    "rate_limit_model": k.rate_limit_model,
+                    "allowed_capabilities": k.allowed_capabilities,
+                }
+                for k in keys
+            ],
+        },
+    }
+
+
+class BackupPayload(BaseModel):
+    version: int
+    timestamp: str
+    data: dict[str, Any]
+
+
+@router.post("/backup/import")
+async def import_backup(
+    body: BackupPayload,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Restore configuration from a backup snapshot (smart upsert, all-or-nothing)."""
+
+    if body.version != BACKUP_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported backup version {body.version} (expected {BACKUP_VERSION}).",
+        )
+
+    data = body.data
+    counts: dict[str, dict[str, int]] = {
+        "endpoints": {"created": 0, "updated": 0},
+        "models": {"created": 0, "updated": 0},
+        "users": {"created": 0, "updated": 0},
+        "api_keys": {"created": 0, "updated": 0},
+    }
+
+    # Map old endpoint IDs -> new endpoint IDs (in case auto-increment differs)
+    ep_id_map: dict[int, int] = {}
+
+    try:
+        # ---- Endpoints ----
+        for ep_data in data.get("endpoints", []):
+            old_id = ep_data.get("id")
+            existing = (await session.exec(
+                select(LLMEndpoint).where(LLMEndpoint.name == ep_data["name"])
+            )).first()
+
+            if existing:
+                existing.base_url = ep_data["base_url"]
+                existing.api_key = ep_data.get("api_key")
+                existing.rpm_limit = ep_data.get("rpm_limit")
+                existing.day_limit = ep_data.get("day_limit")
+                existing.is_active = ep_data.get("is_active", True)
+                session.add(existing)
+                counts["endpoints"]["updated"] += 1
+                if old_id is not None:
+                    ep_id_map[old_id] = existing.id
+            else:
+                ep = LLMEndpoint(
+                    name=ep_data["name"], base_url=ep_data["base_url"],
+                    api_key=ep_data.get("api_key"),
+                    rpm_limit=ep_data.get("rpm_limit"),
+                    day_limit=ep_data.get("day_limit"),
+                    is_active=ep_data.get("is_active", True),
+                )
+                session.add(ep)
+                await session.flush()
+                counts["endpoints"]["created"] += 1
+                if old_id is not None:
+                    ep_id_map[old_id] = ep.id
+
+        # ---- Models (after endpoints so FK mapping is ready) ----
+        for m_data in data.get("models", []):
+            # Resolve endpoint_id through the mapping
+            raw_ep_id = m_data.get("endpoint_id")
+            resolved_ep_id = ep_id_map.get(raw_ep_id, raw_ep_id) if raw_ep_id is not None else None
+
+            existing = (await session.exec(
+                select(LLMModel).where(LLMModel.id == m_data["id"])
+            )).first()
+
+            if existing:
+                existing.litellm_name = m_data["litellm_name"]
+                existing.capability = Capability(m_data.get("capability", "TEXT"))
+                existing.billing_unit = BillingUnit(m_data.get("billing_unit", "TOKEN"))
+                existing.price_in = m_data.get("price_in", 0.0)
+                existing.price_out = m_data.get("price_out", 0.0)
+                existing.is_active = m_data.get("is_active", True)
+                existing.fallback_model_id = m_data.get("fallback_model_id")
+                existing.endpoint_id = resolved_ep_id
+                existing.rpm_limit = m_data.get("rpm_limit")
+                existing.day_limit = m_data.get("day_limit")
+                session.add(existing)
+                counts["models"]["updated"] += 1
+            else:
+                model = LLMModel(
+                    id=m_data["id"], litellm_name=m_data["litellm_name"],
+                    capability=Capability(m_data.get("capability", "TEXT")),
+                    billing_unit=BillingUnit(m_data.get("billing_unit", "TOKEN")),
+                    price_in=m_data.get("price_in", 0.0),
+                    price_out=m_data.get("price_out", 0.0),
+                    is_active=m_data.get("is_active", True),
+                    fallback_model_id=m_data.get("fallback_model_id"),
+                    endpoint_id=resolved_ep_id,
+                    rpm_limit=m_data.get("rpm_limit"),
+                    day_limit=m_data.get("day_limit"),
+                )
+                session.add(model)
+                counts["models"]["created"] += 1
+
+        # ---- Users ----
+        for u_data in data.get("users", []):
+            user_id = uuid.UUID(u_data["id"])
+            existing = (await session.exec(
+                select(User).where(User.id == user_id)
+            )).first()
+
+            if existing:
+                existing.username = u_data["username"]
+                existing.email = u_data.get("email")
+                existing.balance = u_data.get("balance", 0.0)
+                existing.is_active = u_data.get("is_active", True)
+                existing.organization = u_data.get("organization")
+                session.add(existing)
+                counts["users"]["updated"] += 1
+            else:
+                created_at = (
+                    datetime.fromisoformat(u_data["created_at"])
+                    if u_data.get("created_at") else datetime.utcnow()
+                )
+                user = User(
+                    id=user_id, username=u_data["username"],
+                    email=u_data.get("email"),
+                    balance=u_data.get("balance", 0.0),
+                    is_active=u_data.get("is_active", True),
+                    organization=u_data.get("organization"),
+                    created_at=created_at,
+                )
+                session.add(user)
+                counts["users"]["created"] += 1
+
+        # ---- API Keys ----
+        for k_data in data.get("api_keys", []):
+            key_id = uuid.UUID(k_data["id"])
+            existing = (await session.exec(
+                select(APIKey).where(APIKey.id == key_id)
+            )).first()
+
+            if existing:
+                existing.key_hash = k_data["key_hash"]
+                existing.key_prefix = k_data["key_prefix"]
+                existing.user_id = uuid.UUID(k_data["user_id"])
+                existing.name = k_data.get("name", "default")
+                existing.is_active = k_data.get("is_active", True)
+                existing.log_content = k_data.get("log_content", True)
+                existing.rate_limit_model = k_data.get("rate_limit_model")
+                existing.allowed_capabilities = k_data.get("allowed_capabilities", [])
+                session.add(existing)
+                counts["api_keys"]["updated"] += 1
+            else:
+                api_key = APIKey(
+                    id=key_id, key_hash=k_data["key_hash"],
+                    key_prefix=k_data["key_prefix"],
+                    user_id=uuid.UUID(k_data["user_id"]),
+                    name=k_data.get("name", "default"),
+                    is_active=k_data.get("is_active", True),
+                    log_content=k_data.get("log_content", True),
+                    rate_limit_model=k_data.get("rate_limit_model"),
+                    allowed_capabilities=k_data.get("allowed_capabilities", []),
+                )
+                session.add(api_key)
+                counts["api_keys"]["created"] += 1
+
+        # All-or-nothing commit
+        await session.commit()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=f"Import failed — rolled back. Error: {e}")
+
+    return {
+        "status": "ok",
+        "restored": counts,
     }
