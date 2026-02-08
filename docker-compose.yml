@@ -7,7 +7,8 @@ services:
       - "8000:8000"
     volumes:
       # ✅ FIX: Use a named volume instead of a bind mount
-      - aethergate_data:/app/data
+      - /opt/aethergate/data:/app/data
+
       # Map the DB file path in the container to this volume
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
@@ -27,7 +28,7 @@ services:
       - "8501:8501"
     volumes:
       # ✅ FIX: Share the same named volume so it sees the same DB
-      - aethergate_data:/app/data
+      - /opt/aethergate/data:/app/data
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
       - DATABASE_URL_SYNC=sqlite:////app/data/aethergate.db
