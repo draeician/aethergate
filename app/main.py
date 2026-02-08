@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routers import proxy
+from app.routers import proxy, admin
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -13,8 +13,9 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Mount the Proxy Router
+# Mount Routers
 app.include_router(proxy.router)
+app.include_router(admin.router)
 
 @app.get("/health")
 async def health_check():
