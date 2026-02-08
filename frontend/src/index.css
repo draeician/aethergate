@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+/* AetherGate Dark Theme */
+:root {
+  --ag-bg: #0b0f1a;
+  --ag-surface: #111827;
+  --ag-surface-2: #1e293b;
+  --ag-border: #1e293b;
+  --ag-border-hover: #334155;
+  --ag-text: #e2e8f0;
+  --ag-text-muted: #94a3b8;
+  --ag-accent: #6366f1;
+  --ag-accent-hover: #818cf8;
+  --ag-success: #22c55e;
+  --ag-warning: #f59e0b;
+  --ag-danger: #ef4444;
+}
+
+body {
+  margin: 0;
+  background: var(--ag-bg);
+  color: var(--ag-text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--ag-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ag-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ag-border-hover);
+}

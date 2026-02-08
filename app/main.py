@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.routers import proxy, admin
 import uvicorn
 import os
@@ -11,6 +12,15 @@ app = FastAPI(
     title="AetherGate",
     description="High-Performance LLM Gateway",
     version="0.1.0"
+)
+
+# CORS — allow the frontend to reach the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3080").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Mount Routers
