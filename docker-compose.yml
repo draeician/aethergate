@@ -20,27 +20,29 @@ services:
       timeout: 5s
       retries: 3
 
-  dashboard:
-    container_name: aethergate-dashboard
-    build: .
-    command: >
-      streamlit run dashboard.py
-      --server.address 0.0.0.0
-      --server.port 8501
-      --server.enableCORS=false
-      --server.enableXsrfProtection=false
-      --server.baseUrlPath=admin
-    ports:
-      - "0.0.0.0:8501:8501"
-    volumes:
-      - /opt/aethergate/data:/app/data
-    environment:
-      - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
-      - API_URL=http://aethergate-api:8000
-      - MASTER_API_KEY=${ADMIN_KEY}
-    restart: unless-stopped
-    depends_on:
-      - api
+  # dashboard (Streamlit) — retired in favor of React frontend on :3080
+  # To restore: uncomment this block and run `docker compose up -d dashboard`
+  # dashboard:
+  #   container_name: aethergate-dashboard
+  #   build: .
+  #   command: >
+  #     streamlit run dashboard.py
+  #     --server.address 0.0.0.0
+  #     --server.port 8501
+  #     --server.enableCORS=false
+  #     --server.enableXsrfProtection=false
+  #     --server.baseUrlPath=admin
+  #   ports:
+  #     - "0.0.0.0:8501:8501"
+  #   volumes:
+  #     - /opt/aethergate/data:/app/data
+  #   environment:
+  #     - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
+  #     - API_URL=http://aethergate-api:8000
+  #     - MASTER_API_KEY=${ADMIN_KEY}
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - api
 
   frontend:
     container_name: aethergate-frontend
