@@ -179,14 +179,16 @@ async def delete_user(
     _: str = Depends(verify_master_key),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Hard-delete a user and cascade-delete their API keys.
-
-    Request logs are preserved (historical data) but the FK will dangle.
-    """
+    """Hard-delete a user, their API keys, and associated request logs."""
     uid = uuid.UUID(user_id)
     user = (await session.exec(select(User).where(User.id == uid))).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{user_id}' not found.")
+
+    # Cascade: delete request logs first (FK to both user and apikey)
+    logs = (await session.exec(select(RequestLog).where(RequestLog.user_id == uid))).all()
+    for log in logs:
+        await session.delete(log)
 
     # Cascade: delete all API keys belonging to this user
     keys = (await session.exec(select(APIKey).where(APIKey.user_id == uid))).all()
@@ -196,7 +198,7 @@ async def delete_user(
     username = user.username
     await session.delete(user)
     await session.commit()
-    return {"ok": True, "deleted": username, "keys_removed": len(keys)}
+    return {"ok": True, "deleted": username, "keys_removed": len(keys), "logs_removed": len(logs)}
 
 
 # ---------------------------------------------------------------------------
@@ -259,16 +261,21 @@ async def delete_key(
     _: str = Depends(verify_master_key),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Hard-delete an API key."""
+    """Hard-delete an API key and its associated request logs."""
     kid = uuid.UUID(key_id)
     api_key = (await session.exec(select(APIKey).where(APIKey.id == kid))).first()
     if not api_key:
         raise HTTPException(status_code=404, detail=f"Key '{key_id}' not found.")
 
+    # Cascade: delete request logs that reference this key
+    logs = (await session.exec(select(RequestLog).where(RequestLog.api_key_id == kid))).all()
+    for log in logs:
+        await session.delete(log)
+
     prefix = api_key.key_prefix
     await session.delete(api_key)
     await session.commit()
-    return {"ok": True, "deleted": prefix}
+    return {"ok": True, "deleted": prefix, "logs_removed": len(logs)}
 
 
 # ---------------------------------------------------------------------------
