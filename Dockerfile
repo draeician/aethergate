@@ -8,8 +8,10 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Install Python deps first (layer cache)
+# Pin numpy FIRST to prevent litellm/streamlit pulling numpy 2.x (x86-64-v2 only)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir "numpy==1.26.4" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy project
 COPY . .

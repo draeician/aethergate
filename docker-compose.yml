@@ -31,12 +31,13 @@ services:
       --server.enableXsrfProtection=false
       --server.baseUrlPath=admin
     ports:
-      - "8501:8501"
+      - "0.0.0.0:8501:8501"
     volumes:
       - /opt/aethergate/data:/app/data
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/aethergate.db
       - API_URL=http://aethergate-api:8000
+      - MASTER_API_KEY=${ADMIN_KEY}
     restart: unless-stopped
     depends_on:
       - api
