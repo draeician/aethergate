@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Cpu, RefreshCw, Plus, Pencil, Trash2, X, Check } from "lucide-react";
+import { Cpu, RefreshCw, Plus, Pencil, Trash2 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { listModels, listEndpoints, upsertModel, updateModel, deleteModel } from "../lib/api";
 import type { LLMModel, LLMEndpoint } from "../lib/types";
