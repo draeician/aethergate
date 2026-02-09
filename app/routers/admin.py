@@ -278,6 +278,50 @@ async def delete_key(
     return {"ok": True, "deleted": prefix, "logs_removed": len(logs)}
 
 
+@router.post("/keys/{key_id}/rotate")
+async def rotate_key(
+    key_id: str,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Rotate an API key: generate a new secret, preserve name/user/settings."""
+    kid = uuid.UUID(key_id)
+    old_key = (await session.exec(
+        select(APIKey).options(selectinload(APIKey.user)).where(APIKey.id == kid)
+    )).first()
+    if not old_key:
+        raise HTTPException(status_code=404, detail=f"Key '{key_id}' not found.")
+
+    # Generate new secret
+    raw_key = f"sk-{secrets.token_urlsafe(32)}"
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    # Create replacement key with same metadata
+    new_api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=raw_key[:8],
+        user_id=old_key.user_id,
+        name=old_key.name,
+        is_active=old_key.is_active,
+        log_content=old_key.log_content,
+        rate_limit_model=old_key.rate_limit_model,
+        allowed_capabilities=old_key.allowed_capabilities,
+    )
+
+    # Delete old key (logs keep the old api_key_id as a dangling FK)
+    await session.delete(old_key)
+    session.add(new_api_key)
+    await session.commit()
+    await session.refresh(new_api_key)
+
+    return {
+        "key": raw_key,
+        "key_prefix": new_api_key.key_prefix,
+        "name": new_api_key.name,
+        "user": old_key.user.username,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Endpoint (Provider) CRUD
 # ---------------------------------------------------------------------------
