@@ -61,6 +61,30 @@ export function createUser(
   });
 }
 
+export function updateUser(
+  key: string,
+  userId: string,
+  data: {
+    balance?: number;
+    is_active?: boolean;
+    organization?: string | null;
+    email?: string | null;
+  }
+) {
+  return apiFetch<User>(`/admin/users/${userId}`, key, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteUser(key: string, userId: string) {
+  return apiFetch<{ ok: boolean; deleted: string; keys_removed: number }>(
+    `/admin/users/${userId}`,
+    key,
+    { method: "DELETE" }
+  );
+}
+
 // ---- Keys ----
 
 export function listKeys(key: string, username?: string) {
@@ -76,6 +100,14 @@ export function createKey(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+export function deleteKey(key: string, keyId: string) {
+  return apiFetch<{ ok: boolean; deleted: string }>(
+    `/admin/keys/${keyId}`,
+    key,
+    { method: "DELETE" }
+  );
 }
 
 // ---- Endpoints (Providers) ----
@@ -101,6 +133,33 @@ export function upsertEndpoint(
   );
 }
 
+export function updateEndpoint(
+  key: string,
+  endpointId: number,
+  data: {
+    name?: string;
+    base_url?: string;
+    api_key?: string | null;
+    rpm_limit?: number | null;
+    day_limit?: number | null;
+    is_active?: boolean;
+  }
+) {
+  return apiFetch<{ id: number; name: string; action: string }>(
+    `/admin/endpoints/${endpointId}`,
+    key,
+    { method: "PUT", body: JSON.stringify(data) }
+  );
+}
+
+export function deleteEndpoint(key: string, endpointId: number) {
+  return apiFetch<{ ok: boolean; deleted: string; models_unlinked: number }>(
+    `/admin/endpoints/${endpointId}`,
+    key,
+    { method: "DELETE" }
+  );
+}
+
 // ---- Models ----
 
 export function listModels(key: string) {
@@ -123,6 +182,34 @@ export function upsertModel(
     "/admin/models",
     key,
     { method: "POST", body: JSON.stringify(data) }
+  );
+}
+
+export function updateModel(
+  key: string,
+  modelId: string,
+  data: {
+    litellm_name?: string;
+    price_in?: number;
+    price_out?: number;
+    endpoint_id?: number | null;
+    rpm_limit?: number | null;
+    day_limit?: number | null;
+    is_active?: boolean;
+  }
+) {
+  return apiFetch<{ model: string; action: string }>(
+    `/admin/models/${encodeURIComponent(modelId)}`,
+    key,
+    { method: "PUT", body: JSON.stringify(data) }
+  );
+}
+
+export function deleteModel(key: string, modelId: string) {
+  return apiFetch<{ ok: boolean; deleted: string }>(
+    `/admin/models/${encodeURIComponent(modelId)}`,
+    key,
+    { method: "DELETE" }
   );
 }
 

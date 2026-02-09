@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { KeyRound, RefreshCw, Copy, Check } from "lucide-react";
+import { KeyRound, RefreshCw, Copy, Check, Trash2 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { listKeys, createKey, listUsers } from "../lib/api";
+import { listKeys, createKey, deleteKey, listUsers } from "../lib/api";
 import type { APIKeyInfo, GeneratedKey, User } from "../lib/types";
 
 export default function KeysPage() {
@@ -17,6 +17,10 @@ export default function KeysPage() {
   const [newKey, setNewKey] = useState<GeneratedKey | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
+
+  // Delete confirm state
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     if (!adminKey) return;
@@ -59,6 +63,21 @@ export default function KeysPage() {
     navigator.clipboard.writeText(newKey.key);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleDelete(keyId: string) {
+    if (!adminKey) return;
+    setDeleting(true);
+    try {
+      await deleteKey(adminKey, keyId);
+      setConfirmDeleteId(null);
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+      setConfirmDeleteId(null);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   return (
@@ -141,6 +160,24 @@ export default function KeysPage() {
         </form>
       )}
 
+      {/* Delete Confirmation */}
+      {confirmDeleteId && (
+        <div className="bg-[var(--ag-danger)]/10 border border-[var(--ag-danger)]/30 rounded-xl p-5 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-[var(--ag-danger)]">
+              Delete API key "{keys.find((k) => k.id === confirmDeleteId)?.key_prefix}..."?
+            </p>
+            <p className="text-xs text-[var(--ag-text-muted)] mt-1">This cannot be undone. The key will immediately stop working.</p>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmDeleteId(null)} disabled={deleting} className="px-3 py-1.5 rounded-lg border border-[var(--ag-border)] text-sm hover:border-[var(--ag-border-hover)] transition-colors">Cancel</button>
+            <button onClick={() => handleDelete(confirmDeleteId)} disabled={deleting} className="px-3 py-1.5 rounded-lg bg-[var(--ag-danger)] text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50">
+              {deleting ? "Deleting..." : "Confirm Delete"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {error && <p className="text-[var(--ag-danger)] text-sm">{error}</p>}
 
       {/* Table */}
@@ -156,6 +193,7 @@ export default function KeysPage() {
                 <th className="text-left px-5 py-3 font-medium">User</th>
                 <th className="text-center px-5 py-3 font-medium">Status</th>
                 <th className="text-left px-5 py-3 font-medium">Rate Limit</th>
+                <th className="text-right px-5 py-3 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -170,11 +208,20 @@ export default function KeysPage() {
                     </span>
                   </td>
                   <td className="px-5 py-3 text-[var(--ag-text-muted)] font-mono">{k.rate_limit ?? "—"}</td>
+                  <td className="px-5 py-3 text-right">
+                    <button
+                      onClick={() => setConfirmDeleteId(k.id)}
+                      className="p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:text-[var(--ag-danger)] hover:bg-[var(--ag-danger)]/10 transition-colors"
+                      title="Delete key"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
                 </tr>
               ))}
               {keys.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-5 py-8 text-center text-[var(--ag-text-muted)]">
+                  <td colSpan={6} className="px-5 py-8 text-center text-[var(--ag-text-muted)]">
                     No keys generated yet.
                   </td>
                 </tr>
