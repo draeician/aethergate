@@ -101,14 +101,6 @@ export default function ModelsPage() {
     load();
   }, [load]);
 
-  // ---- Endpoint lookup map ----
-
-  const endpointMap = useMemo(() => {
-    const map = new Map<number, LLMEndpoint>();
-    for (const ep of endpoints) map.set(ep.id, ep);
-    return map;
-  }, [endpoints]);
-
   // ---- Filter + Sort + Paginate ----
 
   const filtered = useMemo(() => {
