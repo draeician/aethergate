@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { UserPlus, RefreshCw } from "lucide-react";
+import { UserPlus, RefreshCw, Pencil, Trash2, X, Check } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { listUsers, createUser } from "../lib/api";
+import { listUsers, createUser, updateUser, deleteUser } from "../lib/api";
 import type { User } from "../lib/types";
 
 export default function UsersPage() {
@@ -13,6 +13,17 @@ export default function UsersPage() {
   const [balance, setBalance] = useState("10.00");
   const [error, setError] = useState("");
   const [formError, setFormError] = useState("");
+
+  // Edit state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editBalance, setEditBalance] = useState("");
+  const [editOrg, setEditOrg] = useState("");
+  const [editError, setEditError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Delete confirm state
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     if (!adminKey) return;
@@ -40,6 +51,64 @@ export default function UsersPage() {
       load();
     } catch (err: any) {
       setFormError(err.message);
+    }
+  }
+
+  function startEdit(u: User) {
+    setEditingId(u.id);
+    setEditBalance(u.balance.toString());
+    setEditOrg(u.organization ?? "");
+    setEditError("");
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditError("");
+  }
+
+  async function handleToggleActive(u: User) {
+    if (!adminKey) return;
+    setSaving(true);
+    try {
+      await updateUser(adminKey, u.id, { is_active: !u.is_active });
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveEdit(u: User) {
+    if (!adminKey) return;
+    setSaving(true);
+    setEditError("");
+    try {
+      await updateUser(adminKey, u.id, {
+        balance: parseFloat(editBalance),
+        organization: editOrg.trim() || null,
+      });
+      setEditingId(null);
+      await load();
+    } catch (err: any) {
+      setEditError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(userId: string) {
+    if (!adminKey) return;
+    setDeleting(true);
+    try {
+      await deleteUser(adminKey, userId);
+      setConfirmDeleteId(null);
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+      setConfirmDeleteId(null);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -103,6 +172,34 @@ export default function UsersPage() {
         </form>
       )}
 
+      {/* Delete Confirmation */}
+      {confirmDeleteId && (
+        <div className="bg-[var(--ag-danger)]/10 border border-[var(--ag-danger)]/30 rounded-xl p-5 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-[var(--ag-danger)]">
+              Delete user "{users.find((u) => u.id === confirmDeleteId)?.username}"?
+            </p>
+            <p className="text-xs text-[var(--ag-text-muted)] mt-1">This will also remove all their API keys. Request logs are preserved.</p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirmDeleteId(null)}
+              disabled={deleting}
+              className="px-3 py-1.5 rounded-lg border border-[var(--ag-border)] text-sm hover:border-[var(--ag-border-hover)] transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => handleDelete(confirmDeleteId)}
+              disabled={deleting}
+              className="px-3 py-1.5 rounded-lg bg-[var(--ag-danger)] text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {deleting ? "Deleting..." : "Confirm Delete"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Error */}
       {error && <p className="text-[var(--ag-danger)] text-sm">{error}</p>}
 
@@ -119,29 +216,110 @@ export default function UsersPage() {
                 <th className="text-center px-5 py-3 font-medium">Status</th>
                 <th className="text-left px-5 py-3 font-medium">Organization</th>
                 <th className="text-left px-5 py-3 font-medium">Created</th>
+                <th className="text-right px-5 py-3 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.id} className="border-b border-[var(--ag-border)] last:border-b-0 hover:bg-[var(--ag-surface-2)] transition-colors">
-                  <td className="px-5 py-3 font-medium">{u.username}</td>
-                  <td className={`px-5 py-3 text-right font-mono ${u.balance > 0 ? "text-[var(--ag-success)]" : "text-[var(--ag-danger)]"}`}>
-                    ${u.balance.toFixed(4)}
-                  </td>
-                  <td className="px-5 py-3 text-center">
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${u.is_active ? "bg-[var(--ag-success)]/15 text-[var(--ag-success)]" : "bg-[var(--ag-danger)]/15 text-[var(--ag-danger)]"}`}>
-                      {u.is_active ? "Active" : "Inactive"}
-                    </span>
-                  </td>
-                  <td className="px-5 py-3 text-[var(--ag-text-muted)]">{u.organization ?? "—"}</td>
-                  <td className="px-5 py-3 text-[var(--ag-text-muted)]">
-                    {new Date(u.created_at).toLocaleDateString()}
-                  </td>
-                </tr>
+                editingId === u.id ? (
+                  /* Inline edit row */
+                  <tr key={u.id} className="border-b border-[var(--ag-border)] bg-[var(--ag-accent)]/5">
+                    <td className="px-5 py-3 font-medium">{u.username}</td>
+                    <td className="px-5 py-2 text-right">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editBalance}
+                        onChange={(e) => setEditBalance(e.target.value)}
+                        className="w-28 px-2 py-1 rounded bg-[var(--ag-bg)] border border-[var(--ag-border)] text-sm text-right font-mono focus:outline-none focus:border-[var(--ag-accent)]"
+                      />
+                    </td>
+                    <td className="px-5 py-3 text-center">
+                      <button
+                        onClick={() => handleToggleActive(u)}
+                        disabled={saving}
+                        className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium cursor-pointer transition-colors ${u.is_active ? "bg-[var(--ag-success)]/15 text-[var(--ag-success)] hover:bg-[var(--ag-danger)]/15 hover:text-[var(--ag-danger)]" : "bg-[var(--ag-danger)]/15 text-[var(--ag-danger)] hover:bg-[var(--ag-success)]/15 hover:text-[var(--ag-success)]"}`}
+                      >
+                        {u.is_active ? "Active" : "Inactive"}
+                      </button>
+                    </td>
+                    <td className="px-5 py-2">
+                      <input
+                        value={editOrg}
+                        onChange={(e) => setEditOrg(e.target.value)}
+                        placeholder="—"
+                        className="w-full px-2 py-1 rounded bg-[var(--ag-bg)] border border-[var(--ag-border)] text-sm focus:outline-none focus:border-[var(--ag-accent)]"
+                      />
+                    </td>
+                    <td className="px-5 py-3 text-[var(--ag-text-muted)]">
+                      {new Date(u.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        {editError && <span className="text-xs text-[var(--ag-danger)] mr-2">{editError}</span>}
+                        <button
+                          onClick={() => handleSaveEdit(u)}
+                          disabled={saving}
+                          className="p-1.5 rounded-lg text-[var(--ag-success)] hover:bg-[var(--ag-success)]/10 transition-colors disabled:opacity-50"
+                          title="Save"
+                        >
+                          <Check size={15} />
+                        </button>
+                        <button
+                          onClick={cancelEdit}
+                          className="p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:bg-[var(--ag-surface-2)] transition-colors"
+                          title="Cancel"
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  /* Normal row */
+                  <tr key={u.id} className="border-b border-[var(--ag-border)] last:border-b-0 hover:bg-[var(--ag-surface-2)] transition-colors">
+                    <td className="px-5 py-3 font-medium">{u.username}</td>
+                    <td className={`px-5 py-3 text-right font-mono ${u.balance > 0 ? "text-[var(--ag-success)]" : "text-[var(--ag-danger)]"}`}>
+                      ${u.balance.toFixed(4)}
+                    </td>
+                    <td className="px-5 py-3 text-center">
+                      <button
+                        onClick={() => handleToggleActive(u)}
+                        disabled={saving}
+                        className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium cursor-pointer transition-colors ${u.is_active ? "bg-[var(--ag-success)]/15 text-[var(--ag-success)] hover:bg-[var(--ag-danger)]/15 hover:text-[var(--ag-danger)]" : "bg-[var(--ag-danger)]/15 text-[var(--ag-danger)] hover:bg-[var(--ag-success)]/15 hover:text-[var(--ag-success)]"}`}
+                        title={u.is_active ? "Click to deactivate" : "Click to activate"}
+                      >
+                        {u.is_active ? "Active" : "Inactive"}
+                      </button>
+                    </td>
+                    <td className="px-5 py-3 text-[var(--ag-text-muted)]">{u.organization ?? "—"}</td>
+                    <td className="px-5 py-3 text-[var(--ag-text-muted)]">
+                      {new Date(u.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => startEdit(u)}
+                          className="p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:text-[var(--ag-text)] hover:bg-[var(--ag-surface-2)] transition-colors"
+                          title="Edit"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteId(u.id)}
+                          className="p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:text-[var(--ag-danger)] hover:bg-[var(--ag-danger)]/10 transition-colors"
+                          title="Delete"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
               ))}
               {users.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-5 py-8 text-center text-[var(--ag-text-muted)]">
+                  <td colSpan={6} className="px-5 py-8 text-center text-[var(--ag-text-muted)]">
                     No users yet. Create one above.
                   </td>
                 </tr>

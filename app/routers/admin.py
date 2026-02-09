@@ -173,6 +173,32 @@ async def update_user(
     }
 
 
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Hard-delete a user and cascade-delete their API keys.
+
+    Request logs are preserved (historical data) but the FK will dangle.
+    """
+    uid = uuid.UUID(user_id)
+    user = (await session.exec(select(User).where(User.id == uid))).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found.")
+
+    # Cascade: delete all API keys belonging to this user
+    keys = (await session.exec(select(APIKey).where(APIKey.user_id == uid))).all()
+    for k in keys:
+        await session.delete(k)
+
+    username = user.username
+    await session.delete(user)
+    await session.commit()
+    return {"ok": True, "deleted": username, "keys_removed": len(keys)}
+
+
 # ---------------------------------------------------------------------------
 # Key Endpoints
 # ---------------------------------------------------------------------------
@@ -225,6 +251,24 @@ async def list_keys(
         }
         for k in keys
     ]
+
+
+@router.delete("/keys/{key_id}")
+async def delete_key(
+    key_id: str,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Hard-delete an API key."""
+    kid = uuid.UUID(key_id)
+    api_key = (await session.exec(select(APIKey).where(APIKey.id == kid))).first()
+    if not api_key:
+        raise HTTPException(status_code=404, detail=f"Key '{key_id}' not found.")
+
+    prefix = api_key.key_prefix
+    await session.delete(api_key)
+    await session.commit()
+    return {"ok": True, "deleted": prefix}
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +361,33 @@ async def update_endpoint(
         "id": ep.id, "name": ep.name, "base_url": ep.base_url,
         "action": "updated",
     }
+
+
+@router.delete("/endpoints/{endpoint_id}")
+async def delete_endpoint(
+    endpoint_id: int,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Hard-delete an endpoint. Models referencing it are unlinked (endpoint_id=null)."""
+    ep = (await session.exec(
+        select(LLMEndpoint).where(LLMEndpoint.id == endpoint_id)
+    )).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail=f"Endpoint ID {endpoint_id} not found.")
+
+    # Unlink any models pointing to this endpoint
+    models = (await session.exec(
+        select(LLMModel).where(LLMModel.endpoint_id == endpoint_id)
+    )).all()
+    for m in models:
+        m.endpoint_id = None
+        session.add(m)
+
+    name = ep.name
+    await session.delete(ep)
+    await session.commit()
+    return {"ok": True, "deleted": name, "models_unlinked": len(models)}
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +503,24 @@ async def update_model(
     session.add(model)
     await session.commit()
     return {"model": model.id, "action": "updated"}
+
+
+@router.delete("/models/{model_id}")
+async def delete_model(
+    model_id: str,
+    _: str = Depends(verify_master_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Hard-delete a model."""
+    model = (await session.exec(
+        select(LLMModel).where(LLMModel.id == model_id)
+    )).first()
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found.")
+
+    await session.delete(model)
+    await session.commit()
+    return {"ok": True, "deleted": model_id}
 
 
 # ---------------------------------------------------------------------------
