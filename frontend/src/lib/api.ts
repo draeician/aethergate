@@ -110,6 +110,14 @@ export function deleteKey(key: string, keyId: string) {
   );
 }
 
+export function rotateKey(key: string, keyId: string) {
+  return apiFetch<GeneratedKey>(
+    `/admin/keys/${keyId}/rotate`,
+    key,
+    { method: "POST" }
+  );
+}
+
 // ---- Endpoints (Providers) ----
 
 export function listEndpoints(key: string) {

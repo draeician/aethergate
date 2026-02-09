@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { KeyRound, RefreshCw, Copy, Check, Trash2 } from "lucide-react";
+import { KeyRound, RefreshCw, Copy, Check, Trash2, RotateCw } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { listKeys, createKey, deleteKey, listUsers } from "../lib/api";
+import { listKeys, createKey, deleteKey, rotateKey, listUsers } from "../lib/api";
 import type { APIKeyInfo, GeneratedKey, User } from "../lib/types";
 
 export default function KeysPage() {
@@ -21,6 +21,9 @@ export default function KeysPage() {
   // Delete confirm state
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Rotate state
+  const [rotating, setRotating] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!adminKey) return;
@@ -77,6 +80,20 @@ export default function KeysPage() {
       setConfirmDeleteId(null);
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function handleRotate(keyId: string) {
+    if (!adminKey) return;
+    setRotating(keyId);
+    try {
+      const result = await rotateKey(adminKey, keyId);
+      setNewKey(result);
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRotating(null);
     }
   }
 
@@ -209,13 +226,23 @@ export default function KeysPage() {
                   </td>
                   <td className="px-5 py-3 text-[var(--ag-text-muted)] font-mono">{k.rate_limit ?? "—"}</td>
                   <td className="px-5 py-3 text-right">
-                    <button
-                      onClick={() => setConfirmDeleteId(k.id)}
-                      className="p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:text-[var(--ag-danger)] hover:bg-[var(--ag-danger)]/10 transition-colors"
-                      title="Delete key"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => handleRotate(k.id)}
+                        disabled={rotating === k.id}
+                        className={`p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:text-[var(--ag-accent)] hover:bg-[var(--ag-accent)]/10 transition-colors disabled:opacity-50 ${rotating === k.id ? "animate-spin" : ""}`}
+                        title="Rotate key"
+                      >
+                        <RotateCw size={14} />
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(k.id)}
+                        className="p-1.5 rounded-lg text-[var(--ag-text-muted)] hover:text-[var(--ag-danger)] hover:bg-[var(--ag-danger)]/10 transition-colors"
+                        title="Delete key"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
