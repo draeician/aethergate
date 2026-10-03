@@ -1,368 +1,381 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-003
+AGV2-004
 
 ## Title
-Containerized v2 runtime and PostgreSQL persistence foundation
+First real OpenAI-compatible inference through AetherGate v2
 
 ## Ownership
-Primary: platform/migrations/observability/testing  
-Coordinating: contracts, identity/auth, provider catalog and routing
+Primary: provider adapters + OpenAI API surface  
+Coordinating: contracts, catalog/routing, platform/testing
 
 ## Before You Start
 
 1. Work on branch `v2`.
-2. Run `git pull --ff-only origin v2` before making changes.
-3. Read, in this order:
+2. Run `git pull --ff-only origin v2`.
+3. Read:
    - `AGENTS.md`
    - `project_spec.md`
    - `docs/development/agent-handoff.md`
-   - `docs/development/agent-workstreams.md`
-   - `docs/architecture/v2-overview.md`
+   - `docs/development/current-task.md`
+   - `docs/contracts/openai-compatibility-baseline.md`
+   - `docs/contracts/domain-model.md`
    - `docs/architecture/provider-model.md`
    - `docs/architecture/security.md`
-   - `docs/migrations/v1-to-v2.md`
-   - `docs/contracts/domain-model.md`
-   - `docs/contracts/admin-v1-foundation.md`
-4. Preserve the contracts established by AGV2-002 unless a concrete persistence need exposes a real
-   defect. If a contract must change, document why in the handoff and update its tests/docs.
-5. Do not commit unrelated untracked support files.
-6. Do not modify or delete the legacy v1 `app/` or `frontend/src/` code in this task.
-
-## User Requirement: Container-First Runtime
-
-AetherGate v2 is expected to run in Docker. The nomnom host is the current development/test bed.
-
-Do **not** guess or hard-code a host port.
-
-Rules:
-
-- A stable container-internal API port is fine (for example 8000).
-- The development stack must bind the API only to loopback by default.
-- The host port must be dynamically allocated/discovered at runtime rather than committed as a
-  fixed number.
-- Prefer letting Docker allocate a free host port and then query/report the actual mapping.
-- If the installed Docker Compose version cannot express an ephemeral host-port mapping, implement
-  a helper that discovers a free loopback port immediately before startup and verifies the result.
-- Any fallback port-selection helper must inspect both host listeners and Docker-published ports
-  before choosing, and must verify the final mapping after startup.
-- PostgreSQL must not publish its port to the host by default.
-- A developer command must print the resulting `AETHERGATE_BASE_URL` after the stack starts.
-- Do not commit a nomnom-specific chosen port.
-- Do not bind the development API to `0.0.0.0` by default.
-
-Update `project_spec.md` so containerized deployment is recorded as project direction and
-dynamic/non-guessed development host-port allocation is recorded as the local-test convention.
+   - `docs/architecture/scheduler.md`
+4. Verify the current official LiteLLM SDK documentation before relying on retry, streaming, provider
+   naming, or custom-api-base behavior.
+5. Do not commit unrelated local/untracked support files.
+6. Do not modify or delete the legacy v1 `app/` or `frontend/src/` implementation.
 
 ## Goal
 
-Create the first runnable v2 application shell and its authoritative PostgreSQL persistence
-foundation inside Docker.
+Send real inference through the containerized v2 gateway on nomnom.
 
-At the end of this task, we should be able to:
-
-1. build the v2 container image;
-2. start PostgreSQL + the v2 API on nomnom;
-3. discover the actual free host port used for the API;
-4. call liveness/readiness endpoints;
-5. prove readiness fails when PostgreSQL is unavailable;
-6. run the v2 migrations from an empty PostgreSQL database;
-7. run the contract/unit tests inside the container;
-8. persist and retrieve the core configuration entities needed by the next inference task.
-
-This task does **not** send inference to a model yet.
-
-## Docker Layout
-
-Do not overwrite the legacy v1 Docker/runtime files yet.
-
-Create a clearly isolated v2 development/deployment layout, for example:
+At task completion, the following path must work with an existing real inference backend:
 
 ```text
-deploy/v2/
-├── Dockerfile
-├── compose.yaml
-└── ...
+official OpenAI client
+    -> AetherGate v2 container
+    -> public ModelAlias
+    -> RouteBinding
+    -> Endpoint / ProviderAccount / Provider
+    -> LiteLLM provider adapter
+    -> existing nomnom inference backend
+    -> AetherGate
+    -> client
 ```
 
-A different equivalent layout is acceptable if it is clearer.
+Both non-streaming and streaming Chat Completions must succeed.
+
+This is intentionally a **direct-dispatch milestone**. It does not implement the durable scheduler,
+queueing, quota reservations, retries, or fallback policy.
+
+## Important: Do Not Guess Ports or Backend Details
+
+The nomnom host is the development test bed.
+
+Before configuring a real backend:
+
+1. inspect current listeners;
+2. inspect currently running Docker/Podman containers;
+3. inspect existing local developer diagnostic files as read-only hints if useful
+   (`ollama_direct.py`, `diagnose.py`, `inspect_routing.py`, etc.);
+4. probe candidate existing local inference services safely;
+5. determine an actual reachable backend and model;
+6. determine how the AetherGate container can reach it.
+
+Do not assume Ollama, llama.cpp, a particular port, a particular model, or a particular container name.
+
+Do not start, stop, reconfigure, or replace an existing inference service just to make the test pass.
+
+Do not commit discovered host ports, credentials, or nomnom-specific backend addresses into normal
+application configuration.
+
+The AetherGate API itself must continue using the dynamic loopback host-port behavior from AGV2-003.
+
+## Fix the Provider-Model Contract Gap
+
+AGV2-003 exposed a concrete missing concept: a `RouteBinding` identifies the public alias and endpoint,
+but does not identify the provider-facing model/deployment name that must actually be invoked.
+
+Fix this explicitly.
+
+Preferred direction:
+
+- add a provider-facing/upstream model identifier to `RouteBinding` (for example
+  `upstream_model`);
+- keep it separate from the public `ModelAlias.name`;
+- treat the value as provider-specific opaque configuration;
+- never derive it implicitly from the public alias unless an administrator explicitly configured the
+  same string.
+
+Update:
+
+- domain contract;
+- admin v1 DTO foundation;
+- persistence model/repository;
+- catalog resolution result;
+- docs;
+- tests.
+
+Do **not** rewrite migration `0001`, because it has already been applied on nomnom.
+
+Add migration `0002` for the new persisted field.
+
+If safe NOT NULL migration cannot be done without inventing a value for possible existing rows, add
+the column compatibly and make the application reject unresolved routes until the value is
+configured. Document the later tightening migration.
+
+Do not introduce a larger ProviderModel entity unless the concrete implementation proves it is
+necessary.
+
+## Provider Adapter Boundary
+
+Create a provider-adapter module under `src/aethergate/` with a narrow internal interface.
+
+Implement the first adapter using the LiteLLM Python SDK.
 
 Requirements:
 
-- multi-stage image if useful;
-- Python 3.12+;
-- non-root runtime user;
-- deterministic dependency installation;
-- healthcheck(s) where appropriate;
-- API service;
-- PostgreSQL service;
-- persistent named PostgreSQL volume;
-- no committed credentials;
-- PostgreSQL reachable only on the Compose network by default;
-- API loopback-only from the host by default;
-- no fixed host API port.
+- pin/range LiteLLM deliberately in `pyproject.toml`;
+- call a single explicitly resolved route;
+- AetherGate chooses the endpoint, account, provider and upstream model before entering the adapter;
+- do not use LiteLLM Router for AetherGate routing;
+- do not enable LiteLLM fallbacks;
+- disable LiteLLM/provider retry loops for this milestone so one admitted AetherGate execution maps
+  to one upstream attempt;
+- use explicit timeouts;
+- support non-streaming and streaming Chat Completions;
+- support the actual provider kind discovered on nomnom;
+- structure provider-kind translation so additional providers can be added without changing API
+  routers;
+- resolve provider credential material only through `SecretResolver`;
+- never log or return provider secret material;
+- never let inference clients supply `api_base`, provider credentials, arbitrary headers, or an
+  upstream destination.
 
-The Compose project must not collide with the existing legacy v1 stack's service/container names.
+LiteLLM currently supports async completions and streaming, and its own Router can perform retry and
+fallback behavior. AetherGate must not delegate scheduler/retry ownership to that Router.
 
-## Runtime Configuration
+## Egress / Destination Guard
 
-Add a typed v2 settings layer under `src/aethergate/`.
+The upstream destination comes only from administrator-controlled persisted configuration, never
+from the inference request.
 
-Requirements:
-
-- environment-driven configuration;
-- fail clearly on missing required production/runtime settings;
-- no insecure placeholder secrets;
-- database URL assembled/read safely;
-- explicit environment/mode;
-- settings testable without Docker;
-- secrets excluded from repr/logging where applicable.
-
-Use a maintained settings library compatible with Pydantic v2 if needed.
-
-## FastAPI Application Shell
-
-Create a v2 FastAPI application entrypoint under `src/aethergate/`.
-
-At minimum provide:
-
-- `GET /health/live`
-- `GET /health/ready`
-
-Semantics:
-
-- liveness reports only process/application liveness;
-- readiness checks PostgreSQL connectivity and returns non-ready if the authoritative database is
-  unavailable;
-- no fake "always healthy" readiness response;
-- structured JSON;
-- do not leak database URLs/credentials/errors.
-
-Do not implement OpenAI inference routes or admin CRUD routes in this task.
-
-## PostgreSQL Persistence
-
-Use PostgreSQL as the v2 authoritative data store.
-
-Use a modern async persistence stack appropriate for FastAPI/Python 3.12, with version ranges/pins
-recorded in `pyproject.toml`.
-
-Create persistence models/repositories for the configuration/identity subset needed to resolve a
-future inference request:
-
-- Project
-- Principal
-- ApiCredential metadata
-- SecretRef metadata
-- Provider
-- ProviderAccount
-- Endpoint
-- QuotaGroup
-- ModelAlias
-- RouteBinding
+Add a minimal explicit destination policy before provider dispatch.
 
 Requirements:
 
-- persistence models are separate from domain contracts;
-- repositories return/accept domain or explicit persistence DTOs, not ORM objects escaping upward;
-- stable opaque IDs, not public auto-increment integers;
-- foreign keys and uniqueness constraints where identity requires them;
-- timestamps stored timezone-aware;
-- no plaintext provider/API secret material in PostgreSQL;
-- no monetary floats;
-- no direct database manipulation from routers;
-- no `create_all()` startup schema mutation.
+- only supported schemes;
+- reject URL userinfo;
+- reject known metadata/link-local destinations;
+- use an explicit configured allowlist for upstream hosts in this milestone;
+- private/LAN targets may be explicitly allowlisted for nomnom development;
+- redirects must not escape the approved destination policy;
+- do not create a permissive "allow all" production default.
 
-Do not create scheduler/execution/ledger tables yet unless strictly required by a migration-framework
-constraint. Those belong to later workstreams.
+The exact enterprise egress implementation can be strengthened later, but the first real inference
+path must not establish an arbitrary SSRF primitive.
 
-## Secret Reference Foundation
+## OpenAI-Compatible API Surface
 
-The database may store secret-reference metadata, but never provider secret material.
+Implement:
 
-Establish an internal secret-resolution interface and one clearly marked **development/test**
-environment-variable resolver so the next task can resolve a provider credential without storing it
-in PostgreSQL.
+- `GET /v1/models`
+- `GET /v1/models/{model}`
+- `POST /v1/chat/completions`
 
-Requirements:
+### Models
 
-- secret value never appears in read DTOs, logs, reprs, migrations, or test snapshots;
-- resolver takes a SecretRef/reference and returns material only inside the trusted runtime;
-- architecture allows a later production backend such as Vault/KMS/envelope encryption;
-- environment backend is explicitly not treated as the final enterprise secret backend.
+- publish active public model aliases, not provider-facing model names;
+- do not expose endpoint/provider secrets or internal routing data;
+- unknown model retrieval returns an OpenAI-compatible structured error.
 
-Do not build a full secret-management product in this task.
+### Chat Completions
 
-## Catalog Resolution Service
-
-Implement a small service/repository path that can resolve an active public `ModelAlias` to its
-active `RouteBinding`, `Endpoint`, `ProviderAccount`, and `Provider`.
+Support enough of the pinned compatibility contract to work with the current official OpenAI Python
+SDK and the real nomnom backend.
 
 Requirements:
 
-- unknown alias => explicit not-found/domain error;
-- inactive alias/route/endpoint/account/provider => explicit unavailable/domain error;
-- no "unknown model -> default Ollama" fallback;
-- no provider call yet;
-- no routing load-balancing policy yet;
-- if multiple active routes exist and selection policy is not yet defined, reject/return an explicit
-  ambiguity instead of silently choosing.
+- public `model` resolves through `aethergate.catalog`;
+- unknown alias: explicit model-not-found response;
+- inactive/unavailable route: explicit safe error;
+- ambiguous route: explicit safe error;
+- no unknown-model fallback;
+- forward supported semantic generation parameters instead of silently dropping them;
+- client transport/provider-control fields are rejected and never forwarded;
+- unsupported semantic features must fail explicitly rather than being silently ignored;
+- keep LiteLLM parameter dropping disabled unless a provider-specific, documented compatibility
+  adapter explicitly handles the difference;
+- JSON responses are actual JSON objects;
+- response `model` should preserve the public AetherGate model alias rather than leaking an internal
+  provider/deployment name;
+- generate a gateway request ID and return it consistently;
+- preserve upstream request ID separately when available;
+- map provider failures to structured safe errors without credentials or internal URLs.
 
-This service is the configuration boundary the next inference task will use.
+Do not implement `/v1/responses` or embeddings in this task. They remain part of the v2 target but
+come after this first real inference milestone.
 
-## Migrations
+## Streaming
 
-Introduce a real migration framework for v2, preferably Alembic unless a concrete technical reason
-requires another choice.
+Implement proper SSE for `stream=true`.
 
 Requirements:
 
-- initial migration creates the v2 persistence schema above;
-- migration is deterministic from an empty PostgreSQL database;
-- include downgrade where practical;
-- no handwritten ad-hoc migration script as the primary mechanism;
-- application startup does not silently mutate schema;
-- provide an explicit documented migration command.
+- valid `data: <json>\n\n` events;
+- correct terminating behavior for Chat Completions;
+- no custom queue-status events;
+- public alias in emitted model fields;
+- client disconnect/cancellation closes the upstream stream promptly;
+- no retry after content has begun streaming;
+- upstream error after headers/stream start is handled without inventing a new HTTP status.
 
-Do not implement the v1 SQLite -> v2 data migration yet. This task only establishes the v2 migration
-system and empty-schema baseline.
+Test with the official OpenAI Python client, not curl alone.
 
-## Developer Commands
+## Temporary Development Authentication Policy
 
-Provide a small, documented set of commands/scripts for nomnom development:
+Do not invent the final identity/auth design inside this task.
 
-- build v2 images;
-- start v2 PostgreSQL + API;
-- discover/print the actual API host port/base URL;
-- run migrations;
-- run tests inside the container;
-- stop the stack;
-- remove test data/volume only via an explicitly destructive command.
+For this first nomnom smoke test, inference may be unauthenticated **only** under an explicit
+development-only setting and only while the Compose API remains loopback-bound.
 
-Prefer a single helper entrypoint such as `scripts/dev/v2` with subcommands if it keeps the workflow
-simple.
+Requirements:
 
-The start command must not require the user to manually guess a free port.
+- the bypass must be explicit, not accidental;
+- it must be impossible to enable the bypass in production mode;
+- production startup/config validation must reject an insecure inference-auth bypass;
+- document this as temporary;
+- do not treat it as the final API-key implementation.
 
-After successful startup it must print something equivalent to:
+If the existing contracts make it straightforward to add correct scoped API credential
+authentication without expanding this task substantially, that is acceptable, but do not design an
+entire identity system here.
 
-```text
-AETHERGATE_BASE_URL=http://127.0.0.1:<actual-docker-assigned-port>/v1
-AETHERGATE_HEALTH_URL=http://127.0.0.1:<actual-docker-assigned-port>/health/ready
-```
+## Development Seed / Test Configuration
 
-Do not assume what `<actual-docker-assigned-port>` is.
+Because the admin API is not implemented yet, provide a clearly development-only, idempotent way to
+seed the minimum inference configuration through the service/repository layer.
 
-## Tests
+It must accept values via environment/arguments rather than hard-code nomnom specifics:
+
+- provider kind;
+- provider-facing model identifier;
+- public model alias;
+- endpoint/base destination;
+- optional secret-reference/environment variable name;
+- allowed upstream host.
+
+It may manipulate the v2 database only as explicitly documented development/bootstrap tooling.
+Normal production administration will later go through `/admin/v1`.
+
+Do not commit actual provider keys.
+
+## Real Nomnom Smoke Test — Required
+
+The task is not complete merely because mocked tests pass.
+
+After implementation:
+
+1. inspect current nomnom listener/container state;
+2. identify an existing real inference backend and model;
+3. start AetherGate v2 using `scripts/dev/v2 up`;
+4. obtain the dynamically allocated AetherGate host port using the existing helper;
+5. run migrations through `0002`;
+6. seed the discovered backend/model through the dev seed path;
+7. verify `GET /v1/models`;
+8. use the current official OpenAI Python SDK against the printed AetherGate base URL;
+9. complete one real non-streaming Chat Completion;
+10. complete one real streaming Chat Completion and consume it to completion;
+11. verify the public alias, not the internal upstream model name, is exposed to the client;
+12. verify an unknown alias does not hit the backend;
+13. verify a client cannot override the upstream destination/credential;
+14. stop the AetherGate v2 stack cleanly when verification is finished.
+
+Record the discovered backend type/model and the AetherGate dynamically allocated test port in the
+handoff if non-sensitive. Do not record credentials.
+
+If no existing reachable inference backend can be found, do not guess or create one. Implement and
+verify everything else, then mark the task BLOCKED in the handoff with the exact non-secret
+discovery evidence. Do not falsely claim the inference milestone succeeded.
+
+## Automated Tests
 
 Add deterministic tests for at least:
 
-1. settings validation;
-2. liveness;
-3. readiness success with PostgreSQL;
-4. readiness failure when DB is unavailable;
-5. migration from empty PostgreSQL;
-6. repository create/read behavior for the core persisted entities;
-7. no plaintext secret field is persisted;
-8. model-alias route resolution;
-9. unknown alias rejection;
-10. inactive resource rejection;
-11. ambiguous multi-route rejection;
-12. API container runs as non-root;
-13. Compose does not publish PostgreSQL to the host;
-14. Compose does not contain a fixed host API port.
+1. route binding requires/handles the upstream model identifier correctly;
+2. migration `0002`;
+3. model listing exposes only public active aliases;
+4. model retrieval;
+5. unknown model;
+6. inactive route/resource;
+7. ambiguous route;
+8. provider adapter receives resolved endpoint/model rather than client-controlled destination;
+9. LiteLLM retries/fallback are disabled by AetherGate adapter configuration;
+10. client transport override fields are rejected;
+11. non-streaming response shape;
+12. streaming SSE shape and termination;
+13. public alias replacement in responses/chunks;
+14. provider error mapping/redaction;
+15. destination allowlist/metadata-address rejection;
+16. development auth bypass cannot be enabled in production;
+17. client cancellation closes an upstream stream;
+18. official OpenAI Python SDK interoperability against an in-process/mock upstream.
 
-Tests requiring PostgreSQL should run through the containerized test workflow rather than expecting a
-developer-installed host PostgreSQL.
+Keep tests offline except the separately documented required nomnom smoke test.
 
 ## Documentation
 
-Update/create as appropriate:
+Update/create as needed:
 
-- `project_spec.md`
-- `docs/architecture/v2-overview.md`
 - `docs/architecture/provider-model.md`
-- `docs/migrations/v1-to-v2.md`
-- `docs/development/README.md` or equivalent v2 Docker developer instructions
+- `docs/contracts/domain-model.md`
+- `docs/contracts/openai-compatibility-baseline.md`
+- `docs/development/README.md`
 
-Keep documentation concise and executable.
+Clearly state that this milestone directly dispatches and **does not yet queue**.
 
-Do not modify the dated architecture audit.
+Do not modify the dated audit.
 
 ## Out of Scope
 
 Do not implement:
 
-- OpenAI inference endpoints;
-- LiteLLM/provider inference calls;
-- scheduler queue/dispatch;
+- durable scheduler/queue;
 - quota reservation;
+- concurrency slots;
+- retries/fallback orchestration;
 - accounting settlement;
-- OIDC/session authentication;
-- production secret backend;
+- full OIDC/session system;
 - admin CRUD API;
-- React changes;
-- v1-to-v2 data conversion.
+- web console changes;
+- `/v1/responses`;
+- embeddings;
+- v1 SQLite migration.
 
-## Verification on nomnom
+## Verification
 
-Before committing, execute the real Docker workflow on the current host.
+Before committing:
 
-At minimum:
-
-1. inspect current listener/Docker port state before startup;
-2. build the v2 image;
-3. start the v2 stack without choosing a hard-coded host port;
-4. capture the actual host port Docker assigned;
-5. verify liveness;
-6. verify readiness;
-7. verify PostgreSQL is not host-published;
-8. run migrations;
-9. run the test suite inside the container;
-10. restart the stack and verify persisted schema/data survives;
-11. stop the stack cleanly.
-
-Record the **actual commands and summarized results** in `docs/development/agent-handoff.md`.
-Recording the dynamically assigned test port in the handoff is fine; do not encode it into committed
-configuration.
-
-Also run:
-
-- `git diff --check`
-- lint checks;
-- complete diff review;
-- secret scan required by repository policy.
+- full unit/contract test suite;
+- containerized tests;
+- ruff/lint checks;
+- `git diff --check`;
+- repository secret scan;
+- confirm `app/` and `frontend/src/` untouched;
+- confirm audit unchanged;
+- complete the real nomnom non-stream + stream smoke test if a backend is available.
 
 ## Handoff
 
-At the end, update:
+Update `docs/development/agent-handoff.md` with:
 
-`docs/development/agent-handoff.md`
-
-Include:
-
-- branch;
-- starting commit;
+- branch and starting commit;
 - implementation commit(s);
-- Docker image/Compose layout;
-- actual dynamically allocated nomnom test port;
-- migration status;
-- persisted entities;
+- provider adapter boundary;
+- upstream-model contract/migration result;
+- discovered non-sensitive nomnom backend type/model;
+- dynamically allocated AetherGate host port;
+- real non-streaming inference result;
+- real streaming inference result;
+- official OpenAI SDK test result;
 - verification commands/results;
 - decisions/deferred items;
 - risks/issues;
-- one recommended next step.
+- exactly one recommended next step.
 
-Do not include secrets or large logs.
+Do not include credentials, secret values, or large logs.
 
 ## Commit and Push
 
-Commit all task work on branch `v2` using conventional commits.
+Commit all work on branch `v2` using conventional commits.
 
-A reasonable primary commit message is:
+Suggested primary message:
 
-`feat(platform): add containerized v2 runtime and persistence`
+`feat(inference): add first v2 chat completion path`
 
 A separate handoff-only follow-up commit is allowed.
 
@@ -370,4 +383,6 @@ A separate handoff-only follow-up commit is allowed.
 
 Never push directly to `main`.
 
-The task is not complete until `origin/v2` contains the completed work and updated handoff.
+The task is complete only when `origin/v2` contains the work and updated handoff. A successful
+real nomnom inference smoke test is required unless the handoff explicitly records a genuine
+environmental blocker.
