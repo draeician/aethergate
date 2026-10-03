@@ -54,4 +54,6 @@ Image/audio are advertised only after their routes and adapters pass contract te
 
 - Exact schema for the provider capability/limit profile (fields, granularity).
 - Whether shared quota groups are modeled as their own entities or as account-level attributes.
-- Resale/billing-margin structure, if ever required (isolated capability).
+- The operating/commercial model (internal access, project budgets, showback/chargeback, prepaid
+  balances, reseller access, or combinations). This is deferred, not settled: do not assume prepaid
+  billing is superseded — see `project_spec.md` §Accounting, pricing, and commercial model.

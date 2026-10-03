@@ -75,3 +75,7 @@ The audit deliberately leaves these open; do not assume them:
 - Precise fairness/reordering policy for head-of-line blocking (must be explicit, not silent).
 - Concrete performance targets and percentile goals (not established by the source-only review).
 - Whether long-lived asynchronous jobs are ever introduced (a separately documented extension API).
+- The final operating/commercial model (internal company access, project budgets, showback/chargeback,
+  prepaid balances, or reseller access, singly or combined). The primitives are settled; which model
+  is deployed is deferred — see `project_spec.md` §Accounting, pricing, and commercial model. A
+  positive balance is not a universal authorization requirement, and prepaid billing remains possible.

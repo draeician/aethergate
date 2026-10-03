@@ -109,6 +109,31 @@ service/repository/model/tests:
   has been delivered. (Settled)
 - Correctness must hold with multiple API and worker processes. (Settled)
 
+## Accounting, pricing, and commercial model
+
+### Settled primitives
+
+AetherGate v2 must build the accounting, authorization, quota, budget, project, principal, and
+usage-control primitives needed to support multiple operating models. A positive monetary balance
+is **not** a universal authorization requirement, and the primitives must not foreclose prepaid
+billing. (Settled)
+
+These are separate concepts and are modeled separately (Settled):
+
+- **Authorization / entitlement** — whether a principal may use a resource at all.
+- **Quota / capacity policy** — limits on throughput/capacity (requests, tokens, concurrency).
+- **Budget policy** — optional spending caps/allowances applied to a project or principal.
+- **Usage accounting** — authoritative recording of measured usage.
+- **Pricing** — immutable price snapshots and how usage maps to amounts.
+- **Settlement / billing** — turning priced usage into charges, balances, or invoices.
+
+### Deferred: final operating/commercial model
+
+The final operating/commercial model is **intentionally deferred**. It may later include, singly or
+in combination: internal company access, project budgets, showback/chargeback, prepaid balances, and
+reseller/commercial access. Do not assume any one of these is the target, and do not remove the
+ability to implement prepaid billing later. (Deferred)
+
 ## Security requirements
 
 - OIDC-backed named identities, role/resource authorization, company MFA policy. (Settled)
