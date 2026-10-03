@@ -98,4 +98,3 @@ def test_price_fields_use_decimal_not_float():
             effective_from=_ts(),
         )
 
-
