@@ -1,0 +1,53 @@
+name: aethergate-v2
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/v2/Dockerfile
+    image: aethergate-v2:local
+    container_name: aethergate-v2-api
+    environment:
+      AETHERGATE_ENV: dev
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: aethergate
+      POSTGRES_USER: aethergate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/v2/.env or the environment}
+    ports:
+      # Loopback-only, ephemeral host port. Docker picks a free port; never
+      # hard-code a fixed host port here.
+      - "127.0.0.1::8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - aethergate.healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aethergate-v2-postgres
+    environment:
+      POSTGRES_DB: aethergate
+      POSTGRES_USER: aethergate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/v2/.env or the environment}
+    volumes:
+      - aethergate-v2-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aethergate -d aethergate"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+
+volumes:
+  aethergate-v2-pgdata:

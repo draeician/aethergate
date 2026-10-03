@@ -7,6 +7,17 @@ Living document. Derived from the audit. Distinguish **settled** / **direction**
 - Move from SQLModel/SQLite + `create_all()` + ad-hoc scripts to PostgreSQL with versioned,
   framework-managed migrations. (Direction)
 - Migrations are explicit and reversible where practical. (Settled)
+- Alembic is the migration framework. The v2 schema baseline lives under
+  `src/aethergate/migrations/` (revision `0001`, deterministic from an empty PostgreSQL database,
+  with a downgrade). Application startup does not mutate schema. (Direction)
+
+### v2 migration command
+
+```text
+scripts/dev/v2 migrate
+# equivalent: docker compose (project aethergate-v2) run --rm --no-deps api \
+#   alembic -c src/aethergate/migrations/alembic.ini upgrade head
+```
 
 ## What the v1 schema holds today (audit evidence)
 
@@ -43,7 +54,8 @@ Living document. Derived from the audit. Distinguish **settled** / **direction**
 
 ## Deferred
 
-- Exact migration framework and revision-graph ownership (the revision graph is a shared area;
-  changes go through the integrator).
+- Revision-graph ownership conventions (the revision graph is a shared area; changes go through the
+  integrator).
+- The v1 SQLite -> v2 data conversion (this task only establishes the empty-schema baseline).
 - Reconciliation strategy for v1 rows that cannot be mapped unambiguously (e.g., accounts merged
   by URL in old data).

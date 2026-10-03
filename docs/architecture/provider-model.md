@@ -42,6 +42,15 @@ Image/audio are advertised only after their routes and adapters pass contract te
 - Approved egress destinations are enforced; intended private LAN ranges are allowed explicitly,
   while metadata endpoints, DNS rebinding, and redirect escapes are blocked. (Settled)
 
+## Resolution boundary (implemented)
+
+`aethergate.catalog` resolves an active public `ModelAlias` to its single active `RouteBinding`,
+`Endpoint`, `ProviderAccount`, and `Provider`. Unknown aliases raise a not-found error, inactive
+alias/route/endpoint/account/provider raise an explicit unavailable error, and multiple active
+routes with no selection policy raise an explicit ambiguity error — there is no silent default or
+"unknown model -> Ollama" fallback. This is the configuration boundary the next inference task
+consumes. (Direction)
+
 ## Provider feedback
 
 - Provider-specific token reservation and reset-window semantics are captured in the provider

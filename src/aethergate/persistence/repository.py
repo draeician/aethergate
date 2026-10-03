@@ -1,0 +1,299 @@
+"""Repositories mapping ORM rows to domain entities (and back).
+
+These functions accept/return domain entities from ``aethergate.domain``; ORM
+objects never escape this module.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aethergate.domain import entities as domain
+from aethergate.domain.enums import Capability, PrincipalKind
+from aethergate.domain.ids import (
+    ApiCredentialId,
+    EndpointId,
+    ModelAliasId,
+    PrincipalId,
+    ProjectId,
+    ProviderAccountId,
+    ProviderId,
+    QuotaGroupId,
+    RouteBindingId,
+    SecretRefId,
+)
+from aethergate.persistence import models
+
+
+def _capabilities(values: list | None) -> tuple[Capability, ...]:
+    return tuple(Capability(v) for v in (values or []))
+
+
+# ---------------------------------------------------------------------------
+# Identity / access
+# ---------------------------------------------------------------------------
+
+
+def _project_to_domain(row: models.Project) -> domain.Project:
+    return domain.Project(
+        id=ProjectId(row.id), name=row.name, is_active=row.is_active
+    )
+
+
+async def create_project(session: AsyncSession, entity: domain.Project) -> domain.Project:
+    row = models.Project(id=str(entity.id), name=entity.name, is_active=entity.is_active)
+    session.add(row)
+    await session.flush()
+    return _project_to_domain(row)
+
+
+async def get_project(session: AsyncSession, project_id: ProjectId) -> domain.Project | None:
+    row = await session.get(models.Project, str(project_id))
+    return _project_to_domain(row) if row else None
+
+
+def _secret_ref_to_domain(row: models.SecretRef) -> domain.SecretRef:
+    return domain.SecretRef(
+        id=SecretRefId(row.id), name=row.name, created_at=row.created_at
+    )
+
+
+async def create_secret_ref(
+    session: AsyncSession, entity: domain.SecretRef
+) -> domain.SecretRef:
+    row = models.SecretRef(id=str(entity.id), name=entity.name)
+    session.add(row)
+    await session.flush()
+    await session.refresh(row)
+    return _secret_ref_to_domain(row)
+
+
+async def get_secret_ref(
+    session: AsyncSession, ref_id: SecretRefId
+) -> domain.SecretRef | None:
+    row = await session.get(models.SecretRef, str(ref_id))
+    return _secret_ref_to_domain(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Catalog / routing
+# ---------------------------------------------------------------------------
+
+
+def _provider_to_domain(row: models.Provider) -> domain.Provider:
+    return domain.Provider(
+        id=ProviderId(row.id),
+        kind=row.kind,
+        name=row.name,
+        capabilities=_capabilities(row.capabilities),
+        is_active=row.is_active,
+    )
+
+
+async def create_provider(session: AsyncSession, entity: domain.Provider) -> domain.Provider:
+    row = models.Provider(
+        id=str(entity.id),
+        kind=entity.kind,
+        name=entity.name,
+        capabilities=[c.value for c in entity.capabilities],
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _provider_to_domain(row)
+
+
+async def get_provider(session: AsyncSession, provider_id: ProviderId) -> domain.Provider | None:
+    row = await session.get(models.Provider, str(provider_id))
+    return _provider_to_domain(row) if row else None
+
+
+def _provider_account_to_domain(row: models.ProviderAccount) -> domain.ProviderAccount:
+    return domain.ProviderAccount(
+        id=ProviderAccountId(row.id),
+        provider_id=ProviderId(row.provider_id),
+        name=row.name,
+        external_account_id=row.external_account_id,
+        secret_ref_id=SecretRefId(row.secret_ref_id) if row.secret_ref_id else None,
+        is_active=row.is_active,
+    )
+
+
+async def create_provider_account(
+    session: AsyncSession, entity: domain.ProviderAccount
+) -> domain.ProviderAccount:
+    row = models.ProviderAccount(
+        id=str(entity.id),
+        provider_id=str(entity.provider_id),
+        name=entity.name,
+        external_account_id=entity.external_account_id,
+        secret_ref_id=str(entity.secret_ref_id) if entity.secret_ref_id else None,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _provider_account_to_domain(row)
+
+
+async def get_provider_account(
+    session: AsyncSession, account_id: ProviderAccountId
+) -> domain.ProviderAccount | None:
+    row = await session.get(models.ProviderAccount, str(account_id))
+    return _provider_account_to_domain(row) if row else None
+
+
+def _endpoint_to_domain(row: models.Endpoint) -> domain.Endpoint:
+    return domain.Endpoint(
+        id=EndpointId(row.id),
+        provider_account_id=ProviderAccountId(row.provider_account_id),
+        name=row.name,
+        base_destination=row.base_destination,
+        is_active=row.is_active,
+    )
+
+
+async def create_endpoint(session: AsyncSession, entity: domain.Endpoint) -> domain.Endpoint:
+    row = models.Endpoint(
+        id=str(entity.id),
+        provider_account_id=str(entity.provider_account_id),
+        name=entity.name,
+        base_destination=entity.base_destination,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _endpoint_to_domain(row)
+
+
+async def get_endpoint(session: AsyncSession, endpoint_id: EndpointId) -> domain.Endpoint | None:
+    row = await session.get(models.Endpoint, str(endpoint_id))
+    return _endpoint_to_domain(row) if row else None
+
+
+def _model_alias_to_domain(row: models.ModelAlias) -> domain.ModelAlias:
+    return domain.ModelAlias(
+        id=ModelAliasId(row.id),
+        name=row.name,
+        capabilities=_capabilities(row.capabilities),
+        is_active=row.is_active,
+    )
+
+
+async def create_model_alias(
+    session: AsyncSession, entity: domain.ModelAlias
+) -> domain.ModelAlias:
+    row = models.ModelAlias(
+        id=str(entity.id),
+        name=entity.name,
+        capabilities=[c.value for c in entity.capabilities],
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _model_alias_to_domain(row)
+
+
+async def get_model_alias_by_name(
+    session: AsyncSession, name: str
+) -> domain.ModelAlias | None:
+    result = await session.execute(
+        select(models.ModelAlias).where(models.ModelAlias.name == name)
+    )
+    row = result.scalar_one_or_none()
+    return _model_alias_to_domain(row) if row else None
+
+
+def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
+    return domain.RouteBinding(
+        id=RouteBindingId(row.id),
+        model_alias_id=ModelAliasId(row.model_alias_id),
+        endpoint_id=EndpointId(row.endpoint_id),
+        provider_account_id=ProviderAccountId(row.provider_account_id),
+        quota_group_id=QuotaGroupId(row.quota_group_id) if row.quota_group_id else None,
+        is_active=row.is_active,
+    )
+
+
+async def create_route_binding(
+    session: AsyncSession, entity: domain.RouteBinding
+) -> domain.RouteBinding:
+    row = models.RouteBinding(
+        id=str(entity.id),
+        model_alias_id=str(entity.model_alias_id),
+        endpoint_id=str(entity.endpoint_id),
+        provider_account_id=str(entity.provider_account_id),
+        quota_group_id=str(entity.quota_group_id) if entity.quota_group_id else None,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _route_binding_to_domain(row)
+
+
+async def list_route_bindings(
+    session: AsyncSession, model_alias_id: ModelAliasId
+) -> list[domain.RouteBinding]:
+    result = await session.execute(
+        select(models.RouteBinding).where(
+            models.RouteBinding.model_alias_id == str(model_alias_id)
+        )
+    )
+    return [_route_binding_to_domain(r) for r in result.scalars().all()]
+
+
+def _principal_to_domain(row: models.Principal) -> domain.Principal:
+    return domain.Principal(
+        id=PrincipalId(row.id),
+        project_id=ProjectId(row.project_id),
+        kind=PrincipalKind(row.kind),
+        name=row.name,
+        is_active=row.is_active,
+    )
+
+
+async def create_principal(session: AsyncSession, entity: domain.Principal) -> domain.Principal:
+    row = models.Principal(
+        id=str(entity.id),
+        project_id=str(entity.project_id),
+        kind=entity.kind.value,
+        name=entity.name,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _principal_to_domain(row)
+
+
+async def get_principal(
+    session: AsyncSession, principal_id: PrincipalId
+) -> domain.Principal | None:
+    row = await session.get(models.Principal, str(principal_id))
+    return _principal_to_domain(row) if row else None
+
+
+def _api_credential_to_domain(row: models.ApiCredential) -> domain.ApiCredential:
+    return domain.ApiCredential(
+        id=ApiCredentialId(row.id),
+        project_id=ProjectId(row.project_id),
+        principal_id=PrincipalId(row.principal_id) if row.principal_id else None,
+        name=row.name,
+        secret_ref_id=SecretRefId(row.secret_ref_id),
+        is_active=row.is_active,
+    )
+
+
+async def create_api_credential(
+    session: AsyncSession, entity: domain.ApiCredential
+) -> domain.ApiCredential:
+    row = models.ApiCredential(
+        id=str(entity.id),
+        project_id=str(entity.project_id),
+        principal_id=str(entity.principal_id) if entity.principal_id else None,
+        name=entity.name,
+        secret_ref_id=str(entity.secret_ref_id),
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _api_credential_to_domain(row)

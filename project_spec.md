@@ -59,6 +59,12 @@ not a hosted multi-company SaaS tenancy model. (Settled)
   explicit scheduler layer for ordering and quota reservation. No transaction stays open while
   waiting for inference. Caching/wake-up infrastructure is added only after measurement, and is
   never a second quota authority. (Direction)
+- **Deployment/runtime:** Container-first. The v2 application runs in Docker via `deploy/v2/`, with a
+  multi-stage image, a non-root runtime user, a stable container-internal API port, and PostgreSQL
+  reachable only on the Compose network. (Direction)
+- **Local development convention:** on the nomnom test bed the API binds only to loopback, and its
+  host port is allocated dynamically by Docker and discovered at runtime — never committed as a fixed
+  number and never bound to `0.0.0.0` by default. PostgreSQL is not host-published. (Direction)
 
 ## Major architectural domains
 

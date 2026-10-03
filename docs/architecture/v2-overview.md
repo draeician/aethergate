@@ -29,6 +29,21 @@ authority (PostgreSQL) rather than splitting correctness across SQL and Redis. C
 infrastructure is added only after measurement and is never a second quota authority. No database
 transaction remains open while waiting for inference. (Direction)
 
+## Runtime and operations
+
+- The v2 application runs container-first from `deploy/v2/` (Dockerfile + Compose), with a non-root
+  runtime user, a stable container-internal API port, and PostgreSQL reachable only on the Compose
+  network. See `docs/development/README.md` for the developer commands. (Direction)
+- Configuration is environment-driven through `aethergate.config.Settings`; the database URL is
+  assembled safely from `DATABASE_URL` or `POSTGRES_*` parts, and secrets are excluded from `repr`/
+  logs. (Direction)
+- `GET /health/live` reports process liveness; `GET /health/ready` checks PostgreSQL connectivity and
+  returns non-ready when the authoritative database is unavailable, without leaking URLs/credentials. (Settled)
+- Schema is applied by Alembic migrations (never `create_all()` at startup). (Direction)
+- Provider credentials are stored by reference (`SecretRef`) and resolved only inside the trusted
+  runtime via a `SecretResolver`; the environment resolver is a development/test convenience, not the
+  production secret backend. (Direction)
+
 ## Domain model (see provider-model.md)
 
 Organization/project, user/service-account principal, scoped API credential, provider, provider

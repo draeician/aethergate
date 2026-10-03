@@ -1,0 +1,57 @@
+"""Static checks over the v2 persistence models (no database required)."""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+
+from aethergate.persistence import models
+from aethergate.persistence.base import Base
+
+
+def test_secret_ref_has_no_material_column():
+    columns = {c.name for c in models.SecretRef.__table__.columns}
+    for forbidden in (
+        "value",
+        "material",
+        "secret",
+        "plaintext",
+        "token",
+        "password",
+        "credential",
+        "key",
+    ):
+        assert forbidden not in columns
+
+
+def test_accounts_reference_secret_not_store_it():
+    credential_columns = {c.name for c in models.ApiCredential.__table__.columns}
+    account_columns = {c.name for c in models.ProviderAccount.__table__.columns}
+    assert "secret_ref_id" in credential_columns
+    assert "secret_ref_id" in account_columns
+    for columns in (credential_columns, account_columns):
+        assert "secret_value" not in columns
+        assert "api_key" not in columns
+
+
+def test_all_models_use_opaque_string_primary_keys():
+    for table in Base.metadata.sorted_tables:
+        for column in table.primary_key.columns:
+            assert isinstance(column.type, sa.String), (
+                f"{table.name}.{column.name} is not a String primary key"
+            )
+
+
+def test_expected_tables_registered():
+    names = set(Base.metadata.tables)
+    assert {
+        "projects",
+        "principals",
+        "secret_refs",
+        "api_credentials",
+        "providers",
+        "provider_accounts",
+        "endpoints",
+        "quota_groups",
+        "model_aliases",
+        "route_bindings",
+    } <= names
