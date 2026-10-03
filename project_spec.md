@@ -113,10 +113,10 @@ service/repository/model/tests:
 
 ### Settled primitives
 
-AetherGate v2 must build the accounting, authorization, quota, budget, project, principal, and
-usage-control primitives needed to support multiple operating models. A positive monetary balance
-is **not** a universal authorization requirement, and the primitives must not foreclose prepaid
-billing. (Settled)
+AetherGate v2 must build the accounting, authorization, quota, budget, project, principal, usage,
+pricing, and settlement primitives needed to support multiple operating models. A positive monetary
+balance is **not** a universal authorization requirement, and the primitives must not foreclose
+prepaid billing. (Settled)
 
 These are separate concepts and are modeled separately (Settled):
 
@@ -130,8 +130,8 @@ These are separate concepts and are modeled separately (Settled):
 ### Deferred: final operating/commercial model
 
 The final operating/commercial model is **intentionally deferred**. It may later include, singly or
-in combination: internal company access, project budgets, showback/chargeback, prepaid balances, and
-reseller/commercial access. Do not assume any one of these is the target, and do not remove the
+in combination: internal company access, project budgets, showback, chargeback, prepaid balances,
+and reseller/commercial access. Do not assume any one of these is the target, and do not remove the
 ability to implement prepaid billing later. (Deferred)
 
 ## Security requirements
