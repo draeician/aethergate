@@ -39,6 +39,34 @@ These override any generic boilerplate below when they conflict.
 - Distinguish settled requirements from current direction and deferred decisions as marked in
   `project_spec.md`; do not promote deferred decisions to settled.
 
+## Long-task / compaction recovery protocol
+
+These rules are authoritative for work launched from `docs/development/current-task.md` and override
+generic interactive workflow boilerplate below.
+
+- `docs/development/current-task.md` is the canonical active assignment.
+- `docs/development/agent-handoff.md` is the canonical previous-task state.
+- After any context compaction, summarization, restart, or uncertainty about what remains to do,
+  immediately re-read:
+  1. `AGENTS.md`
+  2. `project_spec.md`
+  3. `docs/development/current-task.md`
+  4. `docs/development/agent-handoff.md`
+  Then inspect `git status` / recent history and continue the task from repo state.
+- Do not ask the user to choose among commit/push/stop options when the active task already specifies
+  the required completion behavior.
+- If the active task says to commit and push to `origin/v2`, do that automatically after required
+  verification succeeds. Never push directly to `main`.
+- Do not invoke the generic `commit` shortcut/version-bump workflow merely because a scoped v2 task
+  is ready to commit. Follow the active task's explicit conventional-commit instructions instead.
+- Before asking the user a question, re-read the active task. If the answer or safe default is already
+  specified there, continue without interrupting the user.
+- If verification is incomplete, do not present completion choices. Continue verification. If a
+  genuine blocker remains after best effort, record it in `agent-handoff.md`, commit/push the
+  truthful state if the task permits, and stop.
+- A task is complete only when its stated completion criteria are satisfied, the handoff is updated,
+  commits are created, and required pushes are present on `origin/v2`.
+
 ## Common Principles
 - Don't assume. Don't hide confusion. Surface tradeoffs.
 - Minimum code that solves the problem. Nothing speculative.
