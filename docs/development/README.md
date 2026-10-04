@@ -127,9 +127,12 @@ docker compose --project-directory deploy/v2 --file deploy/v2/compose.yaml \
   --project <project-id> --principal <principal-id> --name smoke
 ```
 
-`list` shows metadata only (never raw keys or hashes); `revoke <id>` disables a credential; `rotate
-<id>` issues a replacement and atomically revokes the old one. The raw key is printed exactly once at
-`create`/`rotate`.
+`list` shows metadata only (never raw keys or hashes); `revoke <id>` disables a credential
+(idempotently — repeated revokes preserve the original timestamp); `rotate <id>` issues a replacement
+and atomically revokes the old one, but only for an active, non-revoked, non-expired credential whose
+project/principal are still valid. The raw key is printed exactly once at `create`/`rotate`. `create`
+defaults scopes from the audience (`inference` -> `inference:invoke`; `admin` -> none); pass
+`--scopes` to override.
 
 ## Tests
 

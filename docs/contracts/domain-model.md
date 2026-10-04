@@ -65,6 +65,12 @@ floating point (`float`) is rejected for money and pricing. There is no
   only and can never be client-overridden in the JSON body.
 - `CredentialAudience` (`inference` | `admin`) and `CredentialScope` (`inference:invoke`) are
   extensible `StrEnum`s so future resource/admin scopes can be added without replacing the model.
+- Credential lifecycle invariants (AGV2-012V): creation validates the project/principal exist, are
+  active, and are correctly matched before a key is generated; rotation is only valid for an active,
+  non-revoked, non-expired credential whose project/principal are still valid and produces no
+  replacement on failure; revocation is idempotent (the original `revoked_at` is preserved on repeat).
+  Default scopes are audience-derived (`inference` -> `inference:invoke`; `admin` -> none), and an
+  admin credential carrying `inference:invoke` is rejected.
 
 ### Accounting entities (AGV2-010)
 

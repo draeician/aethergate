@@ -39,6 +39,25 @@ OAuth device flow, and full admin RBAC remain the next identity/admin phase.
   escape hatch only: rejected in `prod` mode, consulted only when no Authorization header is
   present, and never a fallback for an invalid supplied key. (Settled)
 
+### Credential lifecycle invariants (AGV2-012V)
+
+- Credential creation validates the target identity first: the project and principal must exist and
+  be active, and the principal must belong to the requested project. A failing creation is rejected
+  with an identity/domain error before any raw key is generated, so no credential row (and no secret)
+  is ever produced for an invalid transition. (Settled)
+- Rotation is an active-credential operation: the old credential must exist, be active, not revoked,
+  and not already expired, and its project/principal must still be valid/active/matching. A failing
+  rotation creates no replacement; the replacement raw key is revealed only after the transition can
+  succeed. (Settled)
+- Revocation is idempotent: the first revoke stamps `revoked_at` and disables the credential;
+  repeated revokes preserve the original timestamp and never move it forward or reactivate the
+  credential. (Settled)
+- Audience/scope coherence: inference credentials default to `inference:invoke`; admin credentials
+  have no default scopes, and an admin credential carrying `inference:invoke` is rejected, so a
+  future admin credential can never be valid for inference merely because it exists. (Settled)
+- `last_used_at` remains intentionally unset: no unconditional credential-row write is performed per
+  inference request, avoiding a hot-row bottleneck. (Deferred)
+
 ## Bootstrap and fail-closed startup
 
 - A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled)

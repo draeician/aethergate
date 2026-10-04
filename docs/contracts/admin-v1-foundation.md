@@ -18,16 +18,21 @@ metadata.
 API credential lifecycle DTOs (AGV2-012):
 
 - `ApiCredentialCreate` — `project_id`, optional `principal_id`, `name`, `audience`
-  (`CredentialAudience.INFERENCE` by default), `scopes` (`inference:invoke` by default), optional
-  `expires_at`.
+  (`CredentialAudience.INFERENCE` by default), `scopes` (defaults derived from `audience`:
+  `inference:invoke` for inference, none for admin), optional `expires_at`. Creation is validated
+  before a key is issued: project/principal must exist, be active, and be correctly matched, and an
+  admin credential carrying `inference:invoke` is rejected.
 - `ApiCredentialRead` — metadata only: `id`, `project_id`, optional `principal_id`, `name`,
   `key_prefix`, `audience`, `scopes`, `created_at`, optional `expires_at`/`revoked_at`, `is_active`.
   Never carries the raw key or its hash/verifier.
 - `ApiCredentialCreateResult` / `ApiCredentialRotateResult` — the one-time raw key is revealed only
   at the create/rotate boundary alongside `ApiCredentialRead` metadata.
 - `ApiCredentialRevokeRequest` / `ApiCredentialRevokeResult` — revocation reason (optional) and the
-  resulting revoked metadata.
+  resulting revoked metadata. Revocation is idempotent: the original `revoked_at` is preserved on
+  repeated revokes.
 - `ApiCredentialUpdate` — optional `name` / `is_active` for PATCH semantics.
+- Rotation is an active-credential operation: rotating a revoked/expired/inactive credential fails
+  with no replacement credential created.
 
 These are service/repository/contract foundations only; no HTTP admin CRUD router exists yet.
 
