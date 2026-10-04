@@ -1,36 +1,21 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-008
+AGV2-009
 
 ## Title
-Scheduler phase 2 — shared provider-account request/token quotas
+Harden shared-quota admission before accounting and budgets
 
 ## Ownership
 Primary: scheduler/queueing  
-Coordinating: catalog/routing, provider adapters, contracts, platform/testing
+Coordinating: provider adapters, catalog/routing, contracts, platform/testing
 
 ## Why This Task Exists
 
-AGV2-004 through AGV2-007 established and hardened:
+AGV2-008 added shared request/token quotas and passed its primary nomnom tests, but code review found
+several correctness gaps that must be closed before adding monetary budgets/accounting.
 
-- real OpenAI-compatible inference;
-- durable PostgreSQL queueing;
-- multi-worker ownership;
-- endpoint physical concurrency;
-- leases/fencing;
-- encrypted queued content;
-- conservative ambiguous-outcome handling;
-- per-endpoint FIFO without unrelated-endpoint head-of-line blocking;
-- atomic queue admission and deadline handling.
-
-The next scheduler layer is shared provider capacity.
-
-This task adds provider-account/shared-quota request and token windows and reserves them
-transactionally with endpoint physical capacity.
-
-It does **not** add project monetary budgets yet. Monetary budgets require the accounting/pricing
-foundation and must not be faked by conflating quota with billing.
+Do not start budget/accounting work in this task.
 
 ## Before You Start
 
@@ -43,363 +28,265 @@ foundation and must not be faked by conflating quota with billing.
    - `docs/development/current-task.md`
    - `docs/architecture/scheduler.md`
    - `docs/architecture/provider-model.md`
-   - `docs/contracts/domain-model.md`
    - `src/aethergate/scheduler/repository.py`
    - `src/aethergate/scheduler/service.py`
    - `src/aethergate/adapters/base.py`
    - `src/aethergate/adapters/litellm.py`
+   - `tests/test_scheduler_quota.py`
 4. Preserve all AGV2-007 scheduler invariants.
 5. Do not modify/delete legacy v1 `app/` or `frontend/src/`.
-6. Do not commit unrelated local/untracked files.
+6. Do not commit unrelated files.
 
-## Goal
+## Required Fixes
 
-AetherGate must understand and enforce configured shared provider capacity such as:
+### 1. Fix phantom quota reservations when endpoint capacity is unavailable
 
-- 30 requests / 60 seconds;
-- 5,000 requests / 86,400 seconds;
-- 60,000 tokens / 60 seconds;
+Current AGV2-008 flow reserves quota before checking endpoint physical capacity. When the endpoint is
+already full, the function returns `"full"` and commits the transaction, leaving quota reservations
+behind for a request that did not dispatch.
 
-where multiple aliases and endpoints share the same provider-account quota scope.
+This is a correctness bug.
 
-When a configured quota window lacks capacity, an otherwise valid request remains durably queued
-until the relevant window can admit it, subject to its queue and total deadlines.
+Required invariant:
 
-The scheduler must reserve **all applicable configured capacity together**:
+> If a request cannot acquire every required admission resource in the same transaction, it acquires
+> none of them.
 
-- endpoint physical concurrency;
-- every applicable request window;
-- every applicable token window.
+For a request that remains queued because endpoint capacity is full:
 
-No partial admission.
+- no new `QuotaReservation` rows may remain;
+- quota-window `reserved_units` must not increase;
+- request quota must not be committed;
+- no execution attempt may be created;
+- no endpoint reservation may be created.
 
-## Quota Model
+Repeated worker claims while an endpoint stays full must not accumulate phantom quota reservations.
 
-Extend `QuotaGroup` from descriptive metadata into an explicit shared allowance scope.
+Preferred design:
 
-### Scope ownership
+- lock/evaluate all applicable quota group/limit/window rows in deterministic order;
+- lock/evaluate endpoint capacity;
+- only after every constraint is known to fit, mutate quota reservations + endpoint reservation +
+  attempt/request reserved state;
+- commit all those mutations together.
 
-For this phase, a QuotaGroup belongs to exactly one `ProviderAccount`.
+If a different design is used, it must prove equivalent all-or-nothing behavior.
 
-Requirements:
+Do not "fix" this by creating quota reservations and then leaving released audit rows on every failed
+poll unless there is a strong documented reason. Waiting should not create artificial reservation
+history.
 
-- add `provider_account_id` to QuotaGroup;
-- routes may reference a quota group only when that group's provider account matches the route's
-  provider account;
-- multiple aliases/endpoints/routes may share one quota group;
-- creating another alias/endpoint never creates independent provider quota;
-- one provider account may have more than one explicitly configured quota group when the operator
-  intentionally separates scopes;
-- no quota is inferred from URL or provider name.
+### 2. Preserve all-or-nothing behavior on every pre-dispatch failure
 
-If a route has no quota group, it is governed only by endpoint physical concurrency until a group is
-configured. Do not silently invent limits.
+Audit the entire claim path after quota evaluation.
 
-### Generic limits
+At minimum verify:
 
-A quota group may contain multiple independent limits.
+- endpoint missing/inactive;
+- endpoint full;
+- route/provider/account revalidation failure;
+- token estimation failure;
+- request expiry;
+- cancellation race;
+- scheduler invariant failure.
 
-Model a reusable quota-limit contract with at least:
+If upstream contact has not begun, none of those paths may leave live quota or endpoint capacity
+reserved.
 
-- stable opaque ID;
-- quota_group_id;
-- metric: `requests` or `tokens`;
-- limit_units: positive integer;
-- window_seconds: positive integer;
-- enabled;
-- optional descriptive name.
+Add fault-injection tests.
 
-This must support multiple simultaneous request windows (for example RPM + RPD) and multiple token
-windows without special-casing "minute" or "day" in the scheduler.
+### 3. Remove head-of-line blocking across quota scopes sharing one endpoint
 
-Add a typed `QuotaLimitId`.
+Current queue selection is FIFO per endpoint. That is insufficient now that one endpoint can serve
+routes using different quota groups.
 
-Use fixed windows anchored deterministically to UTC epoch for this phase. Document exact boundary
-semantics.
+Example:
 
-Do not claim sliding-window semantics.
+```text
+endpoint E max_concurrency=2
 
-## Token Reservation Contract
+request A1 -> quota group A (exhausted)
+request B1 -> quota group B (available)
+```
 
-Token quotas require conservative pre-dispatch reservation.
+B1 must be allowed to dispatch even though A1 is older, because A's independent quota exhaustion
+must not strand unrelated capacity.
 
-Add a narrow token-estimation interface to the provider-adapter boundary.
+Required ordering rule:
 
-Requirements:
+- FIFO within the same scheduling scope;
+- a scheduling scope for this phase is at least endpoint + effective quota group;
+- quota-blocked scope A must not block eligible scope B on the same endpoint;
+- endpoint physical capacity is still shared across both;
+- no newer request in scope A may bypass an older eligible request in scope A.
 
-- estimation happens before quota reservation/dispatch;
-- it must not contact the upstream inference service;
-- the estimate must include input tokens plus a bounded output reservation;
-- provider/model-specific tokenizer behavior stays behind the adapter;
-- the scheduler consumes only a numeric conservative reservation value;
-- no generic whitespace/character-count heuristic may silently masquerade as an authoritative
-  provider token count.
+Choose a durable implementation.
 
-### Output reservation
+A good design may persist the effective scheduling/quota scope on the queued request as non-content
+metadata, but if you do this, revalidate it immediately before dispatch and handle configuration
+changes safely rather than dispatching against stale policy.
 
-A request with a token quota must have a bounded output reservation.
+Document the exact rule.
 
-Implement explicit route/model configuration for a default output-token reservation used when the
-client omits `max_tokens` / the equivalent supported field.
+### 4. Token estimation must fail closed when no defensible estimator exists
 
-Requirements:
+The current LiteLLM adapter fallback:
 
-- positive integer;
-- if client supplies a smaller explicit max, reserve that explicit max;
-- if client supplies a larger explicit max, reserve the explicit requested max;
-- if token quota applies and neither an explicit client max nor configured default can bound output,
-  reject configuration/request explicitly rather than dispatch without a safe reservation;
-- preserve current OpenAI request semantics otherwise.
+```text
+len(text) // 3
+```
 
-Use the adapter's tokenizer/estimator for input tokens and add the output reservation.
+is not a defensible conservative upper bound for arbitrary model/tokenizer/input text.
 
-For the current nomnom Ollama model, verify the chosen LiteLLM-backed estimator against actual usage
-well enough to establish that reservations are conservative. If the adapter cannot reliably estimate
-that model, document the blocker and do not fake TPM correctness.
+Do not label or treat a generic character heuristic as authoritative or conservative TPM protection.
 
-## Persistence / Migration
+Before changing behavior, verify current LiteLLM token-counting/tokenizer behavior for the supported
+provider/model path using current LiteLLM documentation/source.
 
-Do not rewrite migrations `0001` through `0004`.
+Required contract:
 
-Add migration `0005` (and only additional revisions if genuinely necessary).
+- adapter may return a token reservation estimate only when it can identify a provider/model-specific
+  method that is known to be usable for that route;
+- any safety margin must be explicit and documented;
+- if a configured token-quota route has no trustworthy pre-dispatch estimator, fail closed with an
+  explicit safe configuration/request error;
+- request-only quotas must continue to work even when token estimation is unavailable;
+- never silently fall back to a generic char/word approximation for enforced token quotas.
 
-Persist at least:
+If the current nomnom Ollama model cannot be reliably token-estimated pre-dispatch, record that
+honestly. Do not fake a token-quota guarantee just to preserve the smoke test.
 
-- QuotaGroup -> ProviderAccount ownership;
-- quota limit definitions;
-- quota window/bucket state;
-- per-request quota reservations/commitments;
-- route/model default output-token reservation if used by the chosen design;
-- quota cooldown/reset metadata required for provider feedback.
+### 5. Cooldown updates must be monotonic and concurrency-safe
 
-Use integer token/request units. No floats.
+Concurrent provider 429s must never shorten an existing cooldown.
 
-### Window authority
+When applying a cooldown:
 
-PostgreSQL is authoritative.
-
-A quota window record must permit atomic evaluation of:
-
-`committed_units + reserved_units + requested_units <= limit_units`
-
-under row locks.
-
-Window creation at boundaries must be safe under concurrent workers.
-
-Do not use process-local counters.
-
-## Atomic Admission / Lock Ordering
-
-Extend the existing endpoint reservation transaction so all applicable capacity is acquired together.
-
-Define and document one deterministic lock order.
-
-Recommended conceptual order:
-
-1. quota group / quota limits in stable ID order;
-2. current quota-window rows in stable metric/window/ID order;
-3. endpoint row / physical capacity;
-4. request/attempt/reservation state.
-
-A different order is acceptable if it is deterministic and tested.
+`new cooldown_until = max(existing cooldown_until, newly observed cooldown_until)`
 
 Requirements:
 
-- if any required quota lacks capacity, acquire **none** of the capacity for that request;
-- do not hold endpoint capacity while merely waiting for a future request/token window;
-- no DB transaction remains open while waiting for a reset;
-- multiple workers cannot oversubscribe a quota window;
-- quota-authority DB failure means no new dispatch.
+- lock/update the shared quota scope safely;
+- a later short Retry-After cannot shorten an existing longer cooldown;
+- unrelated quota groups remain unaffected;
+- expired cooldowns naturally stop blocking.
 
-## Request Quota Semantics
+Add concurrent tests.
 
-A request unit is consumed when durable dispatch intent is committed immediately before upstream
-contact.
+### 6. Persist useful quota-block metadata and clear stale reasons
+
+The current `wait_reason` is too generic and can remain stale after the request becomes eligible.
+
+For a quota-blocked request, persist non-content metadata sufficient to explain:
+
+- effective quota group;
+- limiting quota limit / metric;
+- next fixed-window reset or cooldown time when known.
+
+Use typed columns or a compact structured design; do not store prompt/completion content.
 
 Requirements:
 
-- queued/pre-dispatch-cancelled work consumes no request quota;
-- safe pre-dispatch reclaim consumes no request quota;
-- once dispatch intent is durable, the request unit remains consumed even if the upstream call
-  later fails;
-- retries are still out of scope, so one execution attempt == one request-unit commitment.
+- future inspection can state why the request is blocked;
+- worker may use `next_eligible_at` to avoid needlessly hammering the same blocked request every poll;
+- once the request becomes eligible/reserved/dispatched, stale wait metadata is cleared;
+- endpoint-full waiting is distinguishable from quota-window/cooldown waiting.
 
-## Token Quota Semantics
+Do not add Redis just for wakeups.
 
-Before dispatch:
+### 7. Harden quota schema invariants
 
-- reserve the conservative token amount.
+Do not rewrite migrations `0001` through `0005`.
 
-On a successful completion with trustworthy usage:
+Add migration `0006` only if needed for persisted fixes/metadata.
 
-- settle reserved tokens to actual provider-reported total usage;
-- release unused reservation within the same active window;
-- if reported usage exceeds the reservation, record actual usage honestly and mark the window
-  over-limit; do not hide or truncate the overage.
+At the database layer, add sensible invariants where missing, including at minimum:
 
-For a known provider failure/cancellation after dispatch:
+- quota-limit metric restricted to supported values;
+- route `default_output_tokens` positive when present;
+- quota window committed/reserved units nonnegative;
+- quota reservation units nonnegative;
+- quota reservation state restricted to supported values.
 
-- if trustworthy usage exists, settle to that usage;
-- if trustworthy usage is unavailable, conservatively commit the reserved token amount.
+If an invariant cannot safely be added because historical rows may violate it, explicitly validate
+and repair/reject those rows in the migration rather than silently accepting invalid state.
 
-For `outcome_unknown`:
+Do not rewrite `0005`.
 
-- do not release the token reservation as if nothing happened;
-- conservatively retain/commit the reservation for the affected window until explicit reconciliation
-  or window expiry according to the documented design;
-- reconciliation must never create additional capacity based on an invented token count.
+### 8. Keep request/token commitment semantics intact
 
-Pre-dispatch cancellation/reclaim releases token reservations because upstream was never contacted.
+Regression requirements:
 
-## Eligibility / Queue Behavior
-
-When the endpoint has a free physical slot but a quota window is exhausted:
-
-- leave the request queued;
-- do not create a provider execution attempt;
-- do not spin hot;
-- calculate/persist enough eligibility/reset information to avoid treating it as generic endpoint
-  saturation;
-- another request for an unrelated endpoint/quota group with available capacity must still dispatch.
-
-Within the same endpoint + quota scope, preserve FIFO for eligible work.
-
-A request that cannot fit even an empty configured token window because its required token reservation
-exceeds the limit must be rejected/failed explicitly rather than waiting forever.
-
-## Provider 429 / Reset Feedback
-
-Extend the provider adapter error boundary to preserve safe structured rate-limit feedback when
-available:
-
-- HTTP/upstream status;
-- Retry-After seconds or absolute reset time when reliably supplied;
-- no raw headers containing credentials;
-- no upstream URL leakage.
-
-On provider 429:
-
-- apply cooldown to the actual configured shared quota group/provider-account scope used by the route;
-- future work for that scope remains queued until cooldown expires;
-- do not automatically retry the failed request in this task;
-- the failed dispatched attempt remains a consumed request unit;
-- token settlement follows the conservative rules above.
-
-If reliable Retry-After/reset information is absent, apply a small configurable conservative cooldown
-rather than hammering the upstream.
-
-Do not claim AetherGate can prevent all provider 429s when limits are unknown or shared outside the
-gateway.
-
-## Domain / Admin Contracts
-
-Update domain and admin v1 DTO foundations for:
-
-- QuotaGroup provider-account scope;
-- QuotaLimit create/read/update;
-- route/model default output-token reservation configuration;
-- effective quota metadata necessary for future CLI/UI.
-
-No admin HTTP CRUD routes yet.
-
-Validate:
-
-- positive limits;
-- positive window duration;
-- valid metric enum;
-- quota group / provider account consistency at service/persistence boundary.
-
-## Development Seed
-
-Extend the dev seed without hard-coding nomnom specifics.
-
-Support defining:
-
-- provider/account/endpoint/alias/route;
-- endpoint max concurrency;
-- shared quota group;
-- one or more request limits;
-- one or more token limits;
-- default output-token reservation.
-
-Make it idempotent.
-
-The current no-quota seed path should continue to work.
-
-## Inspection / Observability
-
-Extend the scheduler inspection tooling to show non-content metadata such as:
-
-- quota group;
-- metric;
-- configured limit;
-- window start/end;
-- committed units;
-- reserved units;
-- cooldown-until;
-- request's limiting constraint / next eligible time when known.
-
-Never show prompts/completions/secrets.
-
-A queued request should be explainable as, for example:
-
-`waiting: quota group provider-acct-a tokens 60000/60000 until 12:34:00Z`
-
-rather than merely "queued".
+- request unit commits only at durable dispatch intent;
+- token units reserve before dispatch;
+- actual usage settles honestly;
+- unknown post-dispatch usage commits the conservative reservation;
+- `outcome_unknown` does not create capacity;
+- pre-dispatch cancellation/reclaim frees reservations;
+- physical endpoint slots and quota capacity remain coordinated transactionally.
 
 ## Real Nomnom Verification — Required
 
 Use the existing dynamic-port Docker/Podman workflow.
 
-Verify the current backend/model rather than assuming it is unchanged.
+Verify the current backend/model instead of assuming it.
 
-### A. Shared request quota across aliases/endpoints
+### A. Phantom-reservation regression
 
-Configure two routes/aliases sharing one provider account + one quota group.
+Configure:
 
-Use a small test limit such as 2 requests per short window.
+- endpoint max_concurrency = 1;
+- shared request + token quota with ample remaining capacity.
 
-Prove:
+Hold the single endpoint slot with request A.
 
-- endpoint physical capacity may be available;
-- only 2 requests dispatch in the configured quota window;
-- additional requests remain queued;
-- after the next fixed window begins, queued work dispatches;
-- both aliases consume the same shared quota;
-- two workers cannot oversubscribe the limit.
+Queue request B.
 
-### B. Multiple simultaneous request windows
-
-Configure both a short and a longer request window on the same group.
-
-Prove dispatch requires capacity in **both** windows and that exhausting either one blocks dispatch.
-
-### C. Token quota
-
-Configure a deliberately small token window suitable for testing.
+While A remains active, allow multiple worker claim/poll cycles.
 
 Prove:
 
-- pre-dispatch token reservation occurs;
-- queued requests cannot collectively oversubscribe the configured window;
-- successful usage settles the reservation to actual usage;
-- unused reserved units become available again when safe;
-- a request too large for an empty token window is rejected explicitly;
-- two workers cannot oversubscribe tokens.
+- B remains queued;
+- B has zero live quota reservations;
+- quota-window reserved/committed values do not increase because of B;
+- B has zero attempts and zero endpoint reservations;
+- after A completes, B acquires quota+endpoint capacity once and dispatches exactly once.
 
-Use non-sensitive prompts; do not record their content in the handoff.
+### B. Same-endpoint independent quota scopes
 
-### D. Provider feedback
+Use one physical endpoint with two route/alias scopes:
 
-If practical with a controlled local/mock upstream, return a synthetic 429 + Retry-After through the
-adapter contract and prove:
+- scope/group A exhausted;
+- scope/group B available.
 
-- the shared quota group enters cooldown;
-- unrelated quota groups remain dispatchable;
-- no automatic retry occurs.
+Prove:
 
-This can be deterministic integration testing rather than forcing the real Ollama backend to emit a
-429.
+- an older A request remains queued;
+- B dispatches on the same endpoint;
+- A does not block B;
+- FIFO within A remains intact;
+- endpoint max_concurrency remains respected.
+
+### C. Token-estimator truthfulness
+
+For the current nomnom model:
+
+- determine whether the adapter has a provider/model-specific usable estimator;
+- if yes, demonstrate the method and keep the token-quota smoke test;
+- if no, prove token-quota dispatch fails closed with an explicit error while request-quota-only
+  dispatch still works.
+
+Do not use prompt content in the handoff.
+
+### D. Cooldown monotonicity
+
+Using deterministic/mock provider feedback:
+
+- apply a long cooldown;
+- concurrently/later apply a shorter cooldown;
+- prove the long cooldown remains;
+- apply a later longer cooldown and prove it extends;
+- unrelated group remains dispatchable.
 
 ### E. Regression
 
@@ -407,66 +294,69 @@ Re-run:
 
 - official OpenAI SDK non-stream;
 - official OpenAI SDK stream;
-- six-request/two-slot endpoint concurrency;
-- lease/dead-worker tests;
-- cross-endpoint no-HOL behavior.
+- six-request/two-slot endpoint test;
+- shared request quota across aliases;
+- multi-window request quota;
+- scheduler invariant/dead-worker suite.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. quota limit domain/DTO validation;
-2. quota group belongs to provider account;
-3. route cannot reference another account's quota group;
-4. fixed-window boundary calculation;
-5. concurrent window creation is safe;
-6. atomic request-window reservation;
-7. two workers cannot exceed request limit;
-8. two aliases share one request quota;
-9. multiple request windows are reserved together;
-10. token estimator boundary;
-11. output-token default behavior;
-12. unbounded token-quota request rejected;
-13. token reservation before dispatch;
-14. successful token settlement to actual usage;
-15. over-reservation releases unused units;
-16. actual usage greater than reservation is recorded honestly;
-17. dispatched failure with unknown usage conservatively consumes reservation;
-18. pre-dispatch cancellation releases token reservation;
-19. outcome_unknown does not free token capacity;
-20. request larger than empty token window fails explicitly;
-21. quota exhaustion does not reserve endpoint slot;
-22. saturated quota group does not block unrelated group;
-23. provider 429 cooldown scope;
-24. cooldown expiry;
-25. no automatic retry;
-26. quota-authority DB failure prevents dispatch;
-27. existing scheduler invariant suite remains green;
-28. official SDK scheduled chat tests remain green.
+1. endpoint-full request leaves no quota reservation;
+2. repeated endpoint-full claim attempts do not change quota windows;
+3. endpoint-inactive after quota evaluation leaves no quota reservation;
+4. cancellation race leaves no pre-dispatch live quota;
+5. expiry race leaves no pre-dispatch live quota;
+6. same endpoint + blocked group A + eligible group B dispatches B;
+7. FIFO remains within group A;
+8. shared endpoint max_concurrency still enforced across groups;
+9. token estimator unavailable fails closed for token quota;
+10. request-only quota works without token estimator;
+11. no generic character heuristic used for enforced token quota;
+12. cooldown update cannot shorten existing cooldown;
+13. concurrent cooldown updates preserve max reset time;
+14. wait metadata identifies group/limit/reset;
+15. stale wait metadata clears when request becomes eligible;
+16. DB constraints reject invalid quota metric/state/negative units;
+17. migration 0005 -> 0006 if migration is added;
+18. empty DB -> latest;
+19. request quota commits only at dispatch;
+20. token settlement semantics remain green;
+21. original scheduler invariant suite remains green;
+22. official SDK scheduled chat remains green.
 
 ## Accounting / Budget Boundary
 
-Do **not** implement monetary project budgets in this task.
+Do not implement monetary project budgets yet.
 
-Document explicitly that:
+After this task is green, the next milestone can add:
 
-- throughput quota/capacity policy is being implemented here;
-- usage accounting, pricing, and settlement remain separate;
-- project monetary budgets will later participate in the same atomic admission transaction once
-  price snapshots/reservations exist;
-- a positive monetary balance is not a universal authorization requirement;
-- prepaid billing remains possible but is not selected as the product model.
+- immutable price snapshots;
+- usage records;
+- monetary budget reservations;
+- ledger/settlement primitives;
+
+and fold budget admission into the same resource-acquisition transaction.
+
+Continue to preserve the distinction between:
+
+- authorization;
+- throughput quota/capacity;
+- budget policy;
+- usage accounting;
+- pricing;
+- settlement/billing.
 
 ## Documentation
 
-Update:
+Update as needed:
 
 - `docs/architecture/scheduler.md`
 - `docs/architecture/provider-model.md`
 - `docs/contracts/domain-model.md`
 - `docs/contracts/admin-v1-foundation.md`
 - `docs/development/README.md`
-- `project_spec.md` only if needed for clarification
 - `docs/development/agent-handoff.md`
 
 Do not modify the dated architecture audit.
@@ -475,34 +365,33 @@ Do not modify the dated architecture audit.
 
 - full test suite;
 - containerized tests;
-- existing DB `0004 -> 0005`;
-- empty DB -> latest;
+- migration verification if schema changed;
 - ruff/lint;
 - `git diff --check`;
 - secret scan;
 - legacy `app/` and `frontend/src/` untouched;
 - dated audit unchanged;
-- required nomnom quota verification completed.
+- all required nomnom checks complete.
 
 ## Handoff
 
 Update `docs/development/agent-handoff.md` with concise evidence for:
 
 - implementation commit(s);
-- migration revision(s);
-- quota schema/lock order;
-- request-window semantics;
-- token-reservation/settlement semantics;
-- actual shared-quota nomnom test;
-- multi-worker oversubscription proof;
-- 429 cooldown test;
-- regression test count;
-- dynamic AetherGate host port;
-- current backend/model;
+- phantom-reservation fix;
+- exact atomic admission ordering;
+- same-endpoint cross-quota scheduling result;
+- token-estimator decision for the real nomnom model;
+- monotonic cooldown result;
+- wait-metadata behavior;
+- migration revision if any;
+- test count;
+- dynamic AetherGate port;
+- backend/model;
 - issues/risks;
 - exactly one recommended next step.
 
-Do not include prompt/completion bodies, credentials, encryption keys, or large logs.
+No credentials, prompts, completions, encryption keys, or large logs.
 
 ## Commit and Push
 
@@ -510,7 +399,7 @@ Use conventional commits on branch `v2`.
 
 Suggested primary commit:
 
-`feat(scheduler): add shared request and token quotas`
+`fix(scheduler): harden shared quota admission`
 
 A handoff-only follow-up commit is allowed.
 
@@ -518,6 +407,5 @@ A handoff-only follow-up commit is allowed.
 
 Never push directly to `main`.
 
-The task is complete only when `origin/v2` contains the changes and updated handoff and the required
-nomnom shared-quota tests pass, or a genuine technical/environmental blocker is documented with
-non-sensitive evidence.
+The task is complete only when `origin/v2` contains the work and updated handoff and the required
+nomnom quota-correctness tests pass, or a genuine blocker is documented with non-sensitive evidence.
