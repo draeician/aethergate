@@ -2,132 +2,128 @@
 
 ## Current State
 - Branch: v2
-- Starting commit: `31871c2` (AGV2-010 task specification); AGV2-010 completed via
-  `feat(accounting): add pricing usage and project budgets` + `docs(development): complete AGV2-010
-  accounting handoff`.
-- AGV2-011 implementation commit(s): `fix(accounting): harden budget scheduling and price
-  invariants` (+ this `docs(development): complete AGV2-011 accounting hardening handoff` follow-up).
+- AGV2-012 implementation commit: `feat(identity): add scoped inference API credentials`
+  (`c5aa986`), pushed to `origin/v2`.
+- Prior AGV2-011 commits (`df8cf7e`, `0a0864b`) remain; this handoff supersedes the AGV2-011 handoff.
 
 ## Task Completed
-AGV2-011 — harden accounting and budget scheduling invariants. All seven fixes landed:
+AGV2-012 — Identity phase 1: scoped inference API credentials and durable authorization context.
 
-1. Scheduling scope extended from `(endpoint_id, quota_group_id)` to
-   `(endpoint_id, quota_group_id, project_id)`; null project is its own scope. A budget-blocked
-   project no longer head-of-line blocks another project sharing the same endpoint/quota resources.
-2. Canonical lock order implemented and documented identically: request/scope rows -> active price
-   policy -> project budget policy/windows (stable ID order) -> provider quota group/limit/windows
-   (stable ID order) -> endpoint physical capacity -> request/attempt/reservation mutations. No
-   transaction spans provider inference.
-3. Exactly one enabled `PricePolicy` per `RouteBinding`, enforced by a partial unique index and
-   surfaced as `PricePolicyConflictError` (clear domain error, never a scheduler
-   `MultipleResultsFound`).
-4. Billing-unit-specific price shape enforced at domain, DTO, service, and DB CHECK layers: request
-   billing requires `request_price` (token prices rejected); token billing requires both
-   `input_price`/`output_price` (`request_price` rejected). Missing price != zero; explicit
-   `Decimal("0")` is a valid zero price.
-5. Idempotent settlement now detects conflicting replays: identical replay is a no-op; conflicting
-   replay raises `AccountingInvariantError` (internal-only) with an explicit canonical equality set
-   that excludes volatile timestamps.
-6. Pre-dispatch snapshot lifecycle: the snapshot is discarded on pre-dispatch cancel/reclaim/
-   dispatch failure (and released budget reservations detach their `price_snapshot_id`); only work
-   reaching durable dispatch intent retains one immutable snapshot.
-7. Price-policy edit cannot race historical capture: the active policy is locked and the reservation
-   amount + snapshot derive from the same canonical values.
+- The OpenAI data plane now authenticates AetherGate-issued Bearer API keys (`Authorization: Bearer
+  agk_...`) instead of relying solely on the dev bypass, resolving to a typed `RequestContext`
+  (project/principal/credential/audience/scopes) that is persisted on the queued request exactly as
+  the scheduler/accounting stack expects.
+- `ApiCredential` is a one-way-verifiable scoped credential: 256-bit CSPRNG raw key
+  (`agk_<display>_<secret>`), SHA-256 verifier (`key_hash`) and non-secret display prefix
+  (`key_prefix`) persisted; `secret_ref_id` removed from the credential contract (upstream provider
+  secrets still use `SecretRef`). Raw key is never stored in PostgreSQL and never in read DTOs.
+- `CredentialAudience` (`inference`|`admin`) and `CredentialScope` (`inference:invoke`) separate the
+  inference surface from future admin auth. Wrong audience or missing `inference:invoke` is rejected;
+  there is no shared master key.
+- A single identity service (`src/aethergate/identity/service.py`) is the one auth/authorization
+  source shared by the API (strict Bearer parsing -> `authenticate`) and the worker (pre-dispatch
+  `authorize_for_dispatch`), so the two never diverge.
+- Queued-work revocation: a credential revoked/expired/inactivated while its request is queued is
+  revalidated immediately before dispatch; the request terminates with `authorization_failed` without
+  contacting upstream and with no surviving quota/budget/endpoint reservation, snapshot, usage, or
+  ledger entry.
+- Admin-v1 DTO foundations (`ApiCredentialCreate`/`Read`/`CreateResult`/`RotateResult`/
+  `RevokeRequest`/`RevokeResult`/`Update`) added; read DTOs never expose the raw key or hash. No HTTP
+  admin CRUD router yet.
+- Development bypass kept as a deliberate dev/test escape hatch only: rejected in `prod` mode,
+  consulted only when no Authorization header is present, and never a fallback for an invalid
+  supplied key. The seeded dev identity is a synthetic credential with `key_hash = NULL`, so it can
+  never be presented as a real Bearer token.
 
-No changes to legacy v1 `app/` or `frontend/src/`.
+No changes to legacy v1 `app/` or `frontend/src/`; dated audit unchanged.
 
 ## Migration
-- Revision `0008` (`accounting invariants`). Live `0007 -> 0008` succeeded on the running dev DB
-  (current `alembic_version = 0008`); empty-DB -> latest covered by `tests/test_migrations.py`.
-- Adds the one-enabled-policy-per-route partial unique index
-  (`uq_price_policies_one_enabled_per_route` on `route_binding_id WHERE enabled`),
-  `ck_price_policies_request_shape` / `ck_price_policies_token_shape` CHECK constraints, and drops
-  the NOT NULL on `budget_reservations.price_snapshot_id`.
-- Migration detects invalid existing rows (shape-violating or duplicate-enabled price policies)
-  before adding constraints, and fails with a clear diagnostic rather than guessing or reinterpreting
-  missing prices as zero. `0001`–`0007` untouched.
+- Revision `0009` (`identity phase 1: scoped inference API credentials`). Live `0008 -> 0009`
+  succeeded on the running dev DB (`alembic_version = 0009`); empty-DB -> latest and `0008 -> 0009`
+  covered by `tests/test_migrations.py::test_migration_0008_to_0009` / `test_migration_from_empty_database`.
+- Adds `api_credentials.key_prefix`, `key_hash` (unique `uq_api_credentials_key_hash`), `audience`
+  (CHECK `ck_api_credentials_audience`), `scopes` (JSON), `expires_at`/`revoked_at`/`last_used_at`;
+  drops `secret_ref_id`. No raw key is created/stored by the migration; existing dev rows are
+  backfilled with the inference audience/scope but no recoverable key, so they remain
+  non-authenticatable and are replaced by newly generated credentials. `0001`–`0008` untouched.
 
-## Lock order (canonical, tested)
-request/scope row(s) -> active price policy -> project budget policy/windows (stable ID order) ->
-provider quota group/limit/windows (stable ID order) -> endpoint physical capacity ->
-request/attempt/reservation mutations. No open transaction spans provider inference.
+## API key / verifier design (no secret values)
+- Raw key format `agk_<display>_<secret>`; `<display>` is 8 non-secret hex chars, `<secret>` is 32
+  bytes of `secrets` CSPRNG entropy (>= 256 bits). Raw key returned exactly once at create/rotate.
+- Verifier is `SHA-256(raw_key)` hex; lookup is exact by full-key hash (fixed-cost indexed). The
+  display prefix is never the authentication selector. This is safe only for high-entropy generated
+  tokens — not a password-hashing scheme, and must never be applied to human-chosen secrets.
 
 ## Automated tests
-`scripts/dev/v2 test` -> **220 passed** (was 202; +17 accounting tests +1 migration test).
-`ruff check src tests` clean. `tests/test_accounting.py` adds coverage for cross-project no-HOL
-(fix 1), FIFO-within-project, cross-project endpoint/quota concurrency, one-enabled-price-policy
-(fix 3), concurrent-enable conflict, request/token price shape incl. missing-vs-zero (fix 4),
-identical/conflicting UsageRecord and LedgerEntry replay (fix 5), pre-dispatch snapshot lifecycle
-(cancel/expiry/dispatch-failure vs. normal dispatch; fix 6), concurrent price-edit consistency
-(fix 7), and the accounting/admission stress/deadlock scenarios. `tests/test_migrations.py` adds
-`0007 -> 0008` (and empty-DB->latest) plus `_indexes`/`_nullable_columns` introspection helpers.
-`git diff --check` clean; secret scan clean.
+`scripts/dev/v2 test` -> **250 passed** (was 220; +29 identity tests +1 migration test +1 auth-canary
+test). `ruff check src tests` clean; `git diff --check` clean; pre-commit secret scan clean.
+Coverage: key generation entropy/format, SHA-256 verifier, raw-key-never-persisted, DTO-never-exposes-
+secret, typed `RequestContext` resolution, missing/malformed/wrong-scheme/invalid key, inactive/
+revoked/expired credential, inactive project/principal, principal-project mismatch, wrong audience,
+missing scope, dev-bypass absent-header + invalid-key-never-falls-through, prod-forbids-bypass,
+create-returns-raw-once, rotate-revokes-old, queued revocation blocks pre-dispatch with no surviving
+reservations, attribution to `InferenceRequest`, auth-log canary, migration `0008 -> 0009` + empty-DB.
 
-## Real nomnom verification (live, real Ollama)
-Host = nomnom (`192.168.22.50/24`); docker = podman 4.9.3 + docker-compose 2.40.3. Backend = ollama
-`qwen3.8-2b-distill:Q6_K`; litellm 1.104.0 `huggingface_tokenizer_kind(...)` returns `None` (no
-trusted estimator). Dynamic AetherGate port this session: **37223** (changes on every `up`/`workers`;
-re-run `scripts/dev/v2 url`).
+## Real nomnom verification (live, real Ollama, bypass disabled)
+Host = nomnom (`192.168.22.50/24`); backend = ollama `qwen3.8-2b-distill:Q6_K`; litellm 1.104.0 has
+no trusted token estimator (fail-closed), so the seeded token quota limit was disabled for the smoke
+(known AGV2-008/010 limitation, unrelated to identity). Dynamic AetherGate port this session:
+**38967** (re-run `scripts/dev/v2 url`).
 
-- **Migration — PASS.** `scripts/dev/v2 migrate` ran `0007 -> 0008` cleanly; `alembic_version=0008`;
-  both shape CHECK constraints and the partial unique index present in `pg_constraint`.
-- **B. Single enabled price policy — PASS (live).** `INSERT` of a second `enabled` policy on a route
-  already carrying an enabled policy was rejected by `uq_price_policies_one_enabled_per_route`.
-- **C. Price-shape validation — PASS (live).** Request billing with `request_price NULL` rejected by
-  `ck_price_policies_request_shape`; token billing with missing `output_price` rejected by
-  `ck_price_policies_token_shape`; explicit `request_price = 0` accepted.
-- **F. Regression — PASS (live).** Official OpenAI SDK 2.54.0 non-stream + stream succeeded
-  (`qa-open-1`); request-priced route `budget-req` dispatched and settled to a `usage_record`
-  (`billing_unit=request`, `request_units=1`, `amount=0.05 USD`) plus a `usage_debit` ledger entry.
-  Full 220-test suite green (covers six-request/two-slot, shared/cross-quota, recovery/fencing).
-- **D (snapshot lifecycle) — live-consistent.** `scripts/dev/v2 inspect` shows non-succeeded
-  requests with `snapshot=- usage_record=-` (no orphan snapshot) and every `succeeded` request with
-  exactly one `snapshot` + one `usage_record`.
-- **A (cross-project no-HOL), E (idempotent conflict), and the deterministic race scenarios for D**
-  are covered by `tests/test_accounting.py` (deterministic) — cross-project no-HOL + FIFO, concurrent
-  policy-edit, replay conflict, and pre-dispatch cancel/expiry/dispatch-failure all assert the exact
-  invariants.
+- **A. Real API-key inference — PASS.** Official OpenAI SDK 2.54.0 non-stream and stream both
+  succeeded with an AetherGate-issued key (bypass disabled). Persisted `inference_requests` carry the
+  credential's project/principal/credential IDs (attribution verified by direct DB read).
+- **B. Missing/invalid key — PASS.** Missing key and random invalid key both return 401
+  (`not_authenticated`, `WWW-Authenticate: Bearer`); no upstream call, no enqueue.
+- **D. Revocation before request — PASS (live).** Revoking the credential made the next SDK call
+  return 401 immediately.
+- **H. Rotation — PASS (live).** Rotating produced a new raw key; the old key returned 401, the new
+  key succeeded, and the old credential metadata is retained as revoked (not deleted). `list` shows
+  metadata only (prefix/audience/scopes/timestamps; never the raw key or hash).
+- **C/E/F/G (expiry, queued revocation, inactive project/principal, audience/scope)** are covered
+  deterministically by the DB-gated automated tests above (expired/inactive/revoked/wrong-audience/
+  missing-scope authentication, and queued-revocation dispatch-blocking with no surviving
+  reservations).
 
 ## Key files
-- `src/aethergate/errors.py` — new `AccountingInvariantError`, `PricePolicyConflictError`.
-- `src/aethergate/domain/entities.py` — `PricePolicy` billing-unit shape validation.
-- `src/aethergate/contracts/admin_v1.py` — `PricePolicyCreate`/`PricePolicyUpdate` shape validation.
-- `src/aethergate/persistence/repository.py` — `create_price_policy` one-enabled conflict check.
-- `src/aethergate/persistence/models.py` — partial unique index, shape CHECKs, nullable
-  `budget_reservations.price_snapshot_id`.
-- `src/aethergate/accounting/repository.py` — idempotency conflict detection, `discard_price_snapshot`,
-  released-reservation detach.
-- `src/aethergate/accounting/service.py` — `_require_price` (missing price raises, zero stays zero).
-- `src/aethergate/scheduler/repository.py` — 4-tuple scheduling scope, `clear_price_snapshot_reference`.
-- `src/aethergate/scheduler/service.py` — budget-before-quota order, project scope, pre-dispatch
-  snapshot discard.
-- `src/aethergate/migrations/versions/0008_accounting_invariants.py` — migration.
-- `tests/test_accounting.py`, `tests/test_migrations.py` — AGV2-011 coverage.
-- `docs/architecture/{accounting,scheduler}.md`, `docs/contracts/{domain-model,admin-v1-foundation}.md`,
+- `src/aethergate/identity/{keys,service}.py` — key generation/hashing; auth/authorization service.
+- `src/aethergate/domain/entities.py` — `ApiCredential` refinement + `RequestContext`.
+- `src/aethergate/domain/enums.py` — `CredentialAudience`, `CredentialScope`.
+- `src/aethergate/persistence/models.py` — new `ApiCredential` ORM shape; unique hash index + CHECK.
+- `src/aethergate/persistence/repository.py` — identity repository ops + active-state setters.
+- `src/aethergate/migrations/versions/0009_identity_credentials.py` — migration.
+- `src/aethergate/api/deps.py` — real Bearer auth + dev bypass; `request_context` dependency.
+- `src/aethergate/api/openai_chat.py`, `openai_errors.py` — typed context; `WWW-Authenticate` on 401.
+- `src/aethergate/scheduler/service.py` — pre-dispatch `authorize_for_dispatch` revalidation.
+- `src/aethergate/dev_identity.py` / `dev_credential.py` — synthetic dev identity / dev credential CLI.
+- `src/aethergate/contracts/admin_v1.py` — credential lifecycle DTOs.
+- `tests/test_identity.py`, `tests/test_openai_auth.py`, `tests/test_migrations.py` — new coverage.
+- `docs/architecture/{security,scheduler}.md`, `docs/contracts/{domain-model,admin-v1-foundation}.md`,
   `docs/development/README.md`.
 
 ## Decisions
-- One-enabled-price-policy enforced at the DB (partial unique index) with a domain-level
-  `PricePolicyConflictError` translation; disabled historical/edit rows may coexist.
-- Missing price != zero; explicit zero is valid. Enforcement spans domain/DTO/service/DB CHECKs.
-- Pre-dispatch snapshot discard (not soft-delete of possibly-referenced snapshots) preserves immutable
-  historical snapshots without orphaning them for work that never dispatched.
+- One-way SHA-256 verifier for high-entropy generated keys (not a password scheme); exact hash lookup,
+  constant-time semantics, display prefix never the selector.
+- `key_hash` is nullable so the synthetic dev-bypass identity can exist without a verifiable key
+  (PostgreSQL treats NULLs as distinct under the unique index).
+- Shared `_ensure_inference_access` policy used by both `authenticate` and `authorize_for_dispatch`
+  with indistinguishable failures (no project/principal/credential existence leaks).
 
 ## Deferred
-- Final commercial model (showback/chargeback/prepaid/reseller). Principal-level budgets. FX.
-- Invoice generation, payment processing, prepaid balance deduction, external billing exports.
-- Admin HTTP CRUD routes for the accounting DTO foundations.
+- OIDC authorization-code flow, browser sessions/CSRF, OAuth device flow, full admin RBAC, admin HTTP
+  CRUD routes, CLI, React UI, principal-level budgets, `/v1/responses`, embeddings, v1 SQLite
+  migration.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
   `--no-deps`. The dynamic API host port changes every `up`/`workers`; re-run `scripts/dev/v2 url`.
-- `scripts/dev/v2 workers N` recreates the `api` container and thus reassigns the host port.
-- The dev DB still holds the AGV2-010 aliases (`budget-req`/`budget-tok`, `qa-*`) and a `USD-budget`
-  policy on the dev project; the budget only affects price-policy-bearing routes.
-- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content and ollama serializes concurrent
-  generation; gateway dispatch timings do not reflect upstream parallelism.
+- litellm 1.104.0 exposes no trusted token estimator, so token-quota/budget routes fail closed
+  (`quota_token_estimator_unavailable`); the live smoke used request-only quota.
+- The dev DB volume retains a now-disabled token quota limit from the smoke; not committed.
+- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content; gateway timings don't reflect upstream
+  parallelism.
 
 ## Recommended Next Step
-Expose the admin v1 accounting CRUD surface (route pricing, project budget policy, budget
-status/headroom, usage-record and ledger-entry reads) over `/admin/v1`, reusing the DTO foundations
-and service/repository contracts added in AGV2-010/011.
+Expose the admin v1 credential lifecycle (create/read/list/rotate/revoke) over `/admin/v1` using the
+identity service and the `ApiCredential*` DTO foundations added in AGV2-012, followed by the human
+OIDC identity/admin phase.
