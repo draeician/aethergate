@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -368,6 +370,12 @@ class InferenceRequest(Base, TimestampMixin):
     wait_limit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     wait_limit_metric: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # Captured immutable price snapshot at the dispatch decision (nullable when
+    # the route carries no pricing configuration). Non-content accounting metadata.
+    price_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("price_snapshots.id"), nullable=True, index=True
+    )
+
 
 class Reservation(Base, TimestampMixin):
     """A held unit of physical endpoint capacity."""
@@ -427,6 +435,282 @@ class StreamEvent(Base, TimestampMixin):
     event_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
+class PricePolicy(Base, TimestampMixin):
+    """Mutable route pricing configuration (never the historical record)."""
+
+    __tablename__ = "price_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "billing_unit IN ('request', 'token')", name="ck_price_policies_billing_unit"
+        ),
+        CheckConstraint("unit_scale >= 1", name="ck_price_policies_unit_scale_positive"),
+        CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'", name="ck_price_policies_currency_format"
+        ),
+        CheckConstraint(
+            "request_price IS NULL OR request_price >= 0",
+            name="ck_price_policies_request_price_nonneg",
+        ),
+        CheckConstraint(
+            "input_price IS NULL OR input_price >= 0",
+            name="ck_price_policies_input_price_nonneg",
+        ),
+        CheckConstraint(
+            "output_price IS NULL OR output_price >= 0",
+            name="ck_price_policies_output_price_nonneg",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    route_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("route_bindings.id"), nullable=False, index=True
+    )
+    billing_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    unit_scale: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    request_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    input_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    output_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class PriceSnapshot(Base, TimestampMixin):
+    """Immutable capture of the effective price at a dispatch decision."""
+
+    __tablename__ = "price_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "billing_unit IN ('request', 'token')", name="ck_price_snapshots_billing_unit"
+        ),
+        CheckConstraint("unit_scale >= 1", name="ck_price_snapshots_unit_scale_positive"),
+        CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'", name="ck_price_snapshots_currency_format"
+        ),
+        CheckConstraint(
+            "request_price IS NULL OR request_price >= 0",
+            name="ck_price_snapshots_request_price_nonneg",
+        ),
+        CheckConstraint(
+            "input_price IS NULL OR input_price >= 0",
+            name="ck_price_snapshots_input_price_nonneg",
+        ),
+        CheckConstraint(
+            "output_price IS NULL OR output_price >= 0",
+            name="ck_price_snapshots_output_price_nonneg",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    source_price_policy_id: Mapped[str] = mapped_column(
+        ForeignKey("price_policies.id"), nullable=False, index=True
+    )
+    route_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("route_bindings.id"), nullable=False, index=True
+    )
+    provider_account_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_accounts.id"), nullable=False, index=True
+    )
+    model_alias_id: Mapped[str] = mapped_column(
+        ForeignKey("model_aliases.id"), nullable=False, index=True
+    )
+    billing_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    unit_scale: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    input_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    output_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now()
+    )
+
+
+class ProjectBudgetPolicy(Base, TimestampMixin):
+    """An optional project-level spending-cap policy."""
+
+    __tablename__ = "project_budget_policies"
+    __table_args__ = (
+        CheckConstraint("limit_amount > 0", name="ck_budget_policies_limit_positive"),
+        CheckConstraint("window_seconds >= 1", name="ck_budget_policies_window_positive"),
+        CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'", name="ck_budget_policies_currency_format"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    limit_amount: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class BudgetWindow(Base, TimestampMixin):
+    """Committed/reserved monetary amounts for one budget policy window."""
+
+    __tablename__ = "budget_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "budget_policy_id", "window_start", name="uq_budget_windows_policy_start"
+        ),
+        CheckConstraint(
+            "committed_amount >= 0", name="ck_budget_windows_committed_nonneg"
+        ),
+        CheckConstraint(
+            "reserved_amount >= 0", name="ck_budget_windows_reserved_nonneg"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    budget_policy_id: Mapped[str] = mapped_column(
+        ForeignKey("project_budget_policies.id"), nullable=False, index=True
+    )
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    committed_amount: Mapped[Decimal] = mapped_column(
+        Numeric(24, 12), nullable=False, default=Decimal("0")
+    )
+    reserved_amount: Mapped[Decimal] = mapped_column(
+        Numeric(24, 12), nullable=False, default=Decimal("0")
+    )
+
+
+class BudgetReservation(Base, TimestampMixin):
+    """A per-request monetary reservation against one budget policy window."""
+
+    __tablename__ = "budget_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "reserved_amount >= 0", name="ck_budget_reservations_reserved_nonneg"
+        ),
+        CheckConstraint(
+            "committed_amount >= 0", name="ck_budget_reservations_committed_nonneg"
+        ),
+        CheckConstraint(
+            "state IN ('reserved', 'committed', 'released')",
+            name="ck_budget_reservations_state",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("inference_requests.id"), nullable=False, index=True
+    )
+    budget_policy_id: Mapped[str] = mapped_column(
+        ForeignKey("project_budget_policies.id"), nullable=False, index=True
+    )
+    price_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("price_snapshots.id"), nullable=False
+    )
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    reserved_amount: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    committed_amount: Mapped[Decimal] = mapped_column(
+        Numeric(24, 12), nullable=False, default=Decimal("0")
+    )
+    state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="reserved"
+    )  # reserved | committed | released
+    settlement_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    committed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class UsageRecord(Base, TimestampMixin):
+    """An immutable record of trustworthy measured usage for one request."""
+
+    __tablename__ = "usage_records"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_usage_records_request"),
+        CheckConstraint("amount >= 0", name="ck_usage_records_amount_nonneg"),
+        CheckConstraint("input_units >= 0", name="ck_usage_records_input_nonneg"),
+        CheckConstraint("output_units >= 0", name="ck_usage_records_output_nonneg"),
+        CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'", name="ck_usage_records_currency_format"
+        ),
+        CheckConstraint(
+            "billing_unit IN ('request', 'token')", name="ck_usage_records_billing_unit"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("inference_requests.id"), nullable=False, index=True
+    )
+    execution_attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_attempts.id"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"), nullable=False, index=True
+    )
+    principal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("principals.id"), nullable=True
+    )
+    api_credential_id: Mapped[str | None] = mapped_column(
+        ForeignKey("api_credentials.id"), nullable=True
+    )
+    model_alias_id: Mapped[str] = mapped_column(
+        ForeignKey("model_aliases.id"), nullable=False
+    )
+    route_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("route_bindings.id"), nullable=False
+    )
+    provider_account_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_accounts.id"), nullable=False
+    )
+    price_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("price_snapshots.id"), nullable=False
+    )
+    billing_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now()
+    )
+    upstream_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class LedgerEntry(Base, TimestampMixin):
+    """An immutable, append-only monetary ledger entry."""
+
+    __tablename__ = "ledger_entries"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_ledger_entries_idempotency"),
+        CheckConstraint(
+            "entry_type IN ('usage_debit', 'adjustment_credit', 'adjustment_debit')",
+            name="ck_ledger_entries_type",
+        ),
+        CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'", name="ck_ledger_entries_currency_format"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"), nullable=False, index=True
+    )
+    usage_record_id: Mapped[str | None] = mapped_column(
+        ForeignKey("usage_records.id"), nullable=True
+    )
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 __all__ = [
     "Project",
     "Principal",
@@ -445,4 +729,11 @@ __all__ = [
     "Reservation",
     "ExecutionAttempt",
     "StreamEvent",
+    "PricePolicy",
+    "PriceSnapshot",
+    "ProjectBudgetPolicy",
+    "BudgetWindow",
+    "BudgetReservation",
+    "UsageRecord",
+    "LedgerEntry",
 ]

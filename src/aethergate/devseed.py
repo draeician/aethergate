@@ -20,14 +20,18 @@ import argparse
 import asyncio
 import os
 import uuid
+from decimal import Decimal
 
 from aethergate.config import get_settings
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import Capability, QuotaMetric
+from aethergate.domain.enums import BillingUnit, Capability, QuotaMetric
 from aethergate.domain.ids import (
+    BudgetPolicyId,
     EndpointId,
     ModelAliasId,
+    PricePolicyId,
+    ProjectId,
     ProviderAccountId,
     ProviderId,
     QuotaGroupId,
@@ -61,6 +65,47 @@ def _parse_limit(value: str, kind: str) -> tuple[int, int]:
     if limit_units < 1 or window_seconds < 1:
         raise SystemExit(f"invalid --{kind} {value!r}: values must be >= 1")
     return limit_units, window_seconds
+
+
+def _parse_token_price(value: str) -> tuple[Decimal, Decimal, int]:
+    """Parse ``input_price/output_price/unit_scale`` (e.g. ``0.5/1.5/1000000``)."""
+    parts = value.split("/")
+    if len(parts) != 3:
+        raise SystemExit(
+            f"invalid --token-price {value!r}: expected input_price/output_price/unit_scale"
+        )
+    try:
+        input_price = Decimal(parts[0])
+        output_price = Decimal(parts[1])
+        unit_scale = int(parts[2])
+    except (ValueError, ArithmeticError):
+        raise SystemExit(
+            f"invalid --token-price {value!r}: prices/scale must be numeric"
+        ) from None
+    if input_price < 0 or output_price < 0 or unit_scale < 1:
+        raise SystemExit(
+            f"invalid --token-price {value!r}: prices must be >= 0 and scale >= 1"
+        )
+    return input_price, output_price, unit_scale
+
+
+def _parse_budget(value: str) -> tuple[Decimal, int]:
+    """Parse ``limit_amount/window_seconds`` into ``(limit_amount, window_seconds)``."""
+    parts = value.split("/")
+    if len(parts) != 2:
+        raise SystemExit(f"invalid --budget-limit {value!r}: expected limit_amount/window_seconds")
+    try:
+        limit_amount = Decimal(parts[0])
+        window_seconds = int(parts[1])
+    except (ValueError, ArithmeticError):
+        raise SystemExit(
+            f"invalid --budget-limit {value!r}: limit/window must be numeric"
+        ) from None
+    if limit_amount <= 0 or window_seconds < 1:
+        raise SystemExit(
+            f"invalid --budget-limit {value!r}: limit must be > 0 and window >= 1"
+        )
+    return limit_amount, window_seconds
 
 
 async def _ensure_quota_limits(
@@ -97,6 +142,97 @@ async def _ensure_quota_limits(
                         window_seconds=window_seconds,
                     ),
                 )
+
+
+async def _seed_price_and_budget(
+    session,
+    *,
+    args: argparse.Namespace,
+    route_binding_id: RouteBindingId,
+    project_id: ProjectId,
+) -> None:
+    """Idempotently seed optional route pricing and a project budget policy."""
+    currency = args.price_currency.strip().upper()
+    if args.request_price is not None and args.token_price is not None:
+        raise SystemExit("--request-price and --token-price are mutually exclusive")
+
+    if args.request_price is not None:
+        request_price = Decimal(args.request_price)
+        if request_price < 0:
+            raise SystemExit("--request-price must be >= 0")
+        existing = await repository.get_price_policy_for_route_binding(
+            session, route_binding_id
+        )
+        if existing is None:
+            await repository.create_price_policy(
+                session,
+                domain.PricePolicy(
+                    id=PricePolicyId(_new_id()),
+                    route_binding_id=route_binding_id,
+                    billing_unit=BillingUnit.REQUEST,
+                    currency=currency,
+                    unit_scale=1,
+                    request_price=request_price,
+                ),
+            )
+        elif (
+            existing.billing_unit != BillingUnit.REQUEST
+            or existing.currency != currency
+            or existing.request_price != request_price
+        ):
+            raise SystemExit("existing price policy differs from requested request price")
+
+    if args.token_price is not None:
+        input_price, output_price, unit_scale = _parse_token_price(args.token_price)
+        existing = await repository.get_price_policy_for_route_binding(
+            session, route_binding_id
+        )
+        if existing is None:
+            await repository.create_price_policy(
+                session,
+                domain.PricePolicy(
+                    id=PricePolicyId(_new_id()),
+                    route_binding_id=route_binding_id,
+                    billing_unit=BillingUnit.TOKEN,
+                    currency=currency,
+                    unit_scale=unit_scale,
+                    input_price=input_price,
+                    output_price=output_price,
+                ),
+            )
+        elif (
+            existing.billing_unit != BillingUnit.TOKEN
+            or existing.currency != currency
+            or existing.unit_scale != unit_scale
+            or existing.input_price != input_price
+            or existing.output_price != output_price
+        ):
+            raise SystemExit("existing price policy differs from requested token price")
+
+    if args.budget_limit is not None:
+        limit_amount, window_seconds = _parse_budget(args.budget_limit)
+        name = f"{currency}-budget"
+        existing = await repository.get_project_budget_policy_by_name(
+            session, project_id, name
+        )
+        if existing is None:
+            await repository.create_project_budget_policy(
+                session,
+                domain.ProjectBudgetPolicy(
+                    id=BudgetPolicyId(_new_id()),
+                    project_id=project_id,
+                    name=name,
+                    currency=currency,
+                    limit_amount=limit_amount,
+                    window_seconds=window_seconds,
+                ),
+            )
+        elif (
+            existing.currency != currency
+            or existing.limit_amount != limit_amount
+            or existing.window_seconds != window_seconds
+        ):
+            raise SystemExit("existing budget policy differs from requested budget")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -136,6 +272,29 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="default output-token reservation for the route",
+    )
+    parser.add_argument(
+        "--price-currency",
+        default=_env("AETHERGATE_SEED_PRICE_CURRENCY") or "USD",
+        help="currency for seeded price/budget (default USD)",
+    )
+    parser.add_argument(
+        "--request-price",
+        default=_env("AETHERGATE_SEED_REQUEST_PRICE"),
+        metavar="AMOUNT",
+        help="seed a request-priced policy with this per-request amount",
+    )
+    parser.add_argument(
+        "--token-price",
+        default=_env("AETHERGATE_SEED_TOKEN_PRICE"),
+        metavar="INPUT/OUTPUT/UNIT_SCALE",
+        help="seed a token-priced policy (input_price/output_price/unit_scale)",
+    )
+    parser.add_argument(
+        "--budget-limit",
+        default=_env("AETHERGATE_SEED_BUDGET_LIMIT"),
+        metavar="LIMIT/WINDOW_SECONDS",
+        help="seed a project budget policy (limit_amount/window_seconds)",
     )
     return parser.parse_args()
 
@@ -257,14 +416,18 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                 raise SystemExit("--default-output-tokens must be >= 1")
 
             existing = await repository.list_route_bindings(session, alias.id)
-            bound = any(
-                b.endpoint_id == endpoint.id
-                and b.provider_account_id == account.id
-                and b.upstream_model == args.upstream_model
-                for b in existing
+            binding = next(
+                (
+                    b
+                    for b in existing
+                    if b.endpoint_id == endpoint.id
+                    and b.provider_account_id == account.id
+                    and b.upstream_model == args.upstream_model
+                ),
+                None,
             )
-            if not bound:
-                await repository.create_route_binding(
+            if binding is None:
+                binding = await repository.create_route_binding(
                     session,
                     domain.RouteBinding(
                         id=RouteBindingId(_new_id()),
@@ -277,7 +440,13 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                     ),
                 )
 
-            await ensure_dev_identity(session)
+            project_id, _, _ = await ensure_dev_identity(session)
+            await _seed_price_and_budget(
+                session,
+                args=args,
+                route_binding_id=binding.id,
+                project_id=project_id,
+            )
 
     return {
         "provider_kind": kind,
@@ -292,6 +461,10 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
         "default_output_tokens": args.default_output_tokens,
         "upstream_model": args.upstream_model,
         "base_destination": base_destination,
+        "price_currency": args.price_currency.strip().upper(),
+        "request_price": args.request_price,
+        "token_price": args.token_price,
+        "budget_limit": args.budget_limit,
     }
 
 

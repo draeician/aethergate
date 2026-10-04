@@ -23,6 +23,19 @@ Quota DTOs (scheduler phase 2):
 - `RouteBindingCreate`/`Read`/`Update` carry `default_output_tokens` (positive) and
   `quota_group_id`, for the default bounded output-token reservation.
 
+Accounting DTOs (AGV2-010):
+
+- `PricePolicyCreate`/`Read`/`Update` — route pricing (request or token billing unit), currency,
+  positive `unit_scale`, non-negative `request_price`/`input_price`/`output_price`, `enabled`.
+- `ProjectBudgetPolicyCreate`/`Read`/`Update` — project spending-cap policy (positive
+  `limit_amount`, positive `window_seconds`, currency, `enabled`). Update DTOs do not expose mutable
+  historical accounting fields.
+- `BudgetStatusRead` — project/policy headroom (`limit - committed - reserved`), current
+  window start/end.
+- `BudgetReservationRead` — per-request reservation (reserved/committed, state, settlement reason).
+- `UsageRecordRead` — measured usage read shape (no content/secrets).
+- `LedgerEntryRead` — ledger entry read shape (signed amount, entry type, idempotency key, reason).
+
 No admin HTTP CRUD routes yet; these are the persistence/transport-independent foundations.
 
 ## Requirements honored

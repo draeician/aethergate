@@ -122,6 +122,22 @@ class AuditEventId(ResourceId):
     __slots__ = ()
 
 
+class PricePolicyId(ResourceId):
+    __slots__ = ()
+
+
+class BudgetPolicyId(ResourceId):
+    __slots__ = ()
+
+
+class BudgetWindowId(ResourceId):
+    __slots__ = ()
+
+
+class BudgetReservationId(ResourceId):
+    __slots__ = ()
+
+
 __all__ = [
     "ResourceId",
     "ProjectId",
@@ -142,4 +158,8 @@ __all__ = [
     "PriceSnapshotId",
     "LedgerEntryId",
     "AuditEventId",
+    "PricePolicyId",
+    "BudgetPolicyId",
+    "BudgetWindowId",
+    "BudgetReservationId",
 ]

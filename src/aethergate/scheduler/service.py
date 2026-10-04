@@ -11,11 +11,14 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aethergate.accounting import repository as accounting_repository
+from aethergate.accounting import service as accounting_service
 from aethergate.adapters.base import GenerationParams, Message, Usage
 from aethergate.catalog.service import (
     ResolvedRoute,
@@ -23,7 +26,7 @@ from aethergate.catalog.service import (
     resolve_model_alias_by_id,
 )
 from aethergate.config import Settings
-from aethergate.domain.enums import QuotaMetric, RequestState
+from aethergate.domain.enums import BillingUnit, QuotaMetric, RequestState
 from aethergate.domain.ids import (
     ApiCredentialId,
     ExecutionAttemptId,
@@ -48,6 +51,7 @@ from aethergate.errors import (
     UnsupportedProvider,
 )
 from aethergate.inference.service import InferenceService, PreparedDispatch
+from aethergate.persistence import models
 from aethergate.scheduler import repository as scheduler_repository
 
 logger = logging.getLogger(__name__)
@@ -218,6 +222,29 @@ class _QuotaEvaluation:
     cooldown_until: datetime | None = None
 
 
+@dataclass
+class _BudgetEvaluation:
+    """Outcome of evaluating (but not mutating) a request's budget constraints.
+
+    ``outcome`` is one of ``none`` (no applicable price/budget), ``ok``,
+    ``exhausted``, ``too_large``, ``unbounded_output``, or
+    ``estimator_unavailable``. ``price_policy`` is locked whenever a price policy
+    exists (even with no budget policies, so a snapshot is still captured at
+    dispatch); ``policies``/``windows`` are locked and ready to reserve in the
+    same transaction when ``outcome`` is ``ok``.
+    """
+
+    outcome: str
+    price_policy: models.PricePolicy | None = None
+    policies: list[models.ProjectBudgetPolicy] = field(default_factory=list)
+    windows: dict[str, models.BudgetWindow] = field(default_factory=dict)
+    required_amount: Decimal | None = None
+    input_units: int | None = None
+    output_units: int | None = None
+    blocking_policy: models.ProjectBudgetPolicy | None = None
+    next_eligible_at: datetime | None = None
+
+
 def _error_hint(exc: BaseException) -> str:
     if isinstance(exc, ProviderError):
         return exc.message
@@ -360,6 +387,9 @@ class SchedulingService:
                     await scheduler_repository.release_quota_reservations(
                         session, request_id=request_id, now=now
                     )
+                    await accounting_repository.release_budget_reservations(
+                        session, request_id=request_id, now=now
+                    )
                 else:
                     await scheduler_repository.set_cancellation_requested(session, request_id)
 
@@ -414,13 +444,18 @@ class SchedulingService:
         now = utcnow()
         async with self._session_factory() as session:
             async with session.begin():
-                return await scheduler_repository.reconcile_request(
+                result = await scheduler_repository.reconcile_request(
                     session,
                     request_id=request_id,
                     disposition=disposition,
                     operator=operator,
                     now=now,
                 )
+                if result:
+                    await accounting_repository.commit_budget_reservations_conservative(
+                        session, request_id=request_id, now=now, reason=disposition
+                    )
+                return result
 
     # --- worker-side --------------------------------------------------------
 
@@ -431,6 +466,10 @@ class SchedulingService:
             async with session.begin():
                 expired = await scheduler_repository.expire_overdue_queued(session, now)
                 reclaimed = await scheduler_repository.reclaim_expired_reserved(session, now)
+                for request_id in reclaimed:
+                    await accounting_repository.release_budget_reservations(
+                        session, request_id=request_id, now=now
+                    )
                 unknown = await scheduler_repository.mark_outcome_unknown_expired(session, now)
         if expired or reclaimed or unknown:
             logger.info(
@@ -449,8 +488,9 @@ class SchedulingService:
         saturated endpoint is skipped so it never blocks an unrelated endpoint
         with available capacity. Returns :class:`ClaimedWork`, ``"full"`` when
         every candidate endpoint is saturated, ``"processed"`` when a request was
-        resolved to a failure, ``"quota"`` when eligible work is quota-blocked, or
-        ``None`` when nothing is eligible.
+        resolved to a failure, ``"quota"`` when eligible work is quota-blocked,
+        ``"budget"`` when eligible work is budget-blocked, or ``None`` when
+        nothing is eligible.
         """
         now = utcnow()
         async with self._session_factory() as session:
@@ -459,6 +499,7 @@ class SchedulingService:
         saw_full = False
         saw_processed = False
         saw_quota = False
+        saw_budget = False
         for endpoint_id, quota_group_id, _oldest in scopes:
             outcome = await self._claim_scope(worker_id, endpoint_id, quota_group_id)
             if isinstance(outcome, ClaimedWork):
@@ -469,11 +510,15 @@ class SchedulingService:
                 saw_processed = True
             elif outcome == "quota":
                 saw_quota = True
+            elif outcome == "budget":
+                saw_budget = True
 
         if saw_processed:
             return "processed"
         if saw_quota:
             return "quota"
+        if saw_budget:
+            return "budget"
         if saw_full:
             return "full"
         return None
@@ -586,6 +631,53 @@ class SchedulingService:
                         )
                         return "quota"
 
+                budget_eval = await self._evaluate_budget(
+                    session,
+                    resolved=resolved,
+                    project_id=request.project_id,
+                    messages=messages,
+                    params=params,
+                    now=now,
+                )
+                if budget_eval.outcome == "too_large":
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="budget_request_too_large",
+                        finished_at=now,
+                    )
+                    return "processed"
+                if budget_eval.outcome == "unbounded_output":
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="budget_unbounded_output",
+                        finished_at=now,
+                    )
+                    return "processed"
+                if budget_eval.outcome == "estimator_unavailable":
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="budget_token_estimator_unavailable",
+                        finished_at=now,
+                    )
+                    return "processed"
+                if budget_eval.outcome == "exhausted":
+                    assert budget_eval.blocking_policy is not None
+                    await scheduler_repository.set_request_wait_metadata(
+                        session,
+                        request_id=request_id,
+                        wait_reason="budget_window_exhausted",
+                        wait_limit_id=budget_eval.blocking_policy.id,
+                        wait_limit_metric="budget",
+                        next_eligible_at=budget_eval.next_eligible_at,
+                    )
+                    return "budget"
+
                 endpoint = await scheduler_repository.lock_endpoint(session, resolved_endpoint_id)
                 if endpoint is None or not endpoint.is_active:
                     await scheduler_repository.fail_request_direct(
@@ -612,6 +704,37 @@ class SchedulingService:
                     await scheduler_repository.reserve_quota(
                         session, request_id=request_id, plan=quota_eval.plan
                     )
+
+                price_snapshot_id: str | None = None
+                if budget_eval.outcome == "ok" and budget_eval.price_policy is not None:
+                    price_snapshot_id = _new_id()
+                    price = budget_eval.price_policy
+                    await accounting_repository.create_price_snapshot(
+                        session,
+                        snapshot_id=price_snapshot_id,
+                        source_price_policy_id=price.id,
+                        route_binding_id=str(resolved.route_binding.id),
+                        provider_account_id=str(resolved.provider_account.id),
+                        model_alias_id=str(model_alias_id),
+                        billing_unit=price.billing_unit,
+                        currency=price.currency,
+                        unit_scale=price.unit_scale,
+                        request_price=price.request_price,
+                        input_price=price.input_price,
+                        output_price=price.output_price,
+                        captured_at=now,
+                    )
+                    request.price_snapshot_id = price_snapshot_id
+                    for policy in budget_eval.policies:
+                        await accounting_repository.reserve_budget(
+                            session,
+                            reservation_id=_new_id(),
+                            request_id=request_id,
+                            budget_policy_id=policy.id,
+                            price_snapshot_id=price_snapshot_id,
+                            window_start=budget_eval.windows[policy.id].window_start,
+                            amount=budget_eval.required_amount,
+                        )
 
                 reservation = await scheduler_repository.create_reservation(
                     session,
@@ -661,12 +784,18 @@ class SchedulingService:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
+                    await accounting_repository.release_budget_reservations(
+                        session, request_id=request_id, now=now
+                    )
                     return None
                 if dispatch == "not_reserved":
                     if effective_group_id is not None:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
+                    await accounting_repository.release_budget_reservations(
+                        session, request_id=request_id, now=now
+                    )
                     return None
                 if effective_group_id is not None:
                     await scheduler_repository.commit_request_quota(
@@ -749,6 +878,120 @@ class SchedulingService:
             return _QuotaEvaluation(outcome="exhausted", plan=plan)
         return _QuotaEvaluation(outcome="ok", plan=plan)
 
+    async def _evaluate_budget(
+        self,
+        session: AsyncSession,
+        *,
+        resolved: ResolvedRoute,
+        project_id: str | None,
+        messages: list[Message],
+        params: GenerationParams,
+        now: datetime,
+    ) -> _BudgetEvaluation:
+        """Evaluate (lock, never mutate) a request's monetary budget constraints.
+
+        Returns ``none`` when there is no applicable pricing or budget; ``ok`` with
+        a locked price policy and locked budget windows otherwise. Token-priced
+        routes with an active budget fail closed when the token estimator is
+        unavailable or no output bound exists, because a monetary reservation
+        cannot be computed without them.
+        """
+        if project_id is None:
+            return _BudgetEvaluation(outcome="none")
+
+        route_binding_id = str(resolved.route_binding.id)
+        price_policy = await accounting_repository.get_active_price_policy_for_route(
+            session, route_binding_id=route_binding_id
+        )
+        if price_policy is None:
+            return _BudgetEvaluation(outcome="none")
+
+        policies = [
+            p
+            for p in await accounting_repository.list_enabled_budget_policies_for_project(
+                session, project_id=project_id
+            )
+            if p.currency == price_policy.currency
+        ]
+        if not policies:
+            return _BudgetEvaluation(outcome="ok", price_policy=price_policy)
+
+        input_units: int | None = None
+        output_units: int | None = None
+        if price_policy.billing_unit == BillingUnit.TOKEN.value:
+            input_estimate = self._inference.estimate_tokens(resolved, messages, params)
+            if input_estimate is None:
+                return _BudgetEvaluation(
+                    outcome="estimator_unavailable", price_policy=price_policy
+                )
+            output_bound = params.max_tokens
+            if output_bound is None:
+                output_bound = resolved.route_binding.default_output_tokens
+            if output_bound is None:
+                return _BudgetEvaluation(
+                    outcome="unbounded_output", price_policy=price_policy
+                )
+            input_units = input_estimate
+            output_units = output_bound
+        required = accounting_service.reservation_amount(
+            price_policy, input_units=input_units or 0, output_units=output_units or 0
+        )
+
+        windows: dict[str, models.BudgetWindow] = {}
+        blocking_policy: models.ProjectBudgetPolicy | None = None
+        next_eligible: datetime | None = None
+        for policy in policies:
+            if required > policy.limit_amount:
+                return _BudgetEvaluation(
+                    outcome="too_large",
+                    price_policy=price_policy,
+                    policies=policies,
+                    required_amount=required,
+                    input_units=input_units,
+                    output_units=output_units,
+                    blocking_policy=policy,
+                )
+            window_start = scheduler_repository.fixed_window_start(
+                now, policy.window_seconds
+            )
+            window = await accounting_repository.get_or_create_budget_window(
+                session, budget_policy_id=policy.id, window_start=window_start
+            )
+            windows[policy.id] = window
+            if (
+                window.committed_amount
+                + window.reserved_amount
+                + required
+                > policy.limit_amount
+            ):
+                if blocking_policy is None:
+                    blocking_policy = policy
+                reset = window_start + timedelta(seconds=policy.window_seconds)
+                if next_eligible is None or reset > next_eligible:
+                    next_eligible = reset
+
+        if blocking_policy is not None:
+            return _BudgetEvaluation(
+                outcome="exhausted",
+                price_policy=price_policy,
+                policies=policies,
+                windows=windows,
+                required_amount=required,
+                input_units=input_units,
+                output_units=output_units,
+                blocking_policy=blocking_policy,
+                next_eligible_at=next_eligible,
+            )
+        return _BudgetEvaluation(
+            outcome="ok",
+            price_policy=price_policy,
+            policies=policies,
+            windows=windows,
+            required_amount=required,
+            input_units=input_units,
+            output_units=output_units,
+        )
+
     async def _apply_cooldown(self, claim: ClaimedWork, exc: ProviderError) -> None:
         """Apply a shared-quota-group cooldown from a provider 429 response."""
         if claim.quota_group_id is None:
@@ -781,17 +1024,12 @@ class SchedulingService:
                     result.upstream_request_id,
                 )
             )
-            usage_total = (
-                result.usage.total_tokens
-                if result.usage is not None and result.usage.total_tokens > 0
-                else None
-            )
             await self._settle(
                 claim,
                 state=RequestState.SUCCEEDED,
                 result_encrypted=result_encrypted,
                 upstream_request_id=result.upstream_request_id,
-                usage_total=usage_total,
+                usage=result.usage,
             )
         except (ProviderError, UnsupportedProvider, SecretResolutionError) as exc:
             if isinstance(exc, ProviderError):
@@ -810,7 +1048,7 @@ class SchedulingService:
         """Dispatch a streaming completion, persisting encrypted events, then settle."""
         seq = 0
         terminal_state = RequestState.SUCCEEDED
-        usage_total: int | None = None
+        usage: Usage | None = None
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
         try:
             async for chunk in claim.prepared.adapter.stream(
@@ -820,7 +1058,7 @@ class SchedulingService:
                     terminal_state = RequestState.CANCELLED
                     break
                 if chunk.usage is not None and chunk.usage.total_tokens > 0:
-                    usage_total = chunk.usage.total_tokens
+                    usage = chunk.usage
                 seq += 1
                 event = serialize_event(chunk.content, chunk.finish_reason, chunk.usage)
                 await self._append_event(claim.request_id, seq, event)
@@ -829,7 +1067,7 @@ class SchedulingService:
             ):
                 terminal_state = RequestState.CANCELLED
             await self._settle(
-                claim, state=terminal_state, result_encrypted=None, usage_total=usage_total
+                claim, state=terminal_state, result_encrypted=None, usage=usage
             )
         except (ProviderError, UnsupportedProvider, SecretResolutionError) as exc:
             if isinstance(exc, ProviderError):
@@ -891,7 +1129,7 @@ class SchedulingService:
         result_encrypted: bytes | None = None,
         error_code: str | None = None,
         upstream_request_id: str | None = None,
-        usage_total: int | None = None,
+        usage: Usage | None = None,
     ) -> None:
         """Settle to a terminal state, overriding to ``expired`` past lifetime.
 
@@ -909,7 +1147,12 @@ class SchedulingService:
                     result_encrypted = None
                     upstream_request_id = None
                     error_code = "lifetime_exceeded"
-                    usage_total = None
+                    usage = None
+                usage_total = (
+                    usage.total_tokens
+                    if usage is not None and usage.total_tokens > 0
+                    else None
+                )
                 settled = await scheduler_repository.settle(
                     session,
                     request_id=claim.request_id,
@@ -929,6 +1172,104 @@ class SchedulingService:
                         actual_tokens=usage_total,
                         now=now,
                     )
+                if settled:
+                    await self._settle_accounting(
+                        session,
+                        claim=claim,
+                        state=state,
+                        usage=usage,
+                        upstream_request_id=upstream_request_id,
+                        now=now,
+                    )
+
+    async def _settle_accounting(
+        self,
+        session: AsyncSession,
+        *,
+        claim: ClaimedWork,
+        state: str,
+        usage: Usage | None,
+        upstream_request_id: str | None,
+        now: datetime,
+    ) -> None:
+        """Settle monetary accounting (usage, ledger, budget) after a terminal state.
+
+        A captured price snapshot is required; without one the request carried no
+        pricing and there is nothing to record. A request without a project has no
+        billable attribution, so no usage/ledger/budget settlement applies.
+        """
+        request = await scheduler_repository.get_request(session, claim.request_id)
+        snapshot_id = request.price_snapshot_id if request is not None else None
+        if snapshot_id is None or request is None or request.project_id is None:
+            return
+
+        snapshot = await accounting_repository.get_price_snapshot_for_update(
+            session, snapshot_id=snapshot_id
+        )
+        if snapshot is None:
+            return
+
+        if state == RequestState.SUCCEEDED:
+            if snapshot.billing_unit == BillingUnit.REQUEST.value:
+                amount = accounting_service.request_reservation_amount(snapshot)
+                input_units = 0
+                output_units = 0
+                request_units = 1
+            else:
+                if usage is None or (usage.prompt_tokens + usage.completion_tokens) <= 0:
+                    await accounting_repository.commit_budget_reservations_conservative(
+                        session,
+                        request_id=claim.request_id,
+                        now=now,
+                        reason="unknown_usage",
+                    )
+                    return
+                amount = accounting_service.token_amount(
+                    snapshot,
+                    input_units=usage.prompt_tokens,
+                    output_units=usage.completion_tokens,
+                )
+                input_units = usage.prompt_tokens
+                output_units = usage.completion_tokens
+                request_units = None
+
+            usage_record = await accounting_repository.create_usage_record(
+                session,
+                request_id=claim.request_id,
+                execution_attempt_id=claim.attempt_id,
+                project_id=request.project_id,
+                principal_id=request.principal_id,
+                api_credential_id=request.api_credential_id,
+                model_alias_id=snapshot.model_alias_id,
+                route_binding_id=snapshot.route_binding_id,
+                provider_account_id=snapshot.provider_account_id,
+                price_snapshot_id=snapshot.id,
+                billing_unit=snapshot.billing_unit,
+                input_units=input_units,
+                output_units=output_units,
+                request_units=request_units,
+                amount=amount,
+                currency=snapshot.currency,
+                recorded_at=now,
+                upstream_request_id=upstream_request_id,
+            )
+            await accounting_repository.create_ledger_entry(
+                session,
+                project_id=request.project_id,
+                usage_record_id=usage_record.id,
+                entry_type="usage_debit",
+                amount=amount,
+                currency=snapshot.currency,
+                created_at=now,
+                idempotency_key=f"usage:{usage_record.id}",
+            )
+            await accounting_repository.settle_budget_reservations_to_actual(
+                session, request_id=claim.request_id, actual_amount=amount, now=now
+            )
+        else:
+            await accounting_repository.commit_budget_reservations_conservative(
+                session, request_id=claim.request_id, now=now, reason=state
+            )
 
     async def _enqueue(
         self,

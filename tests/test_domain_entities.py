@@ -20,6 +20,7 @@ from aethergate.domain.enums import BillingUnit, QuotaMetric, RequestState
 from aethergate.domain.ids import (
     EndpointId,
     ModelAliasId,
+    PricePolicyId,
     PriceSnapshotId,
     ProviderAccountId,
     QuotaGroupId,
@@ -102,23 +103,33 @@ def test_endpoint_max_concurrency_must_be_positive():
 def test_price_fields_use_decimal_not_float():
     p = PriceSnapshot(
         id=PriceSnapshotId("ps-1"),
+        source_price_policy_id=PricePolicyId("pp-1"),
+        route_binding_id=RouteBindingId("rb-1"),
+        provider_account_id=ProviderAccountId("pa-1"),
         model_alias_id=ModelAliasId("ma-1"),
         billing_unit=BillingUnit.TOKEN,
-        price_in=Decimal("0.000001"),
-        price_out=Decimal("0.000002"),
-        effective_from=_ts(),
+        currency="USD",
+        unit_scale=1_000_000,
+        input_price=Decimal("0.000001"),
+        output_price=Decimal("0.000002"),
+        captured_at=_ts(),
     )
-    assert isinstance(p.price_in, Decimal)
-    assert isinstance(p.price_out, Decimal)
-    assert not isinstance(p.price_in, float)
+    assert isinstance(p.input_price, Decimal)
+    assert isinstance(p.output_price, Decimal)
+    assert not isinstance(p.input_price, float)
     with pytest.raises(ValidationError):
         PriceSnapshot(
             id=PriceSnapshotId("ps-2"),
+            source_price_policy_id=PricePolicyId("pp-2"),
+            route_binding_id=RouteBindingId("rb-2"),
+            provider_account_id=ProviderAccountId("pa-2"),
             model_alias_id=ModelAliasId("ma-2"),
             billing_unit=BillingUnit.TOKEN,
-            price_in=0.000001,  # type: ignore[arg-type]
-            price_out=Decimal("0.000002"),
-            effective_from=_ts(),
+            currency="USD",
+            unit_scale=1_000_000,
+            input_price=0.000001,  # type: ignore[arg-type]
+            output_price=Decimal("0.000002"),
+            captured_at=_ts(),
         )
 
 

@@ -6,10 +6,19 @@ is rejected outright for money and pricing contracts.
 
 from __future__ import annotations
 
-from decimal import Decimal
+import re
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
 
 from pydantic import BeforeValidator
+
+# Fixed-point money quantization. 12 decimal places is enough for very small
+# per-token prices (e.g. a price of 2.50 per 1,000,000 tokens is 0.0000025 per
+# token) while leaving ample integer digits for large enterprise totals.
+MONEY_PRECISION = 12
+MONEY_QUANTUM = Decimal("1e-12")
+
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 def _to_decimal(value: object) -> Decimal:
@@ -29,11 +38,48 @@ def _to_non_negative_decimal(value: object) -> Decimal:
     return decimal_value
 
 
+def _to_positive_decimal(value: object) -> Decimal:
+    decimal_value = _to_decimal(value)
+    if decimal_value <= 0:
+        raise ValueError("monetary value must be positive")
+    return decimal_value
+
+
+def _to_currency(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"currency must be a str, got {type(value).__name__}")
+    normalized = value.strip().upper()
+    if not _CURRENCY_RE.fullmatch(normalized):
+        raise ValueError("currency must be an uppercase ISO-style 3-letter code")
+    return normalized
+
+
+def quantize_money(value: Decimal) -> Decimal:
+    """Quantize a monetary amount to the fixed money precision (half-up)."""
+    if not isinstance(value, Decimal):
+        value = _to_decimal(value)
+    return value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+
+
 # A monetary amount (fixed-point). Never float.
 Money = Annotated[Decimal, BeforeValidator(_to_decimal)]
 
 # A non-negative monetary amount, e.g. a price or a budget allowance.
 NonNegativeMoney = Annotated[Decimal, BeforeValidator(_to_non_negative_decimal)]
 
+# A strictly positive monetary amount (e.g. a budget limit).
+PositiveMoney = Annotated[Decimal, BeforeValidator(_to_positive_decimal)]
 
-__all__ = ["Money", "NonNegativeMoney"]
+# An explicit, normalized uppercase ISO-style three-letter currency code.
+Currency = Annotated[str, BeforeValidator(_to_currency)]
+
+
+__all__ = [
+    "MONEY_PRECISION",
+    "MONEY_QUANTUM",
+    "Money",
+    "NonNegativeMoney",
+    "PositiveMoney",
+    "Currency",
+    "quantize_money",
+]

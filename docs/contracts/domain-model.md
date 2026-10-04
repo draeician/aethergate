@@ -16,7 +16,9 @@ not part of any contract.
 
 `domain/enums.py` defines `Capability`, `BillingUnit`, `PrincipalKind`, `RequestState`,
 `ExecutionAttemptState`, `LedgerEntryType`, `QuotaMetric` (`requests`|`tokens`), and
-`QuotaReservationState` (`reserved`|`committed`|`released`). `RequestState` includes the full
+`QuotaReservationState` (`reserved`|`committed`|`released`), plus `BudgetReservationState`
+(`reserved`|`committed`|`released`). `LedgerEntryType` is `usage_debit`|`adjustment_credit`|
+`adjustment_debit`. `RequestState` includes the full
 lifecycle through `outcome_unknown`:
 
 `validated -> queued -> reserved -> dispatched -> streaming -> succeeded/failed/cancelled/expired`
@@ -29,8 +31,10 @@ as part of releasing the held reservation. There is no automatic replay or bulk 
 
 ## Value objects
 
-`domain/value_objects.py` defines `Money` and `NonNegativeMoney` as fixed-point `Decimal`
-values. Binary floating point (`float`) is rejected for money and pricing. There is no
+`domain/value_objects.py` defines `Money`, `NonNegativeMoney`, and `PositiveMoney` as fixed-point
+`Decimal` values, `Currency` (normalized uppercase ISO-style three-letter code), and
+`quantize_money()` (rounds half-up to `MONEY_PRECISION = 12`, `MONEY_QUANTUM = 1e-12`). Binary
+floating point (`float`) is rejected for money and pricing. There is no
 `balance` field that universally determines authorization.
 
 ## Entities
@@ -41,7 +45,25 @@ values. Binary floating point (`float`) is rejected for money and pricing. There
 - Catalog/routing: `Provider`, `ProviderAccount`, `SecretRef`, `Endpoint`, `QuotaGroup`,
   `QuotaLimit`, `ModelAlias`, `RouteBinding`.
 - Scheduler/execution: `InferenceRequest`, `ExecutionAttempt`, `Reservation`.
-- Accounting/audit: `UsageRecord`, `PriceSnapshot`, `LedgerEntry`, `AuditEvent`.
+- Accounting/audit: `PricePolicy`, `PriceSnapshot`, `ProjectBudgetPolicy`, `BudgetWindow`,
+  `BudgetReservation`, `UsageRecord`, `LedgerEntry`, `AuditEvent`.
+
+### Accounting entities (AGV2-010)
+
+- `PricePolicy` — mutable pricing configuration associated with a `RouteBinding` (request or token
+  billing unit, `currency`, positive `unit_scale`, non-negative prices, `enabled`). Editable; not the
+  historical record.
+- `PriceSnapshot` — immutable capture of the effective price at a dispatch decision (source policy
+  ID, route binding, provider account, model alias, billing unit, currency, unit scale, prices,
+  captured timestamp). Never updated/deleted in normal operation.
+- `ProjectBudgetPolicy` — optional project spending-cap policy (name, currency, positive
+  `limit_amount`, positive `window_seconds`, `enabled`). Not a prepaid balance.
+- `BudgetWindow` — authoritative committed/reserved monetary amounts per policy window.
+- `BudgetReservation` — per-request monetary reservation (request, policy, snapshot, window,
+  reserved/committed amounts, state, settlement reason).
+- `UsageRecord` — immutable measured usage (one per request; no content/secrets).
+- `LedgerEntry` — immutable append-only entry (`usage_debit` references a `UsageRecord`;
+  adjustments do not; signed typed Decimal amount, idempotency key, optional reason).
 
 ## Separation of concerns
 
@@ -49,9 +71,10 @@ The model keeps these concepts separate (per `project_spec.md`):
 
 - authorization / entitlement (project/principal/credential identity)
 - quota / capacity policy (`QuotaGroup`, `Reservation`)
-- budget policy (later policy modules; not a mandatory balance gate)
+- budget policy (`ProjectBudgetPolicy`, `BudgetReservation`) — optional spending cap, not a
+  mandatory balance gate
 - usage accounting (`UsageRecord`)
-- pricing (`PriceSnapshot`, immutable)
+- pricing (`PricePolicy` mutable, `PriceSnapshot` immutable)
 - settlement / billing (`LedgerEntry`)
 
 Prepaid billing is not mandatory and is not foreclosed; a positive balance is not a

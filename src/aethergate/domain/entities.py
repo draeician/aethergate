@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from aethergate.domain.enums import (
     BillingUnit,
+    BudgetReservationState,
     Capability,
     LedgerEntryType,
     PrincipalKind,
@@ -24,10 +25,14 @@ from aethergate.domain.enums import (
 from aethergate.domain.ids import (
     ApiCredentialId,
     AuditEventId,
+    BudgetPolicyId,
+    BudgetReservationId,
+    BudgetWindowId,
     EndpointId,
     ExecutionAttemptId,
     LedgerEntryId,
     ModelAliasId,
+    PricePolicyId,
     PriceSnapshotId,
     PrincipalId,
     ProjectId,
@@ -41,7 +46,12 @@ from aethergate.domain.ids import (
     SecretRefId,
     UsageRecordId,
 )
-from aethergate.domain.value_objects import Money, NonNegativeMoney
+from aethergate.domain.value_objects import (
+    Currency,
+    Money,
+    NonNegativeMoney,
+    PositiveMoney,
+)
 
 
 class Entity(BaseModel):
@@ -253,33 +263,147 @@ class Reservation(Entity):
 # ---------------------------------------------------------------------------
 
 
+class PricePolicy(Entity):
+    """Mutable pricing configuration associated with a route binding.
+
+    This is the editable configuration, *not* the historical record. A captured
+    :class:`PriceSnapshot` is immutable and never changes when this policy is
+    edited later.
+    """
+
+    id: PricePolicyId
+    route_binding_id: RouteBindingId
+    billing_unit: BillingUnit
+    currency: Currency
+    unit_scale: int = 1
+    request_price: NonNegativeMoney | None = None
+    input_price: NonNegativeMoney | None = None
+    output_price: NonNegativeMoney | None = None
+    enabled: bool = True
+    name: str | None = None
+
+    @field_validator("unit_scale")
+    @classmethod
+    def _positive_unit_scale(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("unit_scale must be >= 1")
+        return value
+
+
 class PriceSnapshot(Entity):
+    """An immutable capture of the effective price at a dispatch decision.
+
+    Contains everything needed to reproduce the monetary calculation later
+    without reading mutable pricing configuration. Never updated or deleted by
+    application code during normal operation.
+    """
+
     id: PriceSnapshotId
+    source_price_policy_id: PricePolicyId
+    route_binding_id: RouteBindingId
+    provider_account_id: ProviderAccountId
     model_alias_id: ModelAliasId
     billing_unit: BillingUnit
-    price_in: NonNegativeMoney
-    price_out: NonNegativeMoney
-    effective_from: datetime
+    currency: Currency
+    unit_scale: int
+    request_price: NonNegativeMoney | None = None
+    input_price: NonNegativeMoney | None = None
+    output_price: NonNegativeMoney | None = None
+    captured_at: datetime
+
+
+class ProjectBudgetPolicy(Entity):
+    """An optional project-level spending-cap policy.
+
+    A project with no enabled budget policy is never monetarily blocked. A
+    project may carry more than one enabled policy; every applicable
+    same-currency policy must admit a request.
+    """
+
+    id: BudgetPolicyId
+    project_id: ProjectId
+    name: str
+    currency: Currency
+    limit_amount: PositiveMoney
+    window_seconds: int
+    enabled: bool = True
+
+    @field_validator("window_seconds")
+    @classmethod
+    def _positive_window(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("window_seconds must be >= 1")
+        return value
+
+
+class BudgetWindow(Entity):
+    """Authoritative committed/reserved monetary amounts for one policy window."""
+
+    id: BudgetWindowId
+    budget_policy_id: BudgetPolicyId
+    window_start: datetime
+    committed_amount: NonNegativeMoney
+    reserved_amount: NonNegativeMoney
+
+
+class BudgetReservation(Entity):
+    """A per-request monetary reservation against one budget policy window."""
+
+    id: BudgetReservationId
+    request_id: RequestId
+    budget_policy_id: BudgetPolicyId
+    price_snapshot_id: PriceSnapshotId
+    window_start: datetime
+    reserved_amount: NonNegativeMoney
+    committed_amount: NonNegativeMoney
+    state: BudgetReservationState
+    settlement_reason: str | None = None
 
 
 class UsageRecord(Entity):
+    """An immutable record of trustworthy measured usage for one request.
+
+    One logical settled usage record exists per request; uniqueness is enforced
+    in PostgreSQL. Carries no prompt/completion content or secret material.
+    """
+
     id: UsageRecordId
     request_id: RequestId
+    execution_attempt_id: ExecutionAttemptId
     project_id: ProjectId
+    principal_id: PrincipalId | None = None
+    api_credential_id: ApiCredentialId | None = None
     model_alias_id: ModelAliasId
+    route_binding_id: RouteBindingId
+    provider_account_id: ProviderAccountId
+    price_snapshot_id: PriceSnapshotId
     billing_unit: BillingUnit
     input_units: int
     output_units: int
-    price_snapshot_id: PriceSnapshotId
+    request_units: int | None = None
+    amount: NonNegativeMoney
+    currency: Currency
+    recorded_at: datetime
+    upstream_request_id: str | None = None
 
 
 class LedgerEntry(Entity):
+    """An immutable, append-only monetary ledger entry.
+
+    A ``usage_debit`` entry references its :class:`UsageRecord`; an explicit
+    ``adjustment_credit``/``adjustment_debit`` entry does not. ``amount`` is a
+    signed, typed Decimal amount.
+    """
+
     id: LedgerEntryId
     project_id: ProjectId
     usage_record_id: UsageRecordId | None = None
     entry_type: LedgerEntryType
     amount: Money
+    currency: Currency
     created_at: datetime
+    idempotency_key: str | None = None
+    reason: str | None = None
 
 
 class AuditEvent(Entity):
@@ -308,8 +432,12 @@ __all__ = [
     "InferenceRequest",
     "ExecutionAttempt",
     "Reservation",
-    "UsageRecord",
+    "PricePolicy",
     "PriceSnapshot",
+    "ProjectBudgetPolicy",
+    "BudgetWindow",
+    "BudgetReservation",
+    "UsageRecord",
     "LedgerEntry",
     "AuditEvent",
 ]

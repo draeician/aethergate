@@ -44,6 +44,13 @@ EXPECTED_TABLES = {
     "reservations",
     "execution_attempts",
     "stream_events",
+    "price_policies",
+    "price_snapshots",
+    "project_budget_policies",
+    "budget_windows",
+    "budget_reservations",
+    "usage_records",
+    "ledger_entries",
 }
 
 
@@ -160,5 +167,38 @@ def test_migration_0005_to_0006() -> None:
         assert "ck_route_bindings_default_output_positive" in _check_constraints(
             url, "route_bindings"
         )
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0006_to_0007() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig67")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0006", env=env)
+        assert "price_snapshot_id" not in _columns(url, "inference_requests")
+        assert "price_snapshots" not in asyncio.run(_table_names(url))
+
+        _run_alembic("upgrade", "head", env=env)
+        assert "price_snapshot_id" in _columns(url, "inference_requests")
+        assert "price_policies" in asyncio.run(_table_names(url))
+        assert "price_snapshots" in asyncio.run(_table_names(url))
+        assert "project_budget_policies" in asyncio.run(_table_names(url))
+        assert "budget_windows" in asyncio.run(_table_names(url))
+        assert "budget_reservations" in asyncio.run(_table_names(url))
+        assert "usage_records" in asyncio.run(_table_names(url))
+        assert "ledger_entries" in asyncio.run(_table_names(url))
+        assert "ck_budget_policies_limit_positive" in _check_constraints(
+            url, "project_budget_policies"
+        )
+        assert "ck_budget_windows_committed_nonneg" in _check_constraints(url, "budget_windows")
+        assert "ck_budget_reservations_state" in _check_constraints(url, "budget_reservations")
+        assert "ck_usage_records_billing_unit" in _check_constraints(url, "usage_records")
+        assert "ck_ledger_entries_type" in _check_constraints(url, "ledger_entries")
     finally:
         asyncio.run(drop_database(url))

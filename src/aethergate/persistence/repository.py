@@ -10,11 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import Capability, PrincipalKind, QuotaMetric
+from aethergate.domain.enums import BillingUnit, Capability, PrincipalKind, QuotaMetric
 from aethergate.domain.ids import (
     ApiCredentialId,
+    BudgetPolicyId,
     EndpointId,
     ModelAliasId,
+    PricePolicyId,
     PrincipalId,
     ProjectId,
     ProviderAccountId,
@@ -473,3 +475,92 @@ async def get_api_credential_by_name(
     )
     row = result.scalar_one_or_none()
     return _api_credential_to_domain(row) if row else None
+
+
+def _price_policy_to_domain(row: models.PricePolicy) -> domain.PricePolicy:
+    return domain.PricePolicy(
+        id=PricePolicyId(row.id),
+        route_binding_id=RouteBindingId(row.route_binding_id),
+        billing_unit=BillingUnit(row.billing_unit),
+        currency=row.currency,
+        unit_scale=row.unit_scale,
+        request_price=row.request_price,
+        input_price=row.input_price,
+        output_price=row.output_price,
+        enabled=row.enabled,
+        name=row.name,
+    )
+
+
+async def create_price_policy(
+    session: AsyncSession, entity: domain.PricePolicy
+) -> domain.PricePolicy:
+    row = models.PricePolicy(
+        id=str(entity.id),
+        route_binding_id=str(entity.route_binding_id),
+        billing_unit=entity.billing_unit.value,
+        currency=entity.currency,
+        unit_scale=entity.unit_scale,
+        request_price=entity.request_price,
+        input_price=entity.input_price,
+        output_price=entity.output_price,
+        enabled=entity.enabled,
+        name=entity.name,
+    )
+    session.add(row)
+    await session.flush()
+    return _price_policy_to_domain(row)
+
+
+async def get_price_policy_for_route_binding(
+    session: AsyncSession, route_binding_id: RouteBindingId
+) -> domain.PricePolicy | None:
+    result = await session.execute(
+        select(models.PricePolicy).where(
+            models.PricePolicy.route_binding_id == str(route_binding_id)
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _price_policy_to_domain(row) if row else None
+
+
+def _budget_policy_to_domain(row: models.ProjectBudgetPolicy) -> domain.ProjectBudgetPolicy:
+    return domain.ProjectBudgetPolicy(
+        id=BudgetPolicyId(row.id),
+        project_id=ProjectId(row.project_id),
+        name=row.name,
+        currency=row.currency,
+        limit_amount=row.limit_amount,
+        window_seconds=row.window_seconds,
+        enabled=row.enabled,
+    )
+
+
+async def create_project_budget_policy(
+    session: AsyncSession, entity: domain.ProjectBudgetPolicy
+) -> domain.ProjectBudgetPolicy:
+    row = models.ProjectBudgetPolicy(
+        id=str(entity.id),
+        project_id=str(entity.project_id),
+        name=entity.name,
+        currency=entity.currency,
+        limit_amount=entity.limit_amount,
+        window_seconds=entity.window_seconds,
+        enabled=entity.enabled,
+    )
+    session.add(row)
+    await session.flush()
+    return _budget_policy_to_domain(row)
+
+
+async def get_project_budget_policy_by_name(
+    session: AsyncSession, project_id: ProjectId, name: str
+) -> domain.ProjectBudgetPolicy | None:
+    result = await session.execute(
+        select(models.ProjectBudgetPolicy).where(
+            models.ProjectBudgetPolicy.project_id == str(project_id),
+            models.ProjectBudgetPolicy.name == name,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _budget_policy_to_domain(row) if row else None

@@ -53,9 +53,16 @@ class ExecutionAttemptState(StrEnum):
 
 
 class LedgerEntryType(StrEnum):
-    DEBIT = "debit"
-    CREDIT = "credit"
-    ADJUSTMENT = "adjustment"
+    """The type of an append-only monetary ledger entry.
+
+    A ledger entry is either a priced measured-usage debit (backed by a
+    ``UsageRecord``) or an explicit adjustment credit/debit (no usage record).
+    It is an accounting/event primitive, not a mandatory prepaid balance.
+    """
+
+    USAGE_DEBIT = "usage_debit"
+    ADJUSTMENT_CREDIT = "adjustment_credit"
+    ADJUSTMENT_DEBIT = "adjustment_debit"
 
 
 class QuotaMetric(StrEnum):
@@ -73,6 +80,14 @@ class QuotaReservationState(StrEnum):
     RELEASED = "released"
 
 
+class BudgetReservationState(StrEnum):
+    """Lifecycle of a single per-request monetary budget reservation."""
+
+    RESERVED = "reserved"
+    COMMITTED = "committed"
+    RELEASED = "released"
+
+
 __all__ = [
     "Capability",
     "BillingUnit",
@@ -82,4 +97,5 @@ __all__ = [
     "LedgerEntryType",
     "QuotaMetric",
     "QuotaReservationState",
+    "BudgetReservationState",
 ]

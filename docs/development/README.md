@@ -20,8 +20,7 @@ scripts/dev/v2 <command>
 | `workers [N]` | Scale the scheduler worker service to N replicas (default 2). |
 | `inspect` | Print a scheduler queue-state summary (state counts, endpoints, active reservations, quota windows, queued requests' limiting reasons). |
 | `reconcile list` | List `outcome_unknown` requests (metadata only, never content). |
-| `reconcile resolve <id> --disposition <state> --by <op>` | Explicitly reconcile an `outcome_unknown` request to `failed`/`cancelled`/`succeeded` and release its held reservation. |
-| `down` | Stop the stack, keeping the PostgreSQL volume. |
+| `reconcile resolve <id> --disposition <state> --by <op>` | Explicitly reconcile an `outcome_unknown` request to `failed`/`cancelled`/`succeeded` and release its held reservation. || `down` | Stop the stack, keeping the PostgreSQL volume. |
 | `reset` | Stop the stack and **delete** the PostgreSQL volume (destructive). |
 
 ## Port and network rules
@@ -63,8 +62,10 @@ scripts/dev/v2 <command>
 Inference is a **durable queue** path: the API enqueues an encrypted request and the worker claims
 and dispatches it. Physical endpoint concurrency is enforced by `endpoint.max_concurrency`, and
 shared provider-account request/token quotas are reserved transactionally with endpoint capacity
-(migration `0005`). Queued work persists in PostgreSQL and is recovered when workers restart. It
-does **not** yet enforce project monetary budgets. Inference is unauthenticated only under
+(migration `0005`). Accounting (migration `0007`) adds immutable price snapshots, usage records,
+optional project budget policy, monetary budget reservations, and an append-only ledger, reserved in
+the same atomic admission transaction (see `docs/architecture/accounting.md`). Queued work persists
+in PostgreSQL and is recovered when workers restart. Inference is unauthenticated only under
 `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` (development only, and rejected in `prod` mode).
 Upstream hosts must be explicitly allowlisted via `AETHERGATE_UPSTREAM_ALLOWLIST` (comma-separated);
 empty means deny all.
@@ -87,6 +88,14 @@ docker compose --project-directory deploy/v2 --file deploy/v2/compose.yaml \
   --token-limit 60000/60 \
   --default-output-tokens 64
 ```
+
+Accounting seed options (AGV2-010), all idempotent:
+
+- `--price-currency USD` — currency for seeded price/budget (default `USD`).
+- `--request-price AMOUNT` — seed a request-priced policy on the route.
+- `--token-price INPUT/OUTPUT/UNIT_SCALE` — seed a token-priced policy (e.g. `1/1/1000`).
+- `--budget-limit LIMIT/WINDOW_SECONDS` — seed a project budget policy on the dev project
+  (e.g. `0.10/60`).
 
 Values may also be provided via `AETHERGATE_SEED_PROVIDER_KIND`, `AETHERGATE_SEED_UPSTREAM_MODEL`,
 `AETHERGATE_SEED_PUBLIC_ALIAS`, `AETHERGATE_SEED_BASE_DESTINATION`,
@@ -112,10 +121,13 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 ## Migrations
 
-The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0005`; `0003`
+The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0007`; `0003`
 adds scheduler tables, `endpoints.max_concurrency`, and a `BigInteger` fencing token; `0004` adds a
 positive-concurrency CHECK on `endpoints` and reconciliation metadata on `inference_requests`;
 `0005` adds shared provider-account request/token quotas — `quota_limits`, `quota_windows`,
 `quota_reservations`, `quota_groups.provider_account_id`/`cooldown_until`,
-`route_bindings.default_output_tokens`, `inference_requests.wait_reason`). Schema is applied only
+`route_bindings.default_output_tokens`, `inference_requests.wait_reason`; `0006` hardens shared-quota
+admission metadata; `0007` adds the accounting foundation — `price_policies`, `price_snapshots`,
+`project_budget_policies`, `budget_windows`, `budget_reservations`, `usage_records`,
+`ledger_entries`, `inference_requests.price_snapshot_id`). Schema is applied only
 via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

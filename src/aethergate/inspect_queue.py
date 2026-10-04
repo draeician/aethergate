@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import timedelta
 
 from sqlalchemy import func, select
 
@@ -58,18 +59,54 @@ async def _run() -> None:
                 .order_by(models.QuotaGroup.name, models.QuotaLimit.metric)
             )
         ).all()
+        budget_windows = (
+            await session.execute(
+                select(
+                    models.ProjectBudgetPolicy.name,
+                    models.ProjectBudgetPolicy.currency,
+                    models.ProjectBudgetPolicy.limit_amount,
+                    models.ProjectBudgetPolicy.window_seconds,
+                    models.BudgetWindow.window_start,
+                    models.BudgetWindow.committed_amount,
+                    models.BudgetWindow.reserved_amount,
+                )
+                .join(
+                    models.BudgetWindow,
+                    models.BudgetWindow.budget_policy_id == models.ProjectBudgetPolicy.id,
+                )
+                .order_by(models.ProjectBudgetPolicy.name, models.BudgetWindow.window_start)
+            )
+        ).all()
         waiting = (
             await session.execute(
                 select(
                     models.InferenceRequest.id,
                     models.InferenceRequest.state,
                     models.InferenceRequest.wait_reason,
+                    models.InferenceRequest.wait_limit_id,
+                    models.InferenceRequest.wait_limit_metric,
                 )
                 .where(
                     models.InferenceRequest.state == "queued",
                     models.InferenceRequest.wait_reason.is_not(None),
                 )
                 .order_by(models.InferenceRequest.queued_at)
+            )
+        ).all()
+        recent_requests = (
+            await session.execute(
+                select(
+                    models.InferenceRequest.id,
+                    models.InferenceRequest.state,
+                    models.InferenceRequest.price_snapshot_id,
+                    models.UsageRecord.id,
+                )
+                .outerjoin(
+                    models.UsageRecord,
+                    models.UsageRecord.request_id == models.InferenceRequest.id,
+                )
+                .order_by(models.InferenceRequest.created_at.desc())
+                .limit(50)
             )
         ).all()
 
@@ -96,11 +133,32 @@ async def _run() -> None:
             f"reserved={reserved} cooldown_until={cd}"
         )
 
+    print("\nproject budgets (name / committed / reserved / headroom / limit / reset):")
+    if not budget_windows:
+        print("  (none)")
+    for name, _currency, limit, window_seconds, start, committed, reserved in budget_windows:
+        headroom = limit - committed - reserved
+        reset = start + timedelta(seconds=window_seconds)
+        print(
+            f"  {name} committed={committed} reserved={reserved} "
+            f"headroom={headroom} limit={limit} reset={reset.isoformat()}"
+        )
+
     print("\nqueued requests with a limiting reason:")
     if not waiting:
         print("  (none)")
-    for request_id, _state, reason in waiting:
-        print(f"  {request_id}: {reason}")
+    for request_id, _state, reason, limit_id, metric in waiting:
+        detail = f" limit={limit_id}/{metric}" if limit_id else ""
+        print(f"  {request_id}: {reason}{detail}")
+
+    print("\nrecent requests (id / state / snapshot / usage_record):")
+    if not recent_requests:
+        print("  (none)")
+    for request_id, state, snapshot_id, usage_record_id in recent_requests:
+        print(
+            f"  {request_id}: {state} snapshot={snapshot_id or '-'} "
+            f"usage_record={usage_record_id or '-'}"
+        )
 
 
 def main() -> None:

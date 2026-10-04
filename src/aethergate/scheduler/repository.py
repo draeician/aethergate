@@ -585,7 +585,7 @@ async def reclaim_expired_reserved(session: AsyncSession, now: datetime) -> list
     Only state ``reserved`` (dispatch intent not yet durable) is safely
     reclaimable. Requests already past their queue-wait deadline expire instead
     of being requeued. Row locks make concurrent recovery loops idempotent.
-    Returns the freed reservation IDs.
+    Returns the reclaimed request IDs.
     """
     rows = (
         await session.execute(
@@ -630,7 +630,6 @@ async def reclaim_expired_reserved(session: AsyncSession, now: datetime) -> list
             )
         ).scalars().all()
         for reservation in reservations:
-            freed.append(reservation.id)
             await release_reservation(session, reservation.id, now)
         # Abandon any reserved attempts for this request.
         await session.execute(
@@ -644,6 +643,7 @@ async def reclaim_expired_reserved(session: AsyncSession, now: datetime) -> list
         # Reclaim pre-dispatch quota reservation: the request never dispatched,
         # so its reserved request/token units are returned to the window.
         await release_quota_reservations(session, request_id=row.id, now=now)
+        freed.append(row.id)
     return freed
 
 

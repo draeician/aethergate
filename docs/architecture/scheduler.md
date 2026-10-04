@@ -172,6 +172,45 @@ Schema: migration `0005` adds `quota_groups.provider_account_id` (+ NOT NULL) an
 `(quota_limit_id, window_start)`), and `quota_reservations`; adds
 `route_bindings.default_output_tokens` and `inference_requests.wait_reason`.
 
+## Phase 4 — accounting foundation (implemented)
+
+AGV2-010 adds immutable pricing snapshots, authoritative usage records, optional project budget
+policy, monetary budget reservations, an append-only ledger, and idempotent settlement. Full
+semantics live in `docs/architecture/accounting.md`; the scheduler-relevant parts are summarized
+here.
+
+- **Pricing snapshot.** At the final admission/dispatch decision, the effective `PricePolicy` is
+  captured into an immutable `PriceSnapshot` (referenced by `inference_requests.price_snapshot_id`).
+  Editing a price policy never alters an existing snapshot; a request that never dispatches never
+  creates priced usage.
+- **Budget admission.** Budget evaluation participates in the same all-or-nothing admission
+  transaction as request/token quota and endpoint physical capacity. `_evaluate_budget` locks (never
+  mutates) the price policy and budget windows, then reserves only when every constraint admits.
+  Lock order: request/scope rows -> project budget policy/windows -> provider quota group/limit/
+  windows -> endpoint physical capacity -> request/attempt/reservation mutations.
+- **Budget wait metadata.** A budget-exhausted request stays queued with
+  `wait_reason=budget_window_exhausted`, `wait_limit_metric="budget"`, and `next_eligible_at` (next
+  window reset) — distinct from quota and endpoint-full waiting. Budget-blocked work holds no
+  endpoint slot and no monetary reservation.
+- **Fail-closed token budget.** A token-priced route with an active budget fails closed when the
+  token estimator is unavailable (`budget_token_estimator_unavailable`) or output is unbounded
+  (`budget_unbounded_output`). A request whose minimum reservation cannot fit an empty window fails
+  with `budget_request_too_large`.
+- **Settlement.** Success settles the budget reservation to actual (releasing unused), creates the
+  `UsageRecord` and its `usage_debit` ledger entry idempotently. Unknown-usage post-dispatch
+  failure/cancellation conservatively commits the reservation with no measured usage.
+  `outcome_unknown` keeps the reservation held; explicit reconciliation conservatively commits it.
+  Pre-dispatch cancel/reclaim releases the reservation completely.
+- **No-budget / no-price path.** A route with no price policy, or a project with no active budget
+  policy, is never monetarily blocked and creates no accounting rows.
+
+Schema: migration `0007` creates `price_policies`, `price_snapshots`, `project_budget_policies`,
+`budget_windows`, `budget_reservations`, `usage_records`, and `ledger_entries`; adds
+`inference_requests.price_snapshot_id` (and its index) and `inference_requests.wait_limit_metric`;
+adds CHECK constraints for currency format, positive budget/window amounts, nonnegative
+reserved/committed amounts, supported reservation/ledger states/types, positive unit scale, and
+idempotency uniqueness.
+
 ## Conservative lease / recovery (phase 1 rules)
 
 - A request whose lease expires while still `reserved` (dispatch intent not yet durable) is safe to
@@ -235,7 +274,7 @@ enforcement more predictable. (Settled)
 - Fairness/reordering mode *within* a single endpoint (beyond per-endpoint FIFO) — must be explicit
   if introduced. Cross-endpoint head-of-line blocking is already prevented (see the contract above).
 - Caching/wake-up mechanism for empty-queue -> arrival signaling (added only after measurement).
-- Project monetary budgets and pricing/accounting settlement — later phase, to participate in the
-  same atomic admission transaction once price snapshots/reservations exist.
+- Project monetary budgets and pricing/accounting settlement — implemented in AGV2-010 (see
+  `docs/architecture/accounting.md`).
 - Retries (bounded, jittered) for eligible failures — later phase.
 - Key rotation for the queue-content encryption key (deferred unless safely straightforward).
