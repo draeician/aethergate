@@ -2,18 +2,36 @@
 
 ## Current State
 - Branch: v2
-- Starting commit: 21e3f3f (pulled latest origin/v2; AGV2-006 queued)
-- Implementation commit(s): `0d19829` `fix(scheduler): harden leases admission and cancellation` (this task)
+- Starting commit: 7fe496a (pulled latest origin/v2; AGV2-007 queued)
+- Implementation commit(s): `4865b66` `fix(scheduler): close residual invariants before quota expansion` (this task)
 
 ## Task Completed
-AGV2-006 — scheduler phase 1 correctness hardening before quota expansion. Fixed the review gaps
-exposed by the phase-1 implementation: lease heartbeat for healthy in-flight work, consistent
-request+attempt recovery, per-endpoint FIFO (no cross-endpoint head-of-line blocking), atomic
-queue-cap admission, separate queue-wait vs total-lifetime deadlines, durable client
-disconnect/cancellation, no synthetic stream `finish_reason="stop"` after scheduler failure,
-positive `max_concurrency` at every layer, graceful worker shutdown, and an explicit
-`outcome_unknown` reconciliation path. Migration `0004` added; no v1 `app/` or `frontend/src/`
-changes.
+AGV2-007 — close residual scheduler invariants before quota expansion. Made every coupled
+request+attempt transition all-or-nothing (lease renewal, dispatch, settle, recovery
+`outcome_unknown`), enforced total request lifetime independently of the API waiter, restricted
+reconciliation to verifiable dispositions, exposed endpoint `max_concurrency` on the admin DTOs,
+and documented the stream `[DONE]` marker. No schema change (migration `0004` already present);
+logic-only.
+
+## Scheduler invariant closure (AGV2-007) behavior
+- **Atomic coupled transitions**: `renew_lease`, `mark_dispatched`, `settle`, and recovery
+  `mark_outcome_unknown_expired` all transition request+attempt together. Any rowcount mismatch on
+  the second half raises `SchedulerInvariantError` (new in `errors.py`) and rolls the transaction
+  back, so a half-renewal / half-dispatch / half-settle is never persisted.
+- **Lease ownership**: renewal now also verifies `worker_id` (not just fencing token), and clamps
+  the renewed lease so it never outlives the request's `expires_at`. A heartbeat past the total
+  lifetime returns `False` and stops, so an expired execution can never be kept alive.
+- **Total-lifetime enforcement (worker-side)**: dispatch refuses a reserved request past
+  `expires_at` (expires it, abandons its attempt, releases capacity); `_settle` overrides any
+  local outcome to `expired`/`lifetime_exceeded` once `expires_at` has passed, so a result is
+  never persisted for a request the client already abandoned. Ambiguous post-lifetime cases
+  (worker dead / upstream still running) still surface as `outcome_unknown` via lease recovery.
+- **Reconciliation restricted**: only `failed|cancelled` are reconcilable. `succeeded` is rejected
+  (CLI + service) because an `outcome_unknown` request's result was never persisted.
+- **Admin DTOs**: `EndpointCreate`/`EndpointRead`/`EndpointUpdate` now carry `max_concurrency`
+  (positive via `ge=1`); `EndpointRead` exposes it.
+- **Stream `[DONE]`**: documented as a transport termination marker (not a success signal); it is
+  emitted on every stream ending, which the official OpenAI SDKs treat only as end-of-stream.
 
 ## Scheduler hardening behavior
 - **Lease heartbeat**: `run_complete`/`run_stream` spawn a heartbeat task that renews both request
@@ -38,17 +56,21 @@ changes.
   execution finishes cooperatively. A hard kill that abandons dispatched work surfaces as
   `outcome_unknown` via lease recovery.
 - **Reconciliation**: `python -m aethergate.reconcile list|resolve` (and `scripts/dev/v2 reconcile`)
-  inspects `outcome_unknown` requests without content and resolves them to
-  `failed|cancelled|succeeded` only on explicit operator action, recording `reconciled_state/at/by`
-  and releasing the held reservation in the same transaction. No bulk-release shortcut.
+  inspects `outcome_unknown` requests without content and resolves them to `failed|cancelled` only
+  on explicit operator action, recording `reconciled_state/at/by` and releasing the held
+  reservation in the same transaction. `succeeded` is rejected. No bulk-release shortcut.
 
 ## Key files
-- `src/aethergate/scheduler/repository.py` — admission lock, per-endpoint claim/list, lease renewal,
-  consistent recovery (`mark_outcome_unknown_expired`, `reclaim_expired_reserved`), queue-wait
-  expiry, `reconcile_request`, `list_outcome_unknown`.
-- `src/aethergate/scheduler/service.py` — heartbeat loop, `request_cancellation`, `reconcile`,
-  `list_outcome_unknown`, per-endpoint `claim_and_reserve`, persisted-deadline `wait_for_terminal`.
-- `src/aethergate/api/openai_chat.py` — durable disconnect cancellation, no synthetic stop.
+- `src/aethergate/scheduler/repository.py` — admission lock, per-endpoint claim/list, atomic
+  lease renewal / dispatch / settle / recovery (`mark_dispatched`, `settle`, `renew_lease`,
+  `mark_outcome_unknown_expired`, `reclaim_expired_reserved`), queue-wait expiry,
+  `reconcile_request`, `list_outcome_unknown`.
+- `src/aethergate/scheduler/service.py` — heartbeat loop, worker-side total-lifetime enforcement,
+  `request_cancellation`, `reconcile`, `list_outcome_unknown`, per-endpoint `claim_and_reserve`,
+  persisted-deadline `wait_for_terminal`.
+- `src/aethergate/errors.py` — `SchedulerInvariantError` (internal atomicity signal).
+- `src/aethergate/api/openai_chat.py` — durable disconnect cancellation, no synthetic stop,
+  `[DONE]` semantics.
 - `src/aethergate/config.py` — `worker_heartbeat_seconds` + scheduler-timing validation.
 - `src/aethergate/domain/entities.py` — `Endpoint.max_concurrency` positivity validator.
 - `src/aethergate/persistence/models.py` — endpoints CHECK constraint + `reconciled_*` columns.
@@ -62,7 +84,13 @@ changes.
 ## Nomnom verification (actual commands/results)
 - Host = nomnom (`192.168.22.50/24`); `docker` = podman 4.9.3 + docker-compose 2.40.3. Backend =
   ollama `qwen3.8-2b-distill:Q6_K`; aliases `gpt-4`/`gpt-4-beta` (two independent endpoints).
-- `scripts/dev/v2 test` -> **135 passed in 23s** (containerized, real PostgreSQL).
+- `scripts/dev/v2 test` -> **140 passed in 26s** (containerized, real PostgreSQL; +5 AGV2-007
+  scenarios: worker lifetime without API waiter, heartbeat refuses past lifetime, reserved-past-
+  lifetime not dispatched, reconcile rejects `succeeded`, half-renewal rolls back).
+- `ruff check` on changed files -> all checks passed.
+- Stream smoke test: stream succeeded and emitted `[DONE]`; `scripts/dev/v2 inspect` showed only
+  terminal states and 0 active reservations.
+- `reconcile resolve --disposition succeeded` -> rejected at the CLI (`{failed,cancelled}` only).
 - Migration from empty DB through `0004` and `0003`->`0004` both verified.
 - Real inference (official OpenAI SDK): non-stream and stream both succeeded against the current
   backend (stream reassembled 31 chunks).
