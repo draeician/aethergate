@@ -2,8 +2,9 @@
 
 ## Current State
 - Branch: v2
-- Starting commit: 41364c6 (AGV2-009 queued)
-- Implementation commit(s): `fix(scheduler): harden shared quota admission` (this task)
+- Starting commit: de91479 (AGV2-009V verification)
+- Implementation commit(s): `fix(scheduler): harden shared quota admission` (AGV2-009);
+  `docs(development): complete AGV2-009V live verification handoff` (this task)
 
 ## Task Completed
 AGV2-009 — harden shared-quota admission before accounting and budgets. Closed the eight
@@ -11,6 +12,9 @@ correctness gaps from the AGV2-008 review: all-or-nothing admission, per-scope F
 fail-closed token estimation, monotonic cooldowns, quota-block wait metadata, and DB-enforced schema
 invariants — plus a latent quota concurrency bug. No monetary project budgets (still deferred). No
 changes to legacy v1 `app/` or `frontend/src/`.
+
+AGV2-009V — completed the live nomnom A–E verification that AGV2-009 deferred. All five scenarios
+pass against the real Ollama backend; no defects found, so no code changed. Live evidence below.
 
 ## Scheduler quota behavior (post-AGV2-009)
 - **Atomic admission order** (single transaction): claim oldest eligible request per scope ->
@@ -57,7 +61,8 @@ changes to legacy v1 `app/` or `frontend/src/`.
   `tests/test_migrations.py`, `tests/test_openai_api.py`.
 
 ## Automated tests (containerized, real PostgreSQL)
-`scripts/dev/v2 test` -> **181 passed** (was 164 at AGV2-008). `ruff check src tests` -> clean.
+`scripts/dev/v2 test` -> **181 passed** (unchanged from AGV2-009 baseline). `ruff check src tests` ->
+clean. `alembic -c src/aethergate/migrations/alembic.ini heads`/`current` -> `0006 (head)`.
 `git diff --check` -> clean. Secret scan -> clean (only false-positive identifier matches).
 
 New deterministic coverage: endpoint-full/inactive leaves no quota reservation; repeated endpoint-full
@@ -83,10 +88,41 @@ stable across repeated concurrent runs.
 - Token-estimator truthfulness: litellm 1.104.0 `huggingface_tokenizer_kind('ollama/qwen3.8-2b-distill:Q6_K')`
   returns `None` (no model-specific tokenizer), so token quota fails closed and request-only quota
   works — no fabricated TPM guarantee.
-- Dynamic AetherGate test port: **39875** at last check (changes on every `up`; re-run
+- Dynamic AetherGate test port for this session: **43625** (changes on every `up`/`workers`; re-run
   `scripts/dev/v2 url`).
-- Live real-backend A-E checks were **deferred this session**; their deterministic equivalents are
-  covered by the 181 automated tests above.
+
+### A. Phantom-reservation regression — PASS
+Endpoint `max_concurrency=1`, group `qa-pha` (request 100/60s), alias `qa-pha-1`, 2 workers. While
+A (2000-token) held the single slot, B was `queued` with `wait_reason=endpoint_full` and **zero**
+quota reservations, zero execution attempts, zero endpoint reservations. The current quota window
+showed `committed=1` (A only) / `reserved=0` — B did not move the counters while waiting. After A
+completed, B acquired admission once, dispatched once (1 attempt), and succeeded.
+
+### B. Same physical endpoint, independent quota scopes — PASS
+Endpoint `max_concurrency=2`. Group A `qa-blk` (request 1/3600, exhaustible) vs group B `qa-open2`
+(request 100/60). A1 (group A) dispatched and consumed the window; A2 (group A) stayed `queued` with
+`wait_reason=quota_window_exhausted` and **zero** reservations while a newer B1 (group B) dispatched
+and succeeded ~1.0s later — no head-of-line blocking across scopes. FIFO preserved within group A
+(A1 before A2). Cross-group endpoint capacity stays a single pool: A+B (different groups) occupied
+both slots and a third request C queued with zero reservations, then dispatched after a slot freed.
+
+### C. Token-estimator fail-closed — PASS
+Token-quota route (`qa-tok-1`, token 1000/60) failed closed with `error_code=quota_token_estimator_unavailable`
+(HTTP 502, `failed`, zero reservations/attempts). Request-only route (`qa-req-1`, request 100/60)
+performed real inference (HTTP 200, real completion). No heuristic fallback added.
+
+### D. Monotonic provider cooldown — PASS
+Deterministic cooldown tests green (`test_cooldown_cannot_shorten`, `test_concurrent_cooldown_preserves_max`,
+`test_429_cooldown_sets_group`, `test_cooldown_expiry`). Live container demo against the real DB:
+apply 600s -> set; apply 60s -> unchanged (never shortens); apply 900s -> extends; unrelated group
+stays `NULL` (eligible).
+
+### E. Real inference regression — PASS
+Official OpenAI SDK 2.54.0: non-stream succeeded (`chat.completion`, real content); stream succeeded
+(17 chunks). Six-request/two-slot (`max_concurrency=2`): max concurrent `dispatched` observed was
+exactly **2**; all requests succeeded. Shared-alias, multi-window, and worker-recovery/invariant
+behaviors are covered by the 181 deterministic tests (e.g. `test_request_quota_limits_shared_across_aliases`,
+`test_multiple_request_windows_reserved_together`).
 
 ## Decisions
 - Token estimation must be provider/model-specific or it fails closed; a generic char/word bound is
@@ -98,7 +134,6 @@ stable across repeated concurrent runs.
 ## Deferred
 - Project monetary budgets and pricing/accounting settlement (needs price snapshots/reservations,
   then participates in the same atomic admission transaction).
-- Live real-backend nomnom A-E checks (deferred; automated equivalents are green).
 - Sliding-window quotas and per-provider tokenizer correctness beyond the fail-closed gate.
 
 ## Issues / Risks
