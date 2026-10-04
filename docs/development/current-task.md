@@ -1,46 +1,39 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-010
+AGV2-011
 
 ## Title
-Accounting foundation — immutable pricing, usage, and optional project budgets
+Harden accounting and budget scheduling invariants
 
 ## Ownership
 Primary: accounting/audit  
-Coordinating: scheduler/queueing, contracts, catalog/routing, platform/testing
+Coordinating: scheduler/queueing, contracts, platform/testing
 
 ## Why This Task Exists
 
-The scheduler and shared provider-account quota layers are now live-verified.
+AGV2-010 successfully added immutable pricing snapshots, usage records, optional project budgets,
+budget reservations, ledger entries, and idempotent settlement, with 202 passing tests and live
+nomnom verification.
 
-This task adds the accounting primitives required by `project_spec.md`:
+Code-level review found several accounting/scheduling invariants that the test suite did not fully
+cover. Fix these before moving into identity/auth or admin API work.
 
-- immutable price snapshots;
-- authoritative usage records;
-- optional project budget policy;
-- monetary budget reservations;
-- append-only ledger entries;
-- idempotent settlement.
-
-The commercial model remains deliberately deferred.
-
-A project budget is an optional spending-cap policy. It is **not** a prepaid balance and a positive
-monetary balance is **not** required for authorization.
+Do not expand into OIDC, admin CRUD, UI, Responses API, or migration from v1 in this task.
 
 ## Compaction Recovery
 
-If context is compacted, summarized, restarted, or you become uncertain about the remaining task:
+If context is compacted, summarized, restarted, or you become uncertain what remains:
 
 1. re-read `AGENTS.md`;
 2. re-read `project_spec.md`;
 3. re-read this file;
 4. re-read `docs/development/agent-handoff.md`;
-5. inspect `git status` and recent history;
+5. inspect `git status` and recent commits;
 6. continue from repository state.
 
-Do not ask the user to choose whether to commit, push, continue, or stop when this file already
-specifies those actions.
+Do not ask the user whether to commit, push, continue, or stop when this file already specifies the
+required completion behavior.
 
 ## Before You Start
 
@@ -51,594 +44,385 @@ specifies those actions.
    - `project_spec.md`
    - `docs/development/agent-handoff.md`
    - `docs/development/current-task.md`
-   - `docs/contracts/domain-model.md`
-   - `docs/contracts/admin-v1-foundation.md`
+   - `docs/architecture/accounting.md`
    - `docs/architecture/scheduler.md`
-   - `docs/architecture/provider-model.md`
-   - `src/aethergate/domain/value_objects.py`
-   - current scheduler quota reservation/settlement code
-4. Preserve all AGV2-009/009V scheduler and quota invariants.
+   - `src/aethergate/accounting/repository.py`
+   - `src/aethergate/accounting/service.py`
+   - `src/aethergate/scheduler/repository.py`
+   - `src/aethergate/scheduler/service.py`
+   - `tests/test_accounting.py`
+4. Preserve all AGV2-009/010 scheduler, quota, lease, fencing, and settlement invariants.
 5. Do not modify/delete legacy v1 `app/` or `frontend/src/`.
-6. Do not commit unrelated local/untracked files.
+6. Do not commit unrelated files.
 
-## Separation of Concerns — Non-Negotiable
+## Required Fixes
 
-Preserve these as distinct concepts:
+### 1. Prevent project-budget head-of-line blocking
 
-- authorization / entitlement;
-- throughput quota / physical capacity;
-- budget policy;
-- usage accounting;
-- pricing;
-- settlement / billing.
+Current scheduling scope is still:
 
-Specifically:
+`(endpoint_id, quota_group_id)`
 
-- no positive-balance authorization gate;
-- no implicit prepaid-wallet model;
-- no account balance field used as universal access control;
-- no assumption that a ledger debit means an invoice or external payment;
-- do not foreclose future prepaid, showback, chargeback, or reseller modes.
+That is insufficient after project budgets were added.
 
-## Monetary Representation
+Example:
 
-Use `Decimal` end to end.
+- same endpoint;
+- same quota group;
+- project A has an exhausted budget;
+- project B has budget headroom;
+- A's request is older.
 
-Requirements:
+Project B must not remain blocked behind A merely because A is the oldest request in the shared
+endpoint/quota scope.
 
-- no binary floating point for prices, budgets, monetary reservations, or ledger amounts;
-- PostgreSQL uses an explicit fixed-precision NUMERIC/DECIMAL type;
-- API/domain contracts reject floats;
-- currency is explicit, normalized uppercase ISO-style three-letter code;
-- no FX conversion in this task;
-- budget and price must use the same currency to interact;
-- all monetary calculations have explicit rounding/quantization behavior documented and tested.
+Required behavior:
 
-Use a precision sufficient for very small per-token prices and large enterprise totals.
+- FIFO within the same effective admission scope;
+- a budget-blocked project must not block another project that can dispatch;
+- endpoint physical capacity remains shared;
+- provider quota remains shared;
+- project budget remains project-specific.
 
-## Pricing Configuration vs Immutable Snapshot
+For this phase, extend the effective scheduling scope to include project identity or another stable
+budget-policy scope key sufficient to avoid cross-project budget HOL blocking.
 
-Do not treat mutable pricing configuration as the historical record.
-
-Introduce a mutable pricing configuration entity, for example `PricePolicy` / `RoutePrice`, and keep
-`PriceSnapshot` immutable.
-
-### Price configuration
-
-Associate pricing with a `RouteBinding` for this phase.
-
-Support at least:
-
-#### Request pricing
-- billing unit: `request`;
-- fixed monetary amount per successfully priced request;
-- exact pre-dispatch budget reservation is possible without token estimation.
-
-#### Token pricing
-- billing unit: `token`;
-- input price;
-- output price;
-- positive integer unit scale, e.g. price per 1,000,000 units;
-- pre-dispatch budget reservation requires a trustworthy input-token estimate plus bounded output
-  reservation.
+If no project is present, null project is its own scope.
 
 Requirements:
 
-- currency;
-- enabled/active flag;
-- no float prices;
-- validation appropriate to billing unit;
-- changing a mutable price config never alters an existing snapshot.
+- persisted scope metadata must remain non-content;
+- route/quota/project scope must be revalidated before dispatch;
+- configuration changes must not dispatch under stale policy;
+- FIFO remains preserved within one effective project+quota+endpoint scope;
+- same-project newer work cannot bypass older eligible work.
 
-Do not add image/audio pricing behavior beyond contract extensibility in this task.
+Add real and deterministic tests.
 
-### Price snapshot
+### 2. Make the documented lock order match the implementation
 
-At the final admission/dispatch decision, capture the effective price into an immutable
-`PriceSnapshot`.
+AGV2-010 handoff/docs state a deterministic lock order beginning with project budget state before
+provider quota state, but current scheduler evaluation locks quota before budget.
 
-A snapshot must contain enough data to reproduce the calculation later without reading mutable price
-configuration.
+Choose one canonical order and use it everywhere.
 
-At minimum capture:
+Preferred:
 
-- source pricing-config ID;
-- route binding ID;
-- public model alias ID;
-- billing unit;
-- currency;
-- unit scale;
-- request price and/or input/output prices as applicable;
-- captured timestamp.
-
-Once created, application code must not update/delete a snapshot during normal operation.
-
-A request that never reaches dispatch should not create historical priced usage.
-
-## Project Budget Policy
-
-Implement optional project-level budgets.
-
-A project with no active budget policy is **not** monetarily blocked.
-
-For this phase, a budget policy contains:
-
-- stable opaque ID;
-- project ID;
-- name;
-- currency;
-- positive limit amount;
-- positive fixed `window_seconds`;
-- enabled flag.
-
-Use fixed UTC-epoch-anchored windows, consistent with quota-window semantics.
-
-A project may have more than one enabled budget policy. All applicable same-currency policies must
-admit the request.
-
-Do not implement principal-level budgets yet, but do not design the persistence model in a way that
-makes adding principal scope impractical.
-
-## Budget Windows and Reservations
-
-Persist authoritative budget-window state with:
-
-- policy ID;
-- window start;
-- committed amount;
-- reserved amount.
-
-Persist a per-request `BudgetReservation` with:
-
-- request ID;
-- budget policy ID;
-- price snapshot ID;
-- window start;
-- reserved amount;
-- committed amount;
-- state;
-- timestamps.
+1. queued request / scheduling-scope row;
+2. active price policy;
+3. project budget policy/windows in stable ID order;
+4. provider quota group/limit/windows in stable ID order;
+5. endpoint physical capacity;
+6. reservation/attempt/request state mutations.
 
 Requirements:
 
-`committed + reserved + requested <= budget limit`
+- implementation and documentation must agree;
+- all workers use the same ordering;
+- accounting/config edit paths that lock the same rows must follow a compatible order;
+- add stress/concurrency tests intended to expose deadlock/order regressions;
+- do not hold a DB transaction across provider inference.
 
-must be evaluated transactionally under PostgreSQL locks.
+### 3. Enforce exactly one enabled price policy per route
 
-No process-local budget counter.
+Current lookup assumes at most one enabled price policy and uses `scalar_one_or_none()`, but the DB
+does not enforce that invariant.
 
-### Admission behavior
+Add a database-backed invariant:
 
-Budget admission must participate in the same scheduler transaction as:
+- at most one enabled `PricePolicy` per `RouteBinding`;
+- disabled historical/edit records may coexist;
+- concurrent enables cannot produce two active policies.
 
-- shared request/token quota;
-- endpoint physical capacity;
-- request/attempt ownership.
+Prefer a PostgreSQL partial unique index on `route_binding_id WHERE enabled = true`.
 
-If any required constraint cannot be acquired, acquire none.
+Add service/repository behavior and tests so a conflict is a clear domain/admin validation error
+rather than an unexpected scheduler `MultipleResultsFound`.
 
-A budget-exhausted request remains queued until the next eligible budget window, subject to normal
-queue/total deadlines.
+Do not rewrite migration `0007`; add `0008`.
 
-A request whose minimum required monetary reservation cannot fit an empty applicable budget window
-must fail explicitly rather than wait forever.
+### 4. Enforce billing-unit-specific price shape
 
-Persist non-content wait metadata sufficient to explain:
+Current domain/DB contracts allow enabled price policies such as:
 
-- budget policy blocking the request;
-- next eligible/reset time;
-- budget reason distinct from throughput quota and endpoint capacity.
+- request billing with `request_price = NULL`;
+- token billing with missing input/output prices.
 
-A blocked budget scope must not cause unrelated project/scope work to head-of-line block when shared
-capacity is otherwise available.
+The accounting helpers currently turn missing values into zero, which can silently create unintended
+free pricing.
 
-## Monetary Reservation Calculation
+Fix this.
 
-### Request-priced route
+Required invariants:
 
-Reserve exactly the configured per-request price.
+#### Request billing
+- `request_price` is required;
+- token input/output prices must be null or explicitly rejected as incompatible;
+- `unit_scale` may remain 1/default.
 
-This is the preferred live nomnom budget test path because it does not require token estimation.
+#### Token billing
+- `input_price` and `output_price` are both required;
+- `request_price` must be null;
+- `unit_scale >= 1`.
 
-### Token-priced route
+Zero price is allowed when explicitly configured as Decimal zero. Missing price is not equivalent to
+zero.
 
-Reserve:
+Enforce this in:
 
-`estimated input cost + bounded maximum output cost`
+- domain models;
+- admin-v1 DTOs;
+- persistence/service validation;
+- database CHECK constraints in migration `0008`.
 
-Requirements:
+Add tests proving missing vs explicit zero are distinct.
 
-- use the same trustworthy provider/model-specific estimator contract already enforced by the
-  scheduler;
-- use explicit client output bound or configured route default output-token bound;
-- if no trustworthy token estimator exists, a budget-enforced token-priced request fails closed;
-- never reintroduce a character/word heuristic;
-- token pricing may still be recorded post-completion from trustworthy actual usage even when no
-  budget policy is configured, because no pre-dispatch monetary reservation is required in that
-  case.
+### 5. Detect conflicting idempotent settlement replays
 
-Document this distinction.
+The task requirement was:
 
-## Usage Accounting
+- identical replay => no-op/same canonical result;
+- conflicting replay => explicit invariant error.
 
-Create immutable `UsageRecord` rows for trustworthy measured usage.
+Current low-level `create_usage_record` / `create_ledger_entry` uses
+`ON CONFLICT DO NOTHING` and returns the existing row without visibly checking that the replay data
+matches the canonical row.
 
-At minimum record:
+Harden this.
 
-- request ID;
-- execution-attempt ID;
-- project ID;
-- principal ID where available;
-- API credential ID where available;
-- public model alias ID;
-- route binding ID;
-- provider account ID;
-- price snapshot ID;
-- billing unit;
-- measured input units;
-- measured output units;
-- request units where applicable;
-- calculated monetary amount;
-- currency;
-- measured/recorded timestamp;
-- upstream request ID if safe/available.
+For UsageRecord:
 
-Requirements:
+- same request ID + same canonical settlement fields => idempotent same result;
+- same request ID + conflicting amount/currency/snapshot/route/attempt/usage fields => explicit
+  accounting invariant error.
 
-- one logical settled usage record per request for this phase;
-- uniqueness/idempotency enforced in PostgreSQL;
-- no prompt/completion content;
-- no secret material;
-- usage rows are append-only/immutable in normal operation;
-- provider-reported actual usage wins over estimates when trustworthy;
-- never fabricate measured token usage from a reservation.
+For LedgerEntry:
 
-If a dispatched request fails and trustworthy usage is unavailable, do not create a fake measured
-UsageRecord.
+- same idempotency key + same canonical fields => idempotent same result;
+- same key + conflicting project/usage/type/amount/currency => explicit invariant error.
 
-## Budget Settlement
+Do not compare volatile timestamps in a way that breaks legitimate replay semantics; define the
+canonical equality set explicitly.
 
-### Successful request with trustworthy priceable usage
+Add `AccountingInvariantError` or equivalent, internal-only.
 
-- compute actual monetary amount from the immutable price snapshot;
-- create UsageRecord idempotently;
-- settle BudgetReservation to actual amount;
-- release unused monetary reservation;
-- if actual amount exceeds reservation, record actual amount honestly even if budget window becomes
-  over limit;
-- never truncate/hide overage.
+Add direct repository/service tests and crash/retry scheduler tests.
 
-### Known post-dispatch failure/cancellation with no trustworthy usage
+### 6. No orphan historical price snapshot for pre-dispatch failure
 
-For budget-cap safety:
+Price snapshots are described as the immutable historical capture of the price used for dispatched
+work.
 
-- conservatively commit the reserved monetary amount;
-- do **not** create a measured UsageRecord pretending that amount was real provider usage;
-- record the conservative settlement reason in budget-reservation metadata/state.
+Current claim flow creates the snapshot during reservation, then marks durable dispatch intent in a
+separate transaction. A cancellation/expiry/invariant failure between those phases can leave a price
+snapshot attached to a request that never dispatched.
 
-This is budget-policy accounting, not necessarily external billing.
+Fix the lifecycle.
 
-### outcome_unknown
+Required invariant:
 
-- keep monetary reservation held;
-- never release it automatically;
-- on explicit reconciliation to failed/cancelled, conservatively commit the held budget reservation
-  unless trustworthy usage is supplied through a future explicit reconciliation flow;
-- do not invent a usage record.
+- a request that never reaches durable dispatch intent must not retain a historical active price
+  snapshot as if pricing was used;
+- no UsageRecord or usage ledger entry exists pre-dispatch;
+- budget reservations still must be priced deterministically before dispatch.
 
-### Pre-dispatch cancellation/reclaim
+Choose a clean design, for example:
 
-- release monetary reservation completely;
-- no UsageRecord;
-- no usage ledger entry.
+- distinguish a pending price capture from immutable dispatched snapshot; or
+- defer/finalize snapshot activation at durable dispatch; or
+- another design that preserves immutable historical snapshots without orphaning them.
 
-## Append-Only Ledger
+Do not simply delete snapshots that may already be referenced by dispatched historical usage.
 
-Implement an append-only monetary ledger foundation.
+Add race tests for:
 
-The ledger is an accounting/event primitive, not a mandatory prepaid balance.
+- cancellation after resource reservation but before durable dispatch;
+- expiry between reservation and dispatch;
+- dispatch invariant failure;
+- normal dispatch still creates exactly one immutable snapshot.
 
-At minimum support immutable entries for:
+### 7. Price-policy mutation must not race historical capture
 
-- priced measured usage debit;
-- explicit adjustment credit;
-- explicit adjustment debit.
-
-Requirements:
-
-- project ID;
-- optional usage-record ID;
-- currency;
-- signed/typed Decimal amount;
-- entry type;
-- immutable timestamp;
-- stable idempotency key / uniqueness rule;
-- optional safe reason/reference metadata with no content/secrets.
-
-For a measured UsageRecord, create its usage ledger entry idempotently in the same settlement
-transaction.
-
-Do not create a measured-usage ledger debit from an unknown-usage conservative budget commitment.
-
-Do not implement invoice generation, payment processing, prepaid balance deduction, or external
-billing exports in this task.
-
-## Idempotent Settlement
-
-Settlement can be retried after worker/API/process interruption without double charging.
+A concurrent admin/service price-policy edit must not cause a request to reserve under one price and
+snapshot another.
 
 Required:
 
-- DB uniqueness/idempotency for UsageRecord;
-- DB uniqueness/idempotency for usage LedgerEntry;
-- BudgetReservation settles at most once;
-- repeated settlement with the same data is a no-op/same result;
-- conflicting second settlement is an explicit invariant error, not silent overwrite;
-- no double budget commit;
-- no duplicate ledger debit.
+- the active price-policy row used for budget evaluation remains consistently locked/captured through
+  the final dispatch pricing decision;
+- reservation amount and immutable snapshot derive from the same canonical values/version;
+- concurrent policy edits either occur before the request's pricing decision or after it, never
+  partially through it.
 
-Add crash/retry fault-injection tests.
+Add a deterministic concurrency test.
 
-## Scheduler Integration / Lock Ordering
+## Migration
 
-Integrate monetary budget evaluation into the existing all-or-nothing admission plan.
+Do not rewrite `0001` through `0007`.
 
-Define and document a deterministic lock order across:
+Add migration `0008` for at least:
 
-- request/scheduling-scope row(s);
-- project budget policy/windows;
-- provider quota group/limit/windows;
-- endpoint physical capacity;
-- request/attempt/reservation mutations.
+- unique enabled price policy per route;
+- billing-unit-specific price-policy CHECK constraints;
+- any persisted scheduling-scope/snapshot-lifecycle fields required by the chosen design.
 
-Preserve the current no-open-transaction-during-inference rule.
+Migration requirements:
 
-Prove with concurrent multi-worker tests that:
-
-- budget cannot oversubscribe;
-- quota cannot oversubscribe;
-- endpoint cannot oversubscribe;
-- no partial reservation survives a failed combined admission;
-- no deadlock is observed in stress/fault tests.
-
-## Domain / Admin Contract Foundation
-
-Add typed IDs/contracts for at least:
-
-- price configuration;
-- budget policy;
-- budget reservation.
-
-Refine the existing:
-
-- `PriceSnapshot`;
-- `UsageRecord`;
-- `LedgerEntry`.
-
-Add admin-v1 DTO foundations for:
-
-- route pricing create/read/update;
-- project budget policy create/read/update;
-- budget status/headroom read shape;
-- usage-record read shape;
-- ledger-entry read shape.
-
-No admin HTTP CRUD routes yet.
-
-Do not expose mutable historical accounting fields through update DTOs.
-
-## Persistence / Migration
-
-Do not rewrite migrations `0001` through `0006`.
-
-Add migration `0007` (additional revision only if truly necessary).
-
-Persist:
-
-- mutable route pricing config;
-- immutable price snapshots;
-- project budget policies;
-- budget windows;
-- budget reservations;
-- usage records;
-- ledger entries;
-- required request wait/accounting metadata.
-
-Add DB constraints for:
-
-- positive budget/window amounts;
-- allowed currencies format;
-- nonnegative reserved/committed amounts;
-- supported reservation/ledger states/types;
-- immutable/idempotent uniqueness;
-- unit-scale positivity;
-- billing-unit-specific required pricing fields where practical.
-
-Migration:
-
-- live `0006 -> 0007` must succeed;
-- empty DB -> latest must succeed;
-- no historical accounting values are invented.
-
-## Developer Seed / Inspection
-
-Extend development tooling idempotently.
-
-Allow optional seed configuration for:
-
-- request-based route price;
-- token-based route price;
-- currency;
-- unit scale;
-- project budget limit/window.
-
-Do not hard-code nomnom values.
-
-Extend inspection tooling to show non-content accounting state:
-
-- project budget limit;
-- reserved;
-- committed;
-- headroom;
-- current window/reset;
-- request price snapshot ID;
-- usage-record ID;
-- blocking budget policy/reason.
-
-Never show prompt/completion content or secrets.
+- live `0007 -> 0008` succeeds;
+- empty DB -> latest succeeds;
+- detect invalid existing price-policy rows before adding constraints;
+- do not silently reinterpret missing prices as zero;
+- fail migration with a clear diagnostic if existing data violates a new invariant and cannot be
+  safely repaired without guessing.
 
 ## Real Nomnom Verification — Required
 
 Use the existing dynamic-port Docker/Podman workflow.
 
-Verify current backend/model; do not guess ports.
+Verify the current backend/model rather than assuming it.
 
-### A. Request-priced project budget
+### A. Cross-project budget no-HOL
 
-Use a short test window and simple decimal request price, for example:
+Create two development projects sharing:
 
-- request price = a small fixed Decimal amount;
-- budget allows exactly 2 requests in the current window;
-- endpoint/quota capacity otherwise allows more.
+- the same physical endpoint;
+- the same provider account;
+- the same effective provider quota group;
+- the same request-priced route pricing.
 
-Send at least 4 requests concurrently using the official OpenAI Python SDK.
+Configure:
+
+- project A budget exhausted;
+- project B budget available.
+
+Queue older A work, then B work.
 
 Prove:
 
-- exactly 2 dispatch within the budget window;
-- remaining requests stay queued due specifically to budget;
-- no endpoint/quota capacity is held by budget-blocked work;
-- after the next budget window, queued requests dispatch;
-- two workers cannot oversubscribe monetary budget;
-- each successful request creates exactly one snapshot, usage record, and usage ledger debit.
+- A remains budget-blocked;
+- B dispatches through the same endpoint/quota resources;
+- B does not wait for A's budget reset;
+- endpoint and quota limits remain respected;
+- FIFO remains correct within project A.
 
-Use test-only prices; they are not a product pricing decision.
+### B. Single enabled price policy
 
-### B. Price immutability
+Attempt concurrent enable/create of two active price policies for the same route.
 
-- dispatch a request under price config A;
-- change mutable price config to B;
-- prove A's snapshot/usage/ledger result remains unchanged;
-- later request gets a new snapshot using B.
+Prove exactly one can be active and the loser receives a deterministic validation/conflict error.
 
-### C. Actual < reservation
+### C. Price-shape validation
 
-Use deterministic/mock token-price tests where a trustworthy estimator exists.
+Prove in the running/containerized service layer:
 
-Prove unused monetary reservation is released.
+- request price omitted => rejected;
+- request price explicitly 0 => accepted;
+- token input or output price omitted => rejected;
+- explicit token zero prices => accepted when otherwise valid.
 
-### D. Actual > reservation
+### D. Pre-dispatch snapshot lifecycle
 
-Use deterministic/mock usage.
+Force a request into the reservation/pre-dispatch race and cancel/expire it before durable dispatch.
 
-Prove actual priced amount is recorded honestly and can push committed budget over the configured
-limit; do not truncate it.
+Prove:
 
-### E. Unknown usage / failure
+- no historical active price snapshot remains associated as dispatched pricing;
+- no usage record;
+- no usage ledger debit;
+- budget reservation is safely released.
 
-Deterministic provider failure after dispatch:
+Then run normal dispatch and prove exactly one immutable snapshot is retained.
 
-- budget reserve conservatively commits;
-- no fake measured UsageRecord;
-- no measured-usage ledger debit.
+### E. Idempotent conflict handling
 
-### F. outcome_unknown
+Run a normal priced request, then replay settlement:
 
-- kill/expire a worker after durable dispatch;
-- monetary reservation remains held;
-- explicit failed/cancelled reconciliation conservatively commits it;
-- no fake usage record is created.
+- identical replay => same canonical usage/ledger state, no duplicates;
+- conflicting replay => explicit invariant error, no mutation.
 
-### G. Current nomnom token estimator
-
-Because the current Ollama model has no trusted pre-dispatch token estimator:
-
-- token-priced route + active project budget must fail closed for monetary reservation;
-- request-priced route must continue to work;
-- do not weaken estimator rules.
-
-### H. Regressions
+### F. Regression
 
 Re-run:
 
-- official SDK non-stream + stream;
+- official OpenAI SDK non-stream and stream;
+- request-priced budget live test;
 - six-request/two-slot endpoint test;
-- shared request-quota behavior;
-- same-endpoint cross-quota behavior;
-- worker recovery/fencing;
-- 181-test baseline or higher.
+- shared/cross-quota tests;
+- outcome_unknown budget reconciliation;
+- full automated suite.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. Decimal-only money/price/budget contracts;
-2. currency validation;
-3. request-price validation;
-4. token-price validation/unit scale;
-5. immutable snapshot behavior;
-6. no snapshot for never-dispatched request;
-7. project with no budget is not monetarily blocked;
-8. request-priced exact reservation;
-9. budget exhaustion queues without holding endpoint/quota capacity;
-10. two workers cannot oversubscribe budget;
-11. simultaneous budget + quota + endpoint admission is all-or-nothing;
-12. request too expensive for empty budget fails explicitly;
-13. fixed budget-window boundary;
-14. token-priced budget fails closed without trustworthy estimator;
-15. token-priced budget reservation with trusted estimator;
-16. success settlement creates one immutable UsageRecord;
-17. success creates one idempotent usage LedgerEntry;
-18. actual below reserve releases headroom;
-19. actual above reserve recorded honestly;
-20. failed unknown usage conservatively commits budget but creates no measured usage;
-21. pre-dispatch cancel releases monetary reservation;
-22. outcome_unknown keeps monetary reservation;
-23. reconciliation conservatively commits held budget;
-24. repeated settlement creates no duplicate usage/ledger/budget commit;
-25. conflicting repeated settlement raises invariant error;
-26. price config change does not alter historical snapshot;
-27. budget-blocked scope does not head-of-line block unrelated project/scope;
-28. migration 0006 -> 0007;
-29. empty DB -> latest;
-30. existing scheduler/quota invariant suites remain green;
-31. official SDK chat regressions remain green.
+1. project A budget exhaustion does not HOL-block project B on same endpoint/quota;
+2. FIFO preserved within project;
+3. cross-project shared endpoint concurrency remains correct;
+4. cross-project shared provider quota remains correct;
+5. implementation lock order matches documented order;
+6. stress test does not deadlock under concurrent budget/quota claims;
+7. only one enabled price policy per route;
+8. concurrent enable conflict;
+9. request billing requires request_price;
+10. explicit request price zero accepted;
+11. token billing requires both input and output prices;
+12. token explicit zero prices accepted;
+13. incompatible price fields rejected;
+14. identical UsageRecord replay idempotent;
+15. conflicting UsageRecord replay raises invariant error;
+16. identical LedgerEntry replay idempotent;
+17. conflicting LedgerEntry replay raises invariant error;
+18. pre-dispatch cancellation does not leave historical snapshot;
+19. pre-dispatch expiry does not leave historical snapshot;
+20. dispatch invariant failure does not leave historical snapshot;
+21. normal dispatch creates exactly one immutable snapshot;
+22. concurrent price edit cannot split reservation and snapshot values;
+23. migration 0007 -> 0008;
+24. empty DB -> latest;
+25. existing accounting/quota/scheduler test suites remain green;
+26. official SDK regressions remain green.
+
+## Still Deferred
+
+Do not implement:
+
+- OIDC/auth/RBAC;
+- scoped production API-key authentication;
+- admin HTTP CRUD;
+- Linux CLI;
+- React UI;
+- principal-level budgets;
+- FX;
+- invoices/payments/prepaid balance deduction;
+- retry/fallback orchestration;
+- `/v1/responses`;
+- embeddings;
+- v1 SQLite migration.
 
 ## Documentation
 
-Create/update as appropriate:
+Update:
 
-- `docs/architecture/accounting.md` — new canonical accounting/budget document;
+- `docs/architecture/accounting.md`;
 - `docs/architecture/scheduler.md`;
 - `docs/contracts/domain-model.md`;
 - `docs/contracts/admin-v1-foundation.md`;
 - `docs/development/README.md`;
-- `project_spec.md` only for clarification, not to select a commercial model;
 - `docs/development/agent-handoff.md`.
 
-Document explicitly:
-
-- budgets are optional policy;
-- no-budget project remains allowed subject to auth/quota;
-- ledger is not automatically a prepaid wallet;
-- conservative budget commitment for unknown usage is not the same thing as measured usage/billing;
-- pricing snapshots are immutable;
-- no FX conversion;
-- principal-level budgets deferred.
-
-Do not modify the dated audit.
+Do not modify the dated architecture audit.
 
 ## Verification Before Commit
 
 - full containerized test suite;
-- migration `0006 -> 0007`;
+- migration `0007 -> 0008`;
 - empty DB -> latest;
 - ruff/lint;
 - `git diff --check`;
 - secret scan;
 - legacy `app/` and `frontend/src/` untouched;
 - dated audit unchanged;
-- all required nomnom budget/accounting verification completed.
+- all required nomnom verification complete.
 
 ## Handoff
 
@@ -646,15 +430,14 @@ Update `docs/development/agent-handoff.md` with concise evidence for:
 
 - implementation commit(s);
 - migration revision;
-- pricing model and immutable snapshot behavior;
-- budget reservation/settlement semantics;
-- ledger semantics;
-- lock order;
-- idempotency behavior;
-- real request-priced nomnom budget test;
-- unknown/outcome_unknown behavior;
-- token-estimator fail-closed result;
-- final automated test count;
+- budget scheduling scope and cross-project no-HOL proof;
+- canonical lock order;
+- unique active-price-policy enforcement;
+- billing-unit price-shape rules;
+- idempotency conflict behavior;
+- pre-dispatch price-snapshot lifecycle;
+- concurrent price-edit behavior;
+- final test count;
 - dynamic AetherGate port;
 - backend/model;
 - issues/risks;
@@ -668,7 +451,7 @@ Use conventional commits on branch `v2`.
 
 Suggested primary commit:
 
-`feat(accounting): add pricing usage and project budgets`
+`fix(accounting): harden budget scheduling and price invariants`
 
 A handoff-only follow-up commit is allowed.
 
