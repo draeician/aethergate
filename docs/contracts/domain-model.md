@@ -17,7 +17,8 @@ not part of any contract.
 `domain/enums.py` defines `Capability`, `BillingUnit`, `PrincipalKind`, `RequestState`,
 `ExecutionAttemptState`, `LedgerEntryType`, `QuotaMetric` (`requests`|`tokens`), and
 `QuotaReservationState` (`reserved`|`committed`|`released`), plus `BudgetReservationState`
-(`reserved`|`committed`|`released`). `LedgerEntryType` is `usage_debit`|`adjustment_credit`|
+(`reserved`|`committed`|`released`), `CredentialAudience` (`inference`|`admin`), and
+`CredentialScope` (`inference:invoke`). `LedgerEntryType` is `usage_debit`|`adjustment_credit`|
 `adjustment_debit`. `RequestState` includes the full
 lifecycle through `outcome_unknown`:
 
@@ -41,12 +42,29 @@ floating point (`float`) is rejected for money and pricing. There is no
 
 `domain/entities.py` groups contracts by domain:
 
-- Identity/access: `Project`, `Principal`, `ApiCredential` (material behind a `SecretRefId`).
+- Identity/access: `Project`, `Principal`, `ApiCredential`, `RequestContext` (see
+  "Identity and request context" below).
 - Catalog/routing: `Provider`, `ProviderAccount`, `SecretRef`, `Endpoint`, `QuotaGroup`,
   `QuotaLimit`, `ModelAlias`, `RouteBinding`.
 - Scheduler/execution: `InferenceRequest`, `ExecutionAttempt`, `Reservation`.
 - Accounting/audit: `PricePolicy`, `PriceSnapshot`, `ProjectBudgetPolicy`, `BudgetWindow`,
   `BudgetReservation`, `UsageRecord`, `LedgerEntry`, `AuditEvent`.
+
+### Identity and request context (AGV2-012)
+
+- `ApiCredential` is a one-way-verifiable scoped client credential. It carries a stable opaque
+  `ApiCredentialId`, `project_id`, optional `principal_id`, `name`, non-secret `key_prefix`, SHA-256
+  `key_hash` verifier, `audience` (`CredentialAudience.INFERENCE`/`ADMIN`), `scopes` (phase 1
+  `CredentialScope.INFERENCE_INVOKE`), and lifecycle timestamps (`created_at`, `expires_at`,
+  `revoked_at`, optional `last_used_at`, `is_active`). The raw key is never a field; `secret_ref_id`
+  was removed from the credential contract because retrievable-secret semantics do not fit
+  high-entropy client keys (upstream provider secrets still use `SecretRef`).
+- `RequestContext` is a frozen typed value resolved from an authenticated request: `project_id`,
+  `principal_id`, `api_credential_id`, `audience`, `scopes`. The scheduler/admission stack carries it
+  (not a bare tuple) so usage/accounting attribution stays correct; it is safe to log by opaque IDs
+  only and can never be client-overridden in the JSON body.
+- `CredentialAudience` (`inference` | `admin`) and `CredentialScope` (`inference:invoke`) are
+  extensible `StrEnum`s so future resource/admin scopes can be added without replacing the model.
 
 ### Accounting entities (AGV2-010)
 

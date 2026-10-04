@@ -30,6 +30,7 @@ from aethergate.config import Settings
 from aethergate.contracts.admin_v1 import PricePolicyCreate, PricePolicyUpdate
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
+from aethergate.domain.entities import RequestContext
 from aethergate.domain.enums import (
     BillingUnit,
     Capability,
@@ -50,7 +51,6 @@ from aethergate.domain.ids import (
     QuotaGroupId,
     QuotaLimitId,
     RouteBindingId,
-    SecretRefId,
 )
 from aethergate.egress import DestinationPolicy
 from aethergate.encryption import QueueEncryptor
@@ -326,7 +326,7 @@ async def _seed_project_context(
     *,
     project_id: str,
     project_name: str,
-) -> tuple[ProjectId, PrincipalId, ApiCredentialId]:
+) -> RequestContext:
     """Seed a full attribution identity for a non-dev project and return its context."""
     project = await repository.create_project(
         session,
@@ -341,14 +341,6 @@ async def _seed_project_context(
             name=f"{project_name}-principal",
         ),
     )
-    secret_ref = await repository.create_secret_ref(
-        session,
-        domain.SecretRef(
-            id=SecretRefId(f"{project_id}-secret"),
-            name=f"{project_name}-credential",
-            created_at=datetime.now(UTC),
-        ),
-    )
     credential = await repository.create_api_credential(
         session,
         domain.ApiCredential(
@@ -356,10 +348,15 @@ async def _seed_project_context(
             project_id=project.id,
             principal_id=principal.id,
             name=f"{project_name}-credential",
-            secret_ref_id=secret_ref.id,
         ),
     )
-    return project.id, principal.id, credential.id
+    return RequestContext(
+        project_id=project.id,
+        principal_id=principal.id,
+        api_credential_id=credential.id,
+        audience=credential.audience,
+        scopes=credential.scopes,
+    )
 
 
 async def _seed_price_policy(
@@ -459,7 +456,7 @@ async def test_request_priced_budget_reserves_and_queues_exhausted(sched_engine)
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("0.10"), window_seconds=60,
             )
 
@@ -517,7 +514,7 @@ async def test_two_workers_cannot_oversubscribe_budget(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("0.10"), window_seconds=60,
             )
 
@@ -551,7 +548,7 @@ async def test_request_too_expensive_for_empty_budget_fails(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("0.01"), window_seconds=60,
             )
 
@@ -678,7 +675,7 @@ async def test_token_budget_fails_closed_without_estimator(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -705,7 +702,7 @@ async def test_token_budget_reservation_with_trusted_estimator(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -735,7 +732,7 @@ async def test_token_actual_below_reserve_releases_headroom(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -765,7 +762,7 @@ async def test_token_actual_above_reserve_recorded_honestly(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("0.0001"), window_seconds=60,
             )
 
@@ -799,7 +796,7 @@ async def test_failed_unknown_usage_conservatively_commits_no_usage(sched_engine
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -902,7 +899,7 @@ async def test_pre_dispatch_cancel_releases_budget(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -945,7 +942,7 @@ async def test_outcome_unknown_keeps_budget_then_reconcile_commits(sched_engine)
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -1261,11 +1258,11 @@ async def test_cross_project_budget_does_not_hol_block(sched_engine):
                 session, project_id="proj-b", project_name="project-b"
             )
             await _seed_budget_policy(
-                session, project_id=context_a[0], name="a-budget",
+                session, project_id=context_a.project_id, name="a-budget",
                 limit_amount=Decimal("0.05"), window_seconds=60,
             )
             await _seed_budget_policy(
-                session, project_id=context_b[0], name="b-budget",
+                session, project_id=context_b.project_id, name="b-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
 
@@ -1315,7 +1312,7 @@ async def _seed_request_priced_route_and_budget(sched_engine):
             )
             context = await ensure_dev_identity(session)
             await _seed_budget_policy(
-                session, project_id=context[0], name="usd-budget",
+                session, project_id=context.project_id, name="usd-budget",
                 limit_amount=Decimal("1"), window_seconds=60,
             )
     service, factory = await _build(sched_engine, mock)

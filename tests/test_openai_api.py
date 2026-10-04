@@ -162,7 +162,8 @@ async def api_client(sched_engine, monkeypatch):
 
     monkeypatch.setattr("aethergate.api.deps.get_settings", lambda: settings)
     app.dependency_overrides[api_deps.scheduler_service] = lambda: service
-    app.dependency_overrides[api_deps.dev_request_context] = lambda: context
+    app.dependency_overrides[api_deps.request_context] = lambda: context
+    app.dependency_overrides[api_deps.require_inference_access] = lambda: None
 
     # The model listing/retrieval endpoints resolve their session via
     # ``aethergate.persistence.db.get_session``, which reads the process-wide

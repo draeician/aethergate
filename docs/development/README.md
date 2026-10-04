@@ -59,6 +59,13 @@ scripts/dev/v2 <command>
 - `GET /v1/models/{model}` — retrieve a public model alias.
 - `POST /v1/chat/completions` — Chat Completions (non-streaming + SSE `stream=true`).
 
+Inference is authenticated with an AetherGate-issued Bearer API key
+(`Authorization: Bearer agk_...`). A missing/invalid/wrong-scheme/malformed header returns a
+structured `401` with `WWW-Authenticate: Bearer`; a valid key resolves to the credential's
+project/principal and persists that attribution on the queued request. Credentials are scoped to the
+`inference` audience with the `inference:invoke` scope, and are revalidated again immediately before
+worker dispatch so a credential revoked while queued never reaches upstream.
+
 Inference is a **durable queue** path: the API enqueues an encrypted request and the worker claims
 and dispatches it. Physical endpoint concurrency is enforced by `endpoint.max_concurrency`, and
 shared provider-account request/token quotas are reserved transactionally with endpoint capacity
@@ -66,7 +73,9 @@ shared provider-account request/token quotas are reserved transactionally with e
 optional project budget policy, monetary budget reservations, and an append-only ledger, reserved in
 the same atomic admission transaction (see `docs/architecture/accounting.md`). Queued work persists
 in PostgreSQL and is recovered when workers restart. Inference is unauthenticated only under
-`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` (development only, and rejected in `prod` mode).
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` and only when no Authorization header is supplied
+(development only, and rejected in `prod` mode); a supplied header is always authenticated normally
+and an invalid key never falls through to the bypass.
 Upstream hosts must be explicitly allowlisted via `AETHERGATE_UPSTREAM_ALLOWLIST` (comma-separated);
 empty means deny all.
 
@@ -106,6 +115,22 @@ account; `--request-limit LIMIT/WINDOW_SECONDS` and `--token-limit LIMIT/WINDOW_
 repeatable and idempotent; `--default-output-tokens` sets the route's default bounded output
 reservation.
 
+## Issuing an inference API credential
+
+With bypass disabled (`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`), real inference requires an
+AetherGate-issued key. Use the dev-safe credential tool (service/repository-backed; not a raw DB
+write):
+
+```bash
+docker compose --project-directory deploy/v2 --file deploy/v2/compose.yaml \
+  run --rm --no-deps api python -m aethergate.dev_credential create \
+  --project <project-id> --principal <principal-id> --name smoke
+```
+
+`list` shows metadata only (never raw keys or hashes); `revoke <id>` disables a credential; `rotate
+<id>` issues a replacement and atomically revokes the old one. The raw key is printed exactly once at
+`create`/`rotate`.
+
 ## Tests
 
 ```bash
@@ -121,7 +146,7 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 ## Migrations
 
-The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0008`; `0003`
+The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0009`; `0003`
 adds scheduler tables, `endpoints.max_concurrency`, and a `BigInteger` fencing token; `0004` adds a
 positive-concurrency CHECK on `endpoints` and reconciliation metadata on `inference_requests`;
 `0005` adds shared provider-account request/token quotas — `quota_limits`, `quota_windows`,
@@ -131,5 +156,8 @@ admission metadata; `0007` adds the accounting foundation — `price_policies`, 
 `project_budget_policies`, `budget_windows`, `budget_reservations`, `usage_records`,
 `ledger_entries`, `inference_requests.price_snapshot_id`; `0008` enforces accounting invariants — the
 one-enabled-price-policy-per-route partial unique index, billing-unit price-shape CHECK constraints,
-and a nullable `budget_reservations.price_snapshot_id` for the snapshot lifecycle). Schema is applied
+and a nullable `budget_reservations.price_snapshot_id` for the snapshot lifecycle; `0009` refines
+`api_credentials` into one-way-verifiable scoped client credentials — `key_prefix`, `key_hash`
+(unique), `audience`, `scopes`, `expires_at`/`revoked_at`/`last_used_at`, dropping `secret_ref_id`).
+Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

@@ -222,6 +222,17 @@ idempotency uniqueness. Migration `0008` adds the one-enabled-price-policy-per-r
 index, billing-unit-specific price-shape CHECK constraints, and relaxes
 `budget_reservations.price_snapshot_id` to nullable for the snapshot lifecycle.
 
+## Identity revalidation before dispatch (AGV2-012)
+
+Before the worker resolves the route or reserves any capacity, it re-validates the request's
+credential through the single identity/auth service (`authorize_for_dispatch`): project active,
+principal active (and belonging to the project), credential active/not-expired/not-revoked, and
+inference audience + `inference:invoke` scope. A request whose credential was revoked/expired while
+queued terminates with an explicit safe `authorization_failed` state: it never contacts upstream, and
+no quota/budget/endpoint reservation, price snapshot, usage record, or ledger entry survives. The
+revalidation policy lives in one place (`aethergate/identity/service.py`), shared by the API
+enqueue-time authentication and the worker pre-dispatch check, so the two never diverge.
+
 ## Conservative lease / recovery (phase 1 rules)
 
 - A request whose lease expires while still `reserved` (dispatch intent not yet durable) is safe to

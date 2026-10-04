@@ -6,12 +6,21 @@ objects never escape this module.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import BillingUnit, Capability, PrincipalKind, QuotaMetric
+from aethergate.domain.enums import (
+    BillingUnit,
+    Capability,
+    CredentialAudience,
+    CredentialScope,
+    PrincipalKind,
+    QuotaMetric,
+)
 from aethergate.domain.ids import (
     ApiCredentialId,
     BudgetPolicyId,
@@ -64,6 +73,17 @@ async def get_project_by_name(session: AsyncSession, name: str) -> domain.Projec
     )
     row = result.scalar_one_or_none()
     return _project_to_domain(row) if row else None
+
+
+async def set_project_active(
+    session: AsyncSession, project_id: ProjectId, is_active: bool
+) -> domain.Project | None:
+    row = await session.get(models.Project, str(project_id))
+    if row is None:
+        return None
+    row.is_active = is_active
+    await session.flush()
+    return _project_to_domain(row)
 
 
 def _secret_ref_to_domain(row: models.SecretRef) -> domain.SecretRef:
@@ -439,13 +459,31 @@ async def get_principal_by_name(
     return _principal_to_domain(row) if row else None
 
 
+async def set_principal_active(
+    session: AsyncSession, principal_id: PrincipalId, is_active: bool
+) -> domain.Principal | None:
+    row = await session.get(models.Principal, str(principal_id))
+    if row is None:
+        return None
+    row.is_active = is_active
+    await session.flush()
+    return _principal_to_domain(row)
+
+
 def _api_credential_to_domain(row: models.ApiCredential) -> domain.ApiCredential:
     return domain.ApiCredential(
         id=ApiCredentialId(row.id),
         project_id=ProjectId(row.project_id),
         principal_id=PrincipalId(row.principal_id) if row.principal_id else None,
         name=row.name,
-        secret_ref_id=SecretRefId(row.secret_ref_id),
+        key_prefix=row.key_prefix,
+        key_hash=row.key_hash,
+        audience=CredentialAudience(row.audience),
+        scopes=tuple(CredentialScope(s) for s in (row.scopes or [])),
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        revoked_at=row.revoked_at,
+        last_used_at=row.last_used_at,
         is_active=row.is_active,
     )
 
@@ -458,12 +496,35 @@ async def create_api_credential(
         project_id=str(entity.project_id),
         principal_id=str(entity.principal_id) if entity.principal_id else None,
         name=entity.name,
-        secret_ref_id=str(entity.secret_ref_id),
+        key_prefix=entity.key_prefix,
+        key_hash=entity.key_hash,
+        audience=entity.audience.value,
+        scopes=[s.value for s in entity.scopes],
+        expires_at=entity.expires_at,
+        revoked_at=entity.revoked_at,
+        last_used_at=entity.last_used_at,
         is_active=entity.is_active,
     )
     session.add(row)
     await session.flush()
     return _api_credential_to_domain(row)
+
+
+async def get_api_credential(
+    session: AsyncSession, credential_id: ApiCredentialId
+) -> domain.ApiCredential | None:
+    row = await session.get(models.ApiCredential, str(credential_id))
+    return _api_credential_to_domain(row) if row else None
+
+
+async def get_api_credential_by_hash(
+    session: AsyncSession, key_hash: str
+) -> domain.ApiCredential | None:
+    result = await session.execute(
+        select(models.ApiCredential).where(models.ApiCredential.key_hash == key_hash)
+    )
+    row = result.scalar_one_or_none()
+    return _api_credential_to_domain(row) if row else None
 
 
 async def get_api_credential_by_name(
@@ -477,6 +538,39 @@ async def get_api_credential_by_name(
     )
     row = result.scalar_one_or_none()
     return _api_credential_to_domain(row) if row else None
+
+
+async def list_api_credentials(
+    session: AsyncSession, project_id: ProjectId
+) -> list[domain.ApiCredential]:
+    result = await session.execute(
+        select(models.ApiCredential)
+        .where(models.ApiCredential.project_id == str(project_id))
+        .order_by(models.ApiCredential.created_at.asc())
+    )
+    return [_api_credential_to_domain(r) for r in result.scalars().all()]
+
+
+async def revoke_api_credential(
+    session: AsyncSession, credential_id: ApiCredentialId, revoked_at: datetime
+) -> domain.ApiCredential | None:
+    row = await session.get(models.ApiCredential, str(credential_id))
+    if row is None:
+        return None
+    row.is_active = False
+    row.revoked_at = revoked_at
+    await session.flush()
+    return _api_credential_to_domain(row)
+
+
+async def update_api_credential_last_used(
+    session: AsyncSession, credential_id: ApiCredentialId, used_at: datetime
+) -> None:
+    row = await session.get(models.ApiCredential, str(credential_id))
+    if row is None:
+        return
+    row.last_used_at = used_at
+    await session.flush()
 
 
 def _price_policy_to_domain(row: models.PricePolicy) -> domain.PricePolicy:

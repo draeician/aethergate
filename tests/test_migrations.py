@@ -261,3 +261,34 @@ def test_migration_0007_to_0008() -> None:
         assert "price_snapshot_id" in _nullable_columns(url, "budget_reservations")
     finally:
         asyncio.run(drop_database(url))
+
+
+def test_migration_0008_to_0009() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig89")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0008", env=env)
+        assert "secret_ref_id" in _columns(url, "api_credentials")
+        assert "key_hash" not in _columns(url, "api_credentials")
+
+        _run_alembic("upgrade", "head", env=env)
+        cred_cols = _columns(url, "api_credentials")
+        assert {
+            "key_hash",
+            "key_prefix",
+            "audience",
+            "scopes",
+            "expires_at",
+            "revoked_at",
+            "last_used_at",
+        } <= cred_cols
+        assert "secret_ref_id" not in cred_cols
+        assert "uq_api_credentials_key_hash" in _indexes(url, "api_credentials")
+        assert "ck_api_credentials_audience" in _check_constraints(url, "api_credentials")
+    finally:
+        asyncio.run(drop_database(url))

@@ -15,6 +15,22 @@ metadata.
 - Read shapes carry stable opaque IDs and no secret material.
 - Update shapes use explicit optionality (all fields optional) for PATCH semantics.
 
+API credential lifecycle DTOs (AGV2-012):
+
+- `ApiCredentialCreate` — `project_id`, optional `principal_id`, `name`, `audience`
+  (`CredentialAudience.INFERENCE` by default), `scopes` (`inference:invoke` by default), optional
+  `expires_at`.
+- `ApiCredentialRead` — metadata only: `id`, `project_id`, optional `principal_id`, `name`,
+  `key_prefix`, `audience`, `scopes`, `created_at`, optional `expires_at`/`revoked_at`, `is_active`.
+  Never carries the raw key or its hash/verifier.
+- `ApiCredentialCreateResult` / `ApiCredentialRotateResult` — the one-time raw key is revealed only
+  at the create/rotate boundary alongside `ApiCredentialRead` metadata.
+- `ApiCredentialRevokeRequest` / `ApiCredentialRevokeResult` — revocation reason (optional) and the
+  resulting revoked metadata.
+- `ApiCredentialUpdate` — optional `name` / `is_active` for PATCH semantics.
+
+These are service/repository/contract foundations only; no HTTP admin CRUD router exists yet.
+
 Quota DTOs (scheduler phase 2):
 
 - `QuotaGroupCreate` requires `provider_account_id`; `QuotaGroupRead` exposes it.
@@ -59,8 +75,10 @@ workstream and integrator:
 - Concrete routes/paths and HTTP verbs per resource.
 - Filtering, sorting, and server-pagination query conventions.
 - Optimistic versioning / concurrency-token header name and semantics.
-- The one-time secret reveal shape for API credential creation/rotation (the material is
-  never placed in a read DTO; the reveal contract is a create/rotate boundary concern).
+- The one-time secret reveal shape for API credential creation/rotation is now established at the
+  DTO level (`ApiCredentialCreateResult.raw_key` / `ApiCredentialRotateResult.raw_key`); the
+  concrete HTTP route/path and transport for that boundary remain unfinalized. The material is
+  never placed in a read DTO.
 - Import/diff/apply ("safe import") payload format and preview UX.
 - `PATCH` body style (RFC 7386 vs typed partial bodies) per resource.
 

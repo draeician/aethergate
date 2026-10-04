@@ -24,9 +24,8 @@ from fastapi.responses import StreamingResponse
 from aethergate.adapters.base import GenerationParams, Message, Usage
 from aethergate.api.deps import (
     RequestContext,
-    dev_request_context,
     get_gateway_request_id,
-    require_inference_access,
+    request_context,
     scheduler_service,
 )
 from aethergate.contracts.openai import (
@@ -46,8 +45,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-AuthDep = Annotated[None, Depends(require_inference_access)]
-ContextDep = Annotated[RequestContext, Depends(dev_request_context)]
+ContextDep = Annotated[RequestContext, Depends(request_context)]
 ServiceDep = Annotated[SchedulingService, Depends(scheduler_service)]
 
 _TERMINAL_STATES = ("succeeded", "failed", "cancelled", "expired", "outcome_unknown")
@@ -207,7 +205,6 @@ async def chat_completions(
     body: ChatCompletionRequest,
     request: Request,
     response: Response,
-    _: AuthDep,
     context: ContextDep,
     service: ServiceDep,
 ) -> ChatCompletion | StreamingResponse:

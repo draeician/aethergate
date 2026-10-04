@@ -26,11 +26,20 @@ def test_secret_ref_has_no_material_column():
 def test_accounts_reference_secret_not_store_it():
     credential_columns = {c.name for c in models.ApiCredential.__table__.columns}
     account_columns = {c.name for c in models.ProviderAccount.__table__.columns}
-    assert "secret_ref_id" in credential_columns
     assert "secret_ref_id" in account_columns
     for columns in (credential_columns, account_columns):
         assert "secret_value" not in columns
         assert "api_key" not in columns
+        assert "plaintext" not in columns
+
+
+def test_api_credential_stores_only_one_way_verifier():
+    credential_columns = {c.name for c in models.ApiCredential.__table__.columns}
+    assert "key_hash" in credential_columns
+    assert "key_prefix" in credential_columns
+    assert "secret_ref_id" not in credential_columns
+    for forbidden in ("raw_key", "key", "secret", "token", "password", "material"):
+        assert forbidden not in credential_columns
 
 
 def test_all_models_use_opaque_string_primary_keys():

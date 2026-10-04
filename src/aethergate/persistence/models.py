@@ -80,7 +80,23 @@ class SecretRef(Base, TimestampMixin):
 
 
 class ApiCredential(Base, TimestampMixin):
+    """A one-way-verifiable scoped client credential.
+
+    Only the SHA-256 verifier (``key_hash``) and non-secret display prefix
+    (``key_prefix``) are stored; the raw key is never persisted and never
+    recoverable from reads/backups. ``key_hash`` is nullable so a synthetic
+    development-bypass identity (which is never presented as a Bearer token)
+    can exist without a verifiable key. NULLs are distinct under the unique
+    index, so many synthetic identities may coexist.
+    """
+
     __tablename__ = "api_credentials"
+    __table_args__ = (
+        Index("uq_api_credentials_key_hash", "key_hash", unique=True),
+        CheckConstraint(
+            "audience IN ('inference', 'admin')", name="ck_api_credentials_audience"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
     project_id: Mapped[str] = mapped_column(
@@ -90,8 +106,20 @@ class ApiCredential(Base, TimestampMixin):
         ForeignKey("principals.id"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    secret_ref_id: Mapped[str] = mapped_column(
-        ForeignKey("secret_refs.id"), nullable=False
+    key_prefix: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    audience: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="inference"
+    )
+    scopes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

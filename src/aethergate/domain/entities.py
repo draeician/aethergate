@@ -8,6 +8,7 @@ it is referenced through :class:`~aethergate.domain.ids.SecretRefId`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +18,8 @@ from aethergate.domain.enums import (
     BillingUnit,
     BudgetReservationState,
     Capability,
+    CredentialAudience,
+    CredentialScope,
     LedgerEntryType,
     PrincipalKind,
     QuotaMetric,
@@ -80,14 +83,43 @@ class Principal(Entity):
 
 
 class ApiCredential(Entity):
-    """Metadata for a scoped API credential; its material lives behind a SecretRef."""
+    """A one-way-verifiable scoped client credential.
+
+    The raw key is high-entropy random material that is never stored or
+    returned after creation; only the SHA-256 verifier (``key_hash``) and a
+    non-secret display prefix (``key_prefix``) are persisted. ``secret_ref_id``
+    is intentionally absent: that model fits retrievable upstream provider
+    secrets, not client API keys whose plaintext never needs recovering.
+    """
 
     id: ApiCredentialId
     project_id: ProjectId
     principal_id: PrincipalId | None = None
     name: str
-    secret_ref_id: SecretRefId
+    key_prefix: str | None = None
+    key_hash: str | None = None
+    audience: CredentialAudience = CredentialAudience.INFERENCE
+    scopes: tuple[CredentialScope, ...] = (CredentialScope.INFERENCE_INVOKE,)
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
     is_active: bool = True
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    """The durable authorization context resolved from an authenticated request.
+
+    Carried by the scheduler/admission stack so usage/accounting attribution
+    remains correct; safe to log by opaque IDs only (never a raw token).
+    """
+
+    project_id: ProjectId
+    principal_id: PrincipalId
+    api_credential_id: ApiCredentialId
+    audience: CredentialAudience
+    scopes: tuple[CredentialScope, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +471,7 @@ __all__ = [
     "Project",
     "Principal",
     "ApiCredential",
+    "RequestContext",
     "Provider",
     "SecretRef",
     "ProviderAccount",

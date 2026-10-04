@@ -1,4 +1,11 @@
-"""FastAPI dependencies for the OpenAI-compatible surface."""
+"""FastAPI dependencies for the OpenAI-compatible surface.
+
+Authentication resolves a strict ``Authorization: Bearer agk_...`` credential
+into a durable, typed :class:`~aethergate.domain.entities.RequestContext`. The
+development-only bypass (``AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS``) supplies a
+stable seeded identity only when no Authorization header is present; a supplied
+header is always authenticated normally and never falls through to bypass.
+"""
 
 from __future__ import annotations
 
@@ -9,13 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.config import get_settings
 from aethergate.dev_identity import ensure_dev_identity
-from aethergate.domain.ids import ApiCredentialId, PrincipalId, ProjectId
+from aethergate.domain.entities import RequestContext
 from aethergate.errors import AuthenticationRequired
+from aethergate.identity import service as identity_service
 from aethergate.persistence.db import get_session_factory
 from aethergate.scheduler.runtime import build_scheduling_service
 from aethergate.scheduler.service import SchedulingService
-
-RequestContext = tuple[ProjectId, PrincipalId, ApiCredentialId]
 
 
 def get_gateway_request_id(request: Request) -> str:
@@ -32,25 +38,37 @@ def build_scheduler() -> SchedulingService:
     return build_scheduling_service()
 
 
-def require_inference_access() -> None:
-    """Fail closed unless the explicit development auth bypass is enabled.
+async def _resolve_auth(request: Request) -> RequestContext:
+    """Authenticate the request and return the durable authorization context.
 
-    This is a temporary policy for the first nomnom smoke test, not the final
-    API-key authentication design.
+    A present Authorization header is always parsed strictly and authenticated;
+    an invalid key never falls through to the development bypass. The bypass is
+    consulted only when no header is supplied and is enabled (dev/test mode).
     """
-    if not get_settings().allow_inference_auth_bypass:
-        raise AuthenticationRequired()
+    settings = get_settings()
+    auth_values = request.headers.getlist("authorization")
+    if auth_values:
+        token = identity_service.parse_bearer_token(auth_values)
+        async with get_session_factory()() as session:
+            async with session.begin():
+                return await identity_service.authenticate(session, token)
+
+    if settings.allow_inference_auth_bypass:
+        async with get_session_factory()() as session:
+            async with session.begin():
+                return await ensure_dev_identity(session)
+
+    raise AuthenticationRequired()
 
 
-async def dev_request_context() -> RequestContext:
-    """Return the stable development identity context for bypassed requests.
+async def request_context(request: Request) -> RequestContext:
+    """FastAPI dependency yielding the authenticated request context."""
+    return await _resolve_auth(request)
 
-    Only reachable while the development auth bypass is enabled; production
-    mode fails closed in the config layer before this dependency runs.
-    """
-    async with get_session_factory()() as session:
-        async with session.begin():
-            return await ensure_dev_identity(session)
+
+async def require_inference_access(request: Request) -> None:
+    """FastAPI dependency that authenticates but discards the resolved context."""
+    await _resolve_auth(request)
 
 
 def scheduler_service() -> SchedulingService:
@@ -62,8 +80,8 @@ __all__ = [
     "AsyncSession",
     "RequestContext",
     "build_scheduler",
-    "dev_request_context",
     "get_gateway_request_id",
+    "request_context",
     "require_inference_access",
     "scheduler_service",
 ]

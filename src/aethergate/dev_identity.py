@@ -3,9 +3,14 @@
 While the explicit development inference auth bypass from AGV2-004 exists, the
 scheduler still needs stable attribution (project/principal/credential) rather
 than random per-request values. This module provides an idempotent seeded
-"dev" identity and a resolver that is only ever consulted when the bypass is
-enabled. Production mode fails closed in the config layer and never reaches this
-code path.
+"dev" identity that is only ever consulted when the bypass is enabled AND no
+Authorization header is supplied. Production mode fails closed in the config
+layer and never reaches this code path.
+
+The dev credential is a synthetic identity with no verifiable key (``key_hash``
+is NULL), so it can never be presented as a real Bearer token. It carries the
+inference audience and ``inference:invoke`` scope so pre-dispatch authorization
+revalidation treats it consistently with real credentials.
 
 This is development/bootstrap tooling, not the final OIDC/auth system.
 """
@@ -13,33 +18,25 @@ This is development/bootstrap tooling, not the final OIDC/auth system.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import PrincipalKind
-from aethergate.domain.ids import (
-    ApiCredentialId,
-    PrincipalId,
-    ProjectId,
-    SecretRefId,
-)
+from aethergate.domain.entities import RequestContext
+from aethergate.domain.enums import CredentialAudience, CredentialScope, PrincipalKind
+from aethergate.domain.ids import ApiCredentialId, PrincipalId, ProjectId
 from aethergate.persistence import repository
 
 DEV_PROJECT_NAME = "dev"
 DEV_PRINCIPAL_NAME = "dev"
 DEV_CREDENTIAL_NAME = "dev"
-DEV_SECRET_REF_NAME = "dev-credential"
 
 
 def _new_id() -> str:
     return uuid.uuid4().hex
 
 
-async def ensure_dev_identity(
-    session: AsyncSession,
-) -> tuple[ProjectId, PrincipalId, ApiCredentialId]:
+async def ensure_dev_identity(session: AsyncSession) -> RequestContext:
     """Idempotently seed and return the stable development identity context."""
     project = await repository.get_project_by_name(session, DEV_PROJECT_NAME)
     if project is None:
@@ -66,14 +63,6 @@ async def ensure_dev_identity(
         session, project.id, DEV_CREDENTIAL_NAME
     )
     if credential is None:
-        secret_ref = domain.SecretRef(
-            id=SecretRefId(_new_id()),
-            name=DEV_SECRET_REF_NAME,
-            created_at=datetime.now(UTC),
-        )
-        # The dev credential references a placeholder secret ref; its material is
-        # never resolved in the bypass path.
-        created_ref = await repository.create_secret_ref(session, secret_ref)
         credential = await repository.create_api_credential(
             session,
             domain.ApiCredential(
@@ -81,8 +70,15 @@ async def ensure_dev_identity(
                 project_id=project.id,
                 principal_id=principal.id,
                 name=DEV_CREDENTIAL_NAME,
-                secret_ref_id=created_ref.id,
+                audience=CredentialAudience.INFERENCE,
+                scopes=(CredentialScope.INFERENCE_INVOKE,),
             ),
         )
 
-    return project.id, principal.id, credential.id
+    return RequestContext(
+        project_id=project.id,
+        principal_id=principal.id,
+        api_credential_id=credential.id,
+        audience=credential.audience,
+        scopes=credential.scopes,
+    )

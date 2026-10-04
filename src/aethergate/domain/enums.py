@@ -25,6 +25,24 @@ class PrincipalKind(StrEnum):
     SERVICE_ACCOUNT = "service_account"
 
 
+class CredentialAudience(StrEnum):
+    """Which surface a scoped API credential may authenticate against."""
+
+    INFERENCE = "inference"
+    ADMIN = "admin"
+
+
+class CredentialScope(StrEnum):
+    """Granular permission scopes carried by a credential.
+
+    Inference phase 1 implements only ``inference:invoke``; the enum is
+    extensible so future resource/admin scopes can be added without replacing
+    the credential model.
+    """
+
+    INFERENCE_INVOKE = "inference:invoke"
+
+
 class RequestState(StrEnum):
     """Lifecycle states for an inference request (scheduler-facing)."""
 
@@ -92,6 +110,8 @@ __all__ = [
     "Capability",
     "BillingUnit",
     "PrincipalKind",
+    "CredentialAudience",
+    "CredentialScope",
     "RequestState",
     "ExecutionAttemptState",
     "LedgerEntryType",

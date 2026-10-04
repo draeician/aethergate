@@ -26,6 +26,7 @@ from aethergate.catalog.service import (
     resolve_model_alias_by_id,
 )
 from aethergate.config import Settings
+from aethergate.domain.entities import RequestContext
 from aethergate.domain.enums import BillingUnit, QuotaMetric, RequestState
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -39,6 +40,7 @@ from aethergate.domain.ids import (
 from aethergate.encryption import QueueEncryptor
 from aethergate.errors import (
     AmbiguousRoute,
+    AuthenticationRequired,
     DestinationDenied,
     DomainError,
     ModelAliasNotFound,
@@ -50,6 +52,7 @@ from aethergate.errors import (
     SecretResolutionError,
     UnsupportedProvider,
 )
+from aethergate.identity import service as identity_service
 from aethergate.inference.service import InferenceService, PreparedDispatch
 from aethergate.persistence import models
 from aethergate.scheduler import repository as scheduler_repository
@@ -290,10 +293,12 @@ class SchedulingService:
         messages: list[Message],
         params: GenerationParams,
         stream: bool,
-        context: tuple[ProjectId, PrincipalId, ApiCredentialId],
+        context: RequestContext,
     ) -> EnqueuedRequest:
         """Validate/resolve, then enqueue an encrypted request durably."""
-        project_id, principal_id, api_credential_id = context
+        project_id = context.project_id
+        principal_id = context.principal_id
+        api_credential_id = context.api_credential_id
         async with self._session_factory() as session:
             resolved = await resolve_model_alias(session, alias_name)
             self._inference.validate_destination(resolved)
@@ -562,6 +567,37 @@ class SchedulingService:
                     return None
                 request_id = request.id
                 model_alias_id = ModelAliasId(request.model_alias_id)
+
+                try:
+                    await identity_service.authorize_for_dispatch(
+                        session,
+                        project_id=(
+                            ProjectId(request.project_id) if request.project_id else None
+                        ),
+                        principal_id=(
+                            PrincipalId(request.principal_id)
+                            if request.principal_id
+                            else None
+                        ),
+                        api_credential_id=(
+                            ApiCredentialId(request.api_credential_id)
+                            if request.api_credential_id
+                            else None
+                        ),
+                    )
+                except AuthenticationRequired:
+                    # Revocation/expiry/inactivation applied while queued must
+                    # block dispatch without contacting upstream or reserving
+                    # any quota/budget/endpoint capacity.
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="authorization_failed",
+                        finished_at=now,
+                    )
+                    logger.info("request=%s failed authorization revalidation", request_id)
+                    return "processed"
 
                 try:
                     resolved = await resolve_model_alias_by_id(session, model_alias_id)

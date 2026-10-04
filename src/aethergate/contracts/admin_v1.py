@@ -20,6 +20,8 @@ from aethergate.contracts.common import ContractModel
 from aethergate.domain.enums import (
     BillingUnit,
     Capability,
+    CredentialAudience,
+    CredentialScope,
     LedgerEntryType,
     PrincipalKind,
     QuotaMetric,
@@ -94,22 +96,50 @@ class PrincipalUpdate(ContractModel):
     is_active: bool | None = None
 
 
-# --- API credentials metadata -----------------------------------------------
+# --- API credentials ---------------------------------------------------------
 
 
 class ApiCredentialCreate(ContractModel):
     project_id: ProjectId
     principal_id: PrincipalId | None = None
     name: str = Field(min_length=1)
+    audience: CredentialAudience = CredentialAudience.INFERENCE
+    scopes: tuple[CredentialScope, ...] = (CredentialScope.INFERENCE_INVOKE,)
+    expires_at: datetime | None = None
 
 
 class ApiCredentialRead(ContractModel):
+    """Credential metadata; never the raw key or its verifier/hash."""
+
     id: ApiCredentialId
     project_id: ProjectId
     principal_id: PrincipalId | None = None
     name: str
-    secret_ref_id: SecretRefId
+    key_prefix: str | None = None
+    audience: CredentialAudience
+    scopes: tuple[CredentialScope, ...]
+    created_at: datetime
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
     is_active: bool
+
+
+class ApiCredentialCreateResult(ContractModel):
+    credential: ApiCredentialRead
+    raw_key: str = Field(min_length=1)
+
+
+class ApiCredentialRotateResult(ContractModel):
+    credential: ApiCredentialRead
+    raw_key: str = Field(min_length=1)
+
+
+class ApiCredentialRevokeRequest(ContractModel):
+    reason: str | None = Field(default=None, min_length=1)
+
+
+class ApiCredentialRevokeResult(ContractModel):
+    credential: ApiCredentialRead
 
 
 class ApiCredentialUpdate(ContractModel):
@@ -468,7 +498,11 @@ __all__ = [
     "PrincipalRead",
     "PrincipalUpdate",
     "ApiCredentialCreate",
+    "ApiCredentialCreateResult",
     "ApiCredentialRead",
+    "ApiCredentialRotateResult",
+    "ApiCredentialRevokeRequest",
+    "ApiCredentialRevokeResult",
     "ApiCredentialUpdate",
     "ProviderCreate",
     "ProviderRead",

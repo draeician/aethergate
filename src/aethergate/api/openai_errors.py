@@ -33,6 +33,7 @@ def _error(
     *,
     code: str | None = None,
     request_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     body = ErrorResponse(
         error={
@@ -42,7 +43,7 @@ def _error(
             "request_id": request_id,
         }
     )
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    return JSONResponse(status_code=status_code, content=body.model_dump(), headers=headers)
 
 
 def to_openai_error(exc: DomainError, request_id: str | None) -> JSONResponse:
@@ -117,6 +118,7 @@ def to_openai_error(exc: DomainError, request_id: str | None) -> JSONResponse:
             "invalid_request_error",
             code="not_authenticated",
             request_id=request_id,
+            headers={"WWW-Authenticate": "Bearer"},
         )
     if isinstance(exc, QueueFull):
         return _error(

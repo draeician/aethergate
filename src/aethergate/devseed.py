@@ -440,12 +440,12 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                     ),
                 )
 
-            project_id, _, _ = await ensure_dev_identity(session)
+            ctx = await ensure_dev_identity(session)
             await _seed_price_and_budget(
                 session,
                 args=args,
                 route_binding_id=binding.id,
-                project_id=project_id,
+                project_id=ctx.project_id,
             )
 
     return {
