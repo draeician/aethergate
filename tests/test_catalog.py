@@ -14,7 +14,12 @@ from aethergate.domain.ids import (
     ProviderId,
     RouteBindingId,
 )
-from aethergate.errors import AmbiguousRoute, ModelAliasNotFound, ResourceInactive
+from aethergate.errors import (
+    AmbiguousRoute,
+    ModelAliasNotFound,
+    ResourceInactive,
+    RouteUnresolved,
+)
 from aethergate.persistence import repository
 
 
@@ -56,6 +61,7 @@ async def _seed_base(session):
             model_alias_id=ModelAliasId("alias-1"),
             endpoint_id=EndpointId("ep-1"),
             provider_account_id=ProviderAccountId("acct-1"),
+            upstream_model="gpt-4-upstream",
         ),
     )
 
@@ -66,6 +72,26 @@ async def test_resolve_active_alias(session):
     assert resolved.alias.name == "gpt-4"
     assert resolved.provider.id == ProviderId("prov-1")
     assert resolved.endpoint.base_destination == "https://api.example.com"
+    assert resolved.upstream_model == "gpt-4-upstream"
+
+
+async def test_resolve_rejects_missing_upstream_model(session):
+    await _seed_base(session)
+    await repository.create_model_alias(
+        session, domain.ModelAlias(id=ModelAliasId("alias-noup"), name="no-upstream")
+    )
+    await repository.create_route_binding(
+        session,
+        domain.RouteBinding(
+            id=RouteBindingId("rb-noup"),
+            model_alias_id=ModelAliasId("alias-noup"),
+            endpoint_id=EndpointId("ep-1"),
+            provider_account_id=ProviderAccountId("acct-1"),
+            upstream_model=None,
+        ),
+    )
+    with pytest.raises(RouteUnresolved):
+        await resolve_model_alias(session, "no-upstream")
 
 
 async def test_unknown_alias_rejected(session):
@@ -106,6 +132,7 @@ async def test_inactive_endpoint_rejected(session):
             model_alias_id=ModelAliasId("alias-2"),
             endpoint_id=EndpointId("ep-off"),
             provider_account_id=ProviderAccountId("acct-1"),
+            upstream_model="m2-upstream",
         ),
     )
     with pytest.raises(ResourceInactive):
@@ -147,6 +174,7 @@ async def test_inactive_provider_rejected(session):
             model_alias_id=ModelAliasId("alias-3"),
             endpoint_id=EndpointId("ep-off2"),
             provider_account_id=ProviderAccountId("acct-off"),
+            upstream_model="m3-upstream",
         ),
     )
     with pytest.raises(ResourceInactive):
@@ -162,6 +190,7 @@ async def test_ambiguous_multi_route_rejected(session):
             model_alias_id=ModelAliasId("alias-1"),
             endpoint_id=EndpointId("ep-1"),
             provider_account_id=ProviderAccountId("acct-1"),
+            upstream_model="gpt-4-upstream-2",
         ),
     )
     with pytest.raises(AmbiguousRoute):

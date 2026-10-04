@@ -18,6 +18,8 @@ def _clear_db_env(monkeypatch):
         "POSTGRES_USER",
         "POSTGRES_PASSWORD",
         "AETHERGATE_ENV",
+        "AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS",
+        "AETHERGATE_UPSTREAM_ALLOWLIST",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -54,3 +56,30 @@ def test_secret_masked_in_repr():
 def test_explicit_environment_mode():
     assert Settings(app_env="prod", database_url="postgresql://x").app_env == "prod"
     assert Settings(database_url="postgresql://x").app_env == "dev"
+
+
+def test_inference_auth_bypass_forbidden_in_prod():
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="prod",
+            database_url="postgresql://x",
+            allow_inference_auth_bypass=True,
+        )
+
+
+def test_inference_auth_bypass_allowed_in_dev():
+    settings = Settings(
+        app_env="dev",
+        database_url="postgresql://x",
+        allow_inference_auth_bypass=True,
+    )
+    assert settings.allow_inference_auth_bypass is True
+
+
+def test_upstream_allowlist_parsing():
+    settings = Settings(
+        database_url="postgresql://x",
+        upstream_allowlist="HostA, hostb,,127.0.0.1",
+    )
+    assert settings.upstream_allowlist_hosts == {"hosta", "hostb", "127.0.0.1"}
+    assert Settings(database_url="postgresql://x").upstream_allowlist_hosts == set()

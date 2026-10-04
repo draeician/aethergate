@@ -51,6 +51,18 @@ routes with no selection policy raise an explicit ambiguity error — there is n
 "unknown model -> Ollama" fallback. This is the configuration boundary the next inference task
 consumes. (Direction)
 
+The `RouteBinding` carries the provider-facing `upstream_model`; resolution now requires a
+non-empty `upstream_model` on the selected route and returns it as `ResolvedRoute.upstream_model`.
+A route with no `upstream_model` is unresolved and raises `RouteUnresolved` (implemented in the
+first inference milestone).
+
+## Direct dispatch (current milestone)
+
+The first inference path directly dispatches a single resolved route to the provider adapter
+(LiteLLM) and does **not** queue, reserve quota, apply fallback policy, or retry. The durable
+scheduler and queueing described in `scheduler.md` are out of scope for this milestone.
+
+
 ## Provider feedback
 
 - Provider-specific token reservation and reset-window semantics are captured in the provider

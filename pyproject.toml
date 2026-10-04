@@ -15,6 +15,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30,<3",
     "asyncpg>=0.29,<1",
     "alembic>=1.13,<2",
+    "litellm>=1.100,<2",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx2>=2.13",
     "ruff>=0.5",
+    "openai>=2,<3",
 ]
 
 [tool.setuptools.packages.find]

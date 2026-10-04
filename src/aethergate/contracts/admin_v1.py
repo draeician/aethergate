@@ -216,6 +216,7 @@ class RouteBindingCreate(ContractModel):
     model_alias_id: ModelAliasId
     endpoint_id: EndpointId
     provider_account_id: ProviderAccountId
+    upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
 
 
@@ -224,11 +225,13 @@ class RouteBindingRead(ContractModel):
     model_alias_id: ModelAliasId
     endpoint_id: EndpointId
     provider_account_id: ProviderAccountId
+    upstream_model: str | None = None
     quota_group_id: QuotaGroupId | None = None
     is_active: bool
 
 
 class RouteBindingUpdate(ContractModel):
+    upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
     is_active: bool | None = None
 

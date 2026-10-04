@@ -140,6 +140,10 @@ class ModelAlias(Entity):
 class RouteBinding(Entity):
     """A permitted route from a model alias to an endpoint/account.
 
+    ``upstream_model`` is the provider-facing model/deployment identifier that
+    must be invoked. It is provider-specific opaque configuration, separate from
+    the public ``ModelAlias.name``, and is never derived implicitly from it.
+
     Referencing a quota group here does not grant quota ownership; it only
     associates the route with a shared allowance scope.
     """
@@ -148,6 +152,7 @@ class RouteBinding(Entity):
     model_alias_id: ModelAliasId
     endpoint_id: EndpointId
     provider_account_id: ProviderAccountId
+    upstream_model: str | None = None
     quota_group_id: QuotaGroupId | None = None
     is_active: bool = True
 

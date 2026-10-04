@@ -38,3 +38,46 @@ class AmbiguousRoute(DomainError):
 
 class SecretResolutionError(DomainError):
     """Secret material could not be resolved inside the trusted runtime."""
+
+
+class RouteUnresolved(DomainError):
+    """An active route has no provider-facing model configured yet."""
+
+    def __init__(self, route_id: str) -> None:
+        super().__init__(
+            f"route {route_id!r} has no upstream model configured"
+        )
+        self.route_id = route_id
+
+
+class UnsupportedProvider(DomainError):
+    """No adapter is registered for the requested provider kind."""
+
+    def __init__(self, provider_kind: str) -> None:
+        super().__init__(f"no adapter for provider kind {provider_kind!r}")
+        self.provider_kind = provider_kind
+
+
+class DestinationDenied(DomainError):
+    """An upstream destination violates the egress/destination policy."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"upstream destination denied: {reason}")
+        self.reason = reason
+
+
+class ProviderError(DomainError):
+    """An upstream provider failure, safe for client-visible mapping.
+
+    ``message`` is a sanitized description; it must never contain credentials,
+    upstream URLs, or secret material.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+class AuthenticationRequired(DomainError):
+    """Inference authentication is not configured/allowed for this request."""

@@ -146,6 +146,7 @@ class RouteBinding(Base, TimestampMixin):
     provider_account_id: Mapped[str] = mapped_column(
         ForeignKey("provider_accounts.id"), nullable=False, index=True
     )
+    upstream_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     quota_group_id: Mapped[str | None] = mapped_column(
         ForeignKey("quota_groups.id"), nullable=True, index=True
     )

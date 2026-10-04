@@ -31,6 +31,35 @@ class Settings(BaseSettings):
 
     log_level: str = "info"
 
+    # Development-only inference auth bypass. Must never be enabled in prod.
+    allow_inference_auth_bypass: bool = Field(
+        default=False, validation_alias="AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS"
+    )
+    # Comma-separated upstream host allowlist for the egress destination guard.
+    upstream_allowlist: str = Field(
+        default="", validation_alias="AETHERGATE_UPSTREAM_ALLOWLIST"
+    )
+    inference_timeout_seconds: float = Field(
+        default=120.0, validation_alias="AETHERGATE_INFERENCE_TIMEOUT_SECONDS"
+    )
+
+    @property
+    def upstream_allowlist_hosts(self) -> set[str]:
+        """Parsed, normalized set of allowlisted upstream hostnames."""
+        return {
+            host.strip().lower()
+            for host in self.upstream_allowlist.split(",")
+            if host.strip()
+        }
+
+    @model_validator(mode="after")
+    def _forbid_insecure_auth_bypass_in_prod(self) -> Settings:
+        if self.app_env == "prod" and self.allow_inference_auth_bypass:
+            raise ValueError(
+                "allow_inference_auth_bypass cannot be enabled in production mode"
+            )
+        return self
+
     @model_validator(mode="after")
     def _require_database_config(self) -> Settings:
         if self.database_url is not None:

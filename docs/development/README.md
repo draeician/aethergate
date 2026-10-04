@@ -49,6 +49,33 @@ scripts/dev/v2 <command>
 - `GET /health/live` — process liveness.
 - `GET /health/ready` — readiness; returns `503` with `{"status":"not_ready"}` when PostgreSQL is
   unavailable.
+- `GET /v1/models` — list active public model aliases.
+- `GET /v1/models/{model}` — retrieve a public model alias.
+- `POST /v1/chat/completions` — Chat Completions (non-streaming + SSE `stream=true`).
+
+Inference is a **direct-dispatch** path and does **not** yet queue or reserve quota. It is
+unauthenticated only under `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` (development only, and
+rejected in `prod` mode). Upstream hosts must be explicitly allowlisted via
+`AETHERGATE_UPSTREAM_ALLOWLIST` (comma-separated); empty means deny all.
+
+## Seeding a development backend
+
+Because the admin API is not implemented yet, seed the minimum inference configuration
+idempotently through the service/repository layer:
+
+```bash
+docker compose --project-directory deploy/v2 --file deploy/v2/compose.yaml \
+  run --rm --no-deps api python -m aethergate.devseed \
+  --kind ollama \
+  --upstream-model 'qwen3.8-2b-distill:Q6_K' \
+  --alias gpt-4 \
+  --base-destination http://<host>:11434
+```
+
+Values may also be provided via `AETHERGATE_SEED_PROVIDER_KIND`, `AETHERGATE_SEED_UPSTREAM_MODEL`,
+`AETHERGATE_SEED_PUBLIC_ALIAS`, `AETHERGATE_SEED_BASE_DESTINATION`, and
+`AETHERGATE_SEED_SECRET_REF_NAME`. The destination host must already be present in the upstream
+allowlist.
 
 ## Tests
 
@@ -65,5 +92,5 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 ## Migrations
 
-The v2 schema baseline lives under `src/aethergate/migrations/` (revision `0001`). Schema is
-applied only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.
+The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001` and `0002`).
+Schema is applied only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

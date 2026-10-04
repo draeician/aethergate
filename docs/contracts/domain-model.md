@@ -61,6 +61,10 @@ universal authorization requirement.
 - `QuotaGroup` — shared allowance scope across routes/endpoints/models.
 - `ModelAlias` — stable public model identity (distinct from endpoint/provider identity).
 - `RouteBinding` — permitted route from alias to endpoint/account with policy metadata.
+  Since the first inference milestone it also carries `upstream_model`, the provider-facing
+  model/deployment identifier to invoke. `upstream_model` is provider-specific opaque
+  configuration kept separate from the public `ModelAlias.name` and never derived implicitly
+  from it. A route without a configured `upstream_model` is unresolved and cannot be dispatched.
 
 Creating an additional alias or route does not imply additional provider capacity, and
 referencing a quota group on a route does not imply quota ownership.

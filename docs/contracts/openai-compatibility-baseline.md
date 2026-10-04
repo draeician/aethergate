@@ -25,6 +25,16 @@ into this repository; it is multi-megabyte and belongs to upstream.
 `/v1/responses` is the preferred modern API surface; `/v1/chat/completions` remains a
 supported compatibility surface.
 
+### Implementation status (first inference milestone)
+
+- `GET /v1/models` and `GET /v1/models/{model}` — implemented; publish active public model
+  aliases only (never provider-facing model names or routing internals).
+- `POST /v1/chat/completions` — implemented for non-streaming and SSE streaming, direct dispatch
+  only (no queueing). Transport/provider-control fields are rejected; unknown aliases return an
+  OpenAI-compatible structured error.
+- `POST /v1/responses`, `POST /v1/embeddings` — **not yet implemented** (still part of the v2
+  target, after this milestone).
+
 ## Compatibility principles
 
 - Compatibility behavior is **tested against official SDK clients, not assumed**.

@@ -109,6 +109,14 @@ async def get_provider(session: AsyncSession, provider_id: ProviderId) -> domain
     return _provider_to_domain(row) if row else None
 
 
+async def get_provider_by_name(session: AsyncSession, name: str) -> domain.Provider | None:
+    result = await session.execute(
+        select(models.Provider).where(models.Provider.name == name)
+    )
+    row = result.scalar_one_or_none()
+    return _provider_to_domain(row) if row else None
+
+
 def _provider_account_to_domain(row: models.ProviderAccount) -> domain.ProviderAccount:
     return domain.ProviderAccount(
         id=ProviderAccountId(row.id),
@@ -143,6 +151,16 @@ async def get_provider_account(
     return _provider_account_to_domain(row) if row else None
 
 
+async def get_provider_account_by_name(
+    session: AsyncSession, name: str
+) -> domain.ProviderAccount | None:
+    result = await session.execute(
+        select(models.ProviderAccount).where(models.ProviderAccount.name == name)
+    )
+    row = result.scalar_one_or_none()
+    return _provider_account_to_domain(row) if row else None
+
+
 def _endpoint_to_domain(row: models.Endpoint) -> domain.Endpoint:
     return domain.Endpoint(
         id=EndpointId(row.id),
@@ -168,6 +186,14 @@ async def create_endpoint(session: AsyncSession, entity: domain.Endpoint) -> dom
 
 async def get_endpoint(session: AsyncSession, endpoint_id: EndpointId) -> domain.Endpoint | None:
     row = await session.get(models.Endpoint, str(endpoint_id))
+    return _endpoint_to_domain(row) if row else None
+
+
+async def get_endpoint_by_name(session: AsyncSession, name: str) -> domain.Endpoint | None:
+    result = await session.execute(
+        select(models.Endpoint).where(models.Endpoint.name == name)
+    )
+    row = result.scalar_one_or_none()
     return _endpoint_to_domain(row) if row else None
 
 
@@ -204,12 +230,23 @@ async def get_model_alias_by_name(
     return _model_alias_to_domain(row) if row else None
 
 
+async def list_active_model_aliases(session: AsyncSession) -> list[domain.ModelAlias]:
+    """Return all active public model aliases, ordered by name."""
+    result = await session.execute(
+        select(models.ModelAlias)
+        .where(models.ModelAlias.is_active.is_(True))
+        .order_by(models.ModelAlias.name)
+    )
+    return [_model_alias_to_domain(r) for r in result.scalars().all()]
+
+
 def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
     return domain.RouteBinding(
         id=RouteBindingId(row.id),
         model_alias_id=ModelAliasId(row.model_alias_id),
         endpoint_id=EndpointId(row.endpoint_id),
         provider_account_id=ProviderAccountId(row.provider_account_id),
+        upstream_model=row.upstream_model,
         quota_group_id=QuotaGroupId(row.quota_group_id) if row.quota_group_id else None,
         is_active=row.is_active,
     )
@@ -223,6 +260,7 @@ async def create_route_binding(
         model_alias_id=str(entity.model_alias_id),
         endpoint_id=str(entity.endpoint_id),
         provider_account_id=str(entity.provider_account_id),
+        upstream_model=entity.upstream_model,
         quota_group_id=str(entity.quota_group_id) if entity.quota_group_id else None,
         is_active=entity.is_active,
     )
