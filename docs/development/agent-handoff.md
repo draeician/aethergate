@@ -2,147 +2,132 @@
 
 ## Current State
 - Branch: v2
-- Starting commit: 7fe496a (pulled latest origin/v2; AGV2-007 queued)
-- Implementation commit(s): `4865b66` `fix(scheduler): close residual invariants before quota expansion` (this task)
+- Starting commit: c26d2f7 (pulled latest origin/v2; AGV2-008 queued)
+- Implementation commit(s): `feat(scheduler): add shared request and token quotas` (this task)
 
 ## Task Completed
-AGV2-007 — close residual scheduler invariants before quota expansion. Made every coupled
-request+attempt transition all-or-nothing (lease renewal, dispatch, settle, recovery
-`outcome_unknown`), enforced total request lifetime independently of the API waiter, restricted
-reconciliation to verifiable dispositions, exposed endpoint `max_concurrency` on the admin DTOs,
-and documented the stream `[DONE]` marker. No schema change (migration `0004` already present);
-logic-only.
+AGV2-008 — scheduler phase 2 shared provider-account request/token quotas. Added a
+provider-account-scoped `QuotaGroup` with generic request/token limits, fixed UTC-epoch-anchored
+windows, per-request quota reservations, a conservative adapter token estimator, bounded output
+reservation, and provider-429 cooldown — all reserved transactionally with endpoint physical
+capacity in a deterministic lock order. No monetary project budgets (still deferred; needs the
+accounting/pricing foundation). No changes to legacy v1 `app/` or `frontend/src/`.
 
-## Scheduler invariant closure (AGV2-007) behavior
-- **Atomic coupled transitions**: `renew_lease`, `mark_dispatched`, `settle`, and recovery
-  `mark_outcome_unknown_expired` all transition request+attempt together. Any rowcount mismatch on
-  the second half raises `SchedulerInvariantError` (new in `errors.py`) and rolls the transaction
-  back, so a half-renewal / half-dispatch / half-settle is never persisted.
-- **Lease ownership**: renewal now also verifies `worker_id` (not just fencing token), and clamps
-  the renewed lease so it never outlives the request's `expires_at`. A heartbeat past the total
-  lifetime returns `False` and stops, so an expired execution can never be kept alive.
-- **Total-lifetime enforcement (worker-side)**: dispatch refuses a reserved request past
-  `expires_at` (expires it, abandons its attempt, releases capacity); `_settle` overrides any
-  local outcome to `expired`/`lifetime_exceeded` once `expires_at` has passed, so a result is
-  never persisted for a request the client already abandoned. Ambiguous post-lifetime cases
-  (worker dead / upstream still running) still surface as `outcome_unknown` via lease recovery.
-- **Reconciliation restricted**: only `failed|cancelled` are reconcilable. `succeeded` is rejected
-  (CLI + service) because an `outcome_unknown` request's result was never persisted.
-- **Admin DTOs**: `EndpointCreate`/`EndpointRead`/`EndpointUpdate` now carry `max_concurrency`
-  (positive via `ge=1`); `EndpointRead` exposes it.
-- **Stream `[DONE]`**: documented as a transport termination marker (not a success signal); it is
-  emitted on every stream ending, which the official OpenAI SDKs treat only as end-of-stream.
-
-## Scheduler hardening behavior
-- **Lease heartbeat**: `run_complete`/`run_stream` spawn a heartbeat task that renews both request
-  and attempt leases for the current fencing token, conditional on worker/fence/state. A stale fence
-  cannot renew. Heartbeat stops promptly on termination; no DB transaction spans provider inference.
-  Settings validated so `worker_heartbeat_seconds < worker_lease_seconds` (both positive).
-- **Consistent recovery**: post-dispatch lease expiry transitions request + active attempt to
-  `outcome_unknown` together (row-locked, idempotent under concurrent recovery); reservation stays
-  held; no auto-retry. Pre-dispatch (`reserved`) expiry is requeued, or expired if past queue-wait.
-- **Per-endpoint FIFO**: workers iterate endpoints ordered by each endpoint's oldest eligible queued
-  request and skip saturated endpoints, so a saturated endpoint never blocks an unrelated endpoint.
-- **Atomic queue cap**: count-then-insert serialized by a PostgreSQL transaction advisory lock
-  (`0x41475144`); no process-local counter.
-- **Queue-wait vs lifetime**: queued requests crossing `queue_wait_until` expire without contacting
-  upstream; dispatched requests are governed by total lifetime only. The API's wait uses the
-  persisted `expires_at` and durably cancels still-queued work on deadline.
-- **Cancellation/disconnect**: `request_cancellation` terminally cancels queued/reserved work
-  (releasing capacity) and flags dispatched/streaming work for the worker. API disconnect schedules
-  a detached durable-cancel task so uvicorn's response-cycle cancellation cannot abort the write.
-  Streaming never emits `finish_reason="stop"` for a failed/cancelled/expired/unknown stream.
-- **Graceful worker shutdown**: SIGINT/SIGTERM stop new claiming via a shutdown event; in-flight
-  execution finishes cooperatively. A hard kill that abandons dispatched work surfaces as
-  `outcome_unknown` via lease recovery.
-- **Reconciliation**: `python -m aethergate.reconcile list|resolve` (and `scripts/dev/v2 reconcile`)
-  inspects `outcome_unknown` requests without content and resolves them to `failed|cancelled` only
-  on explicit operator action, recording `reconciled_state/at/by` and releasing the held
-  reservation in the same transaction. `succeeded` is rejected. No bulk-release shortcut.
+## Scheduler quota behavior
+- **Quota model**: `QuotaGroup` requires `provider_account_id`; routes may reference a group only
+  when accounts match (enforced in `create_route_binding`). A group holds multiple `QuotaLimit`s
+  (`metric` requests|tokens, positive `limit_units`/`window_seconds`, `enabled`, optional name).
+- **Fixed windows**: anchored to the UTC epoch (`window_start = (epoch // window) * window`), range
+  `[start, start+window)`; no sliding-window semantics. `QuotaWindow` is authoritative
+  (`committed_units` + `reserved_units`, unique `(quota_limit_id, window_start)`); admission checks
+  `committed + reserved + requested <= limit` under row locks.
+- **Request quota**: a unit commits at durable dispatch intent, before upstream contact; queued /
+  pre-dispatch-cancelled work consumes none; a dispatched unit stays consumed even if upstream
+  fails; one attempt == one request-unit.
+- **Token quota**: pre-dispatch reserve `adapter.estimate_input_tokens(...)` + bounded output
+  (`max_tokens` or `route_binding.default_output_tokens`); reject explicitly when a token-quota
+  request cannot bound output or cannot fit an empty window. On success settle to actual reported
+  total usage (release unused); if actual exceeds reservation, record honestly (no truncation); on
+  post-dispatch failure/cancel with unknown usage commit the reserved amount conservatively;
+  `outcome_unknown` keeps the reservation until reconciliation/window expiry; reconciliation commits
+  (never creates) capacity; pre-dispatch cancel/reclaim releases.
+- **Lock order** (deterministic): quota group (FOR UPDATE) -> quota limits (stable ID order) ->
+  current quota-window rows (get-or-create via unique constraint + FOR UPDATE) -> endpoint row ->
+  request/attempt/reservation. All-or-nothing: if any quota lacks capacity, none is acquired; no DB
+  transaction stays open waiting for a reset.
+- **Eligibility/queue**: a quota-exhausted request stays queued with non-content `wait_reason`
+  (`quota_window_exhausted`/`quota_group_cooldown`), creates no execution attempt, does not spin
+  hot, and does not block an unrelated endpoint/group. FIFO within endpoint+scope preserved.
+- **Provider 429**: adapter error boundary preserves safe `status_code`/`retry_after_seconds` (no
+  header/URL leak); 429 applies cooldown to the route's group (`cooldown_until`); no auto-retry;
+  failed attempt remains consumed. Configurable fallback `provider_429_cooldown_seconds` (default 60).
 
 ## Key files
-- `src/aethergate/scheduler/repository.py` — admission lock, per-endpoint claim/list, atomic
-  lease renewal / dispatch / settle / recovery (`mark_dispatched`, `settle`, `renew_lease`,
-  `mark_outcome_unknown_expired`, `reclaim_expired_reserved`), queue-wait expiry,
-  `reconcile_request`, `list_outcome_unknown`.
-- `src/aethergate/scheduler/service.py` — heartbeat loop, worker-side total-lifetime enforcement,
-  `request_cancellation`, `reconcile`, `list_outcome_unknown`, per-endpoint `claim_and_reserve`,
-  persisted-deadline `wait_for_terminal`.
-- `src/aethergate/errors.py` — `SchedulerInvariantError` (internal atomicity signal).
-- `src/aethergate/api/openai_chat.py` — durable disconnect cancellation, no synthetic stop,
-  `[DONE]` semantics.
-- `src/aethergate/config.py` — `worker_heartbeat_seconds` + scheduler-timing validation.
-- `src/aethergate/domain/entities.py` — `Endpoint.max_concurrency` positivity validator.
-- `src/aethergate/persistence/models.py` — endpoints CHECK constraint + `reconciled_*` columns.
-- `src/aethergate/worker.py` — cooperative shutdown; `src/aethergate/reconcile.py` — reconcile CLI.
-- `src/aethergate/migrations/versions/0004_scheduler_hardening.py` — CHECK + reconciliation columns.
-- `src/aethergate/devseed.py` — `--max-concurrency` positivity guard; `scripts/dev/v2` — `reconcile`.
-- Tests: `tests/test_scheduler_hardening.py` (22 scenarios), `tests/test_worker.py`,
-  `tests/test_migrations.py` (0003->0004 + empty->head), `tests/test_settings.py`,
-  `tests/test_domain_entities.py`, `tests/test_persistence_models.py`.
+- `src/aethergate/domain/{ids,enums,entities}.py` — `QuotaLimitId`; `QuotaMetric`/
+  `QuotaReservationState`; `QuotaGroup.provider_account_id`, `QuotaLimit`,
+  `RouteBinding.default_output_tokens`.
+- `src/aethergate/contracts/admin_v1.py` — quota group/limit DTOs + route default output.
+- `src/aethergate/persistence/{models,repository}.py` — quota tables; group/limit persistence;
+  route-binding account-consistency validation.
+- `src/aethergate/migrations/versions/0005_shared_quotas.py` — quota schema + cooldown + wait_reason.
+- `src/aethergate/scheduler/repository.py` — `fixed_window_start`, `_get_or_create_quota_window`,
+  `reserve_quota`/`commit_request_quota`/`settle_token_quota`/`release_quota_reservations`,
+  `set_quota_group_cooldown`; reconcile commits reserved tokens.
+- `src/aethergate/scheduler/service.py` — `_reserve_quota_capacity`, quota reserve/commit/settle/
+  release/cooldown integration, `wait_reason`, `ClaimedWork.quota_group_id`.
+- `src/aethergate/adapters/{base,litellm}.py` — `estimate_input_tokens` protocol + LiteLLM impl;
+  `ProviderError(status_code, retry_after_seconds)` in `errors.py`.
+- `src/aethergate/inference/service.py` — `estimate_tokens` helper; `config.py` —
+  `provider_429_cooldown_seconds`.
+- `src/aethergate/devseed.py` — `--quota-group`/`--request-limit`/`--token-limit`/
+  `--default-output-tokens` (idempotent); `inspect_queue.py` — quota windows + limiting reasons.
+- Tests: `tests/test_scheduler_quota.py` (18 scenarios), `tests/test_domain_entities.py`,
+  `tests/test_contracts.py`, `tests/test_adapter.py`.
+
+## Automated tests (containerized, real PostgreSQL)
+`scripts/dev/v2 test` -> **164 passed** (was 140 before AGV2-008; +18 scheduler-quota, +3 domain,
++3 contracts). `ruff check src tests` -> all checks passed. `git diff --check` -> clean. Secret scan
+(file-name + content regex) -> clean.
+
+Coverage map (deterministic): quota limit domain/DTO validation; group-belongs-to-account; route
+cannot reference another account's group; fixed-window boundary; request-quota limit across aliases;
+quota exhaustion does not reserve endpoint slot; multiple request windows reserved together; two
+workers cannot exceed request limit; token reservation before dispatch; successful settlement to
+actual; over-reservation release; actual>reservation recorded honestly; dispatched failure commits
+reservation; pre-dispatch cancellation releases token; `outcome_unknown` keeps token reservation;
+request larger than empty window fails; unbounded output rejected; 429 cooldown scope; cooldown
+expiry; saturated group does not block unrelated group.
 
 ## Nomnom verification (actual commands/results)
-- Host = nomnom (`192.168.22.50/24`); `docker` = podman 4.9.3 + docker-compose 2.40.3. Backend =
-  ollama `qwen3.8-2b-distill:Q6_K`; aliases `gpt-4`/`gpt-4-beta` (two independent endpoints).
-- `scripts/dev/v2 test` -> **140 passed in 26s** (containerized, real PostgreSQL; +5 AGV2-007
-  scenarios: worker lifetime without API waiter, heartbeat refuses past lifetime, reserved-past-
-  lifetime not dispatched, reconcile rejects `succeeded`, half-renewal rolls back).
-- `ruff check` on changed files -> all checks passed.
-- Stream smoke test: stream succeeded and emitted `[DONE]`; `scripts/dev/v2 inspect` showed only
-  terminal states and 0 active reservations.
-- `reconcile resolve --disposition succeeded` -> rejected at the CLI (`{failed,cancelled}` only).
-- Migration from empty DB through `0004` and `0003`->`0004` both verified.
-- Real inference (official OpenAI SDK): non-stream and stream both succeeded against the current
-  backend (stream reassembled 31 chunks).
-- Six-request/two-slot invariant: 6 concurrent requests, all succeeded; DB attempt timestamps show
-  exactly two in-flight at a time (pairs at t=27.20/27.33, 27.67/27.91, 28.24/28.58), FIFO preserved.
-- **Lease heartbeat**: worker with lease=3s/heartbeat=0.5s ran a 15.7s inference (>4 lease periods);
-  request stayed `dispatched` with a live lease throughout and succeeded; 0 `outcome_unknown`.
-- **Dead-worker**: `death-worker` (lease=5s) dispatched a long request, was SIGKILLed; recovery marked
-  request+attempt `outcome_unknown`, reservation stayed held (1), exactly 1 attempt (no retry);
-  `reconcile resolve --disposition failed --by operator-test` -> `failed`, reservation 1->0.
-- **Cross-endpoint no-HOL**: A (ollama, concurrency 1) held busy until t=14.52; B (beta, concurrency
-  1) dispatched at t=03.71 without waiting for A's queued request; A2 (queued) dispatched at t=14.53
-  after A freed (FIFO within A). (Upstream ollama serializes generation, but gateway dispatch is
-  correct.)
-- **Queue-cap race**: `queue_max_requests=3`, 20 concurrent admissions -> 3 committed queued, 17
-  returned 503; queued count never exceeded 3.
-- **Queue-wait expiry**: 3 requests past `queue_wait_until` expired via recovery with 0 execution
-  attempts (never contacted upstream).
-- **Client disconnect**: streaming request disconnected before dispatch -> `cancelled` (0 attempts),
-  no `CancelledError` traceback in API logs.
-- **Graceful stop**: SIGTERM to a worker -> "received termination signal / no longer claiming",
-  exit code 0.
-- Dynamic AetherGate test port during verification: **44785** (changes on every `up`; re-run
+- Host = nomnom (`192.168.22.50/24`); docker = podman 4.9.3 + docker-compose 2.40.3. Backend =
+  ollama `qwen3.8-2b-distill:Q6_K` (verified via `/api/tags`).
+- Migrations: empty DB -> head (0001..0005) and live 0004 -> 0005 both applied cleanly
+  (`scripts/dev/v2 migrate`).
+- **Shared request quota across aliases**: seeded group `qa` (request 2/30s, token 60000/60s,
+  default output 64, endpoint `max_concurrency=4`) shared by aliases `gpt-4-a` and `gpt-4-b`. Fired
+  6 concurrent requests -> 2 dispatched per 30s fixed window, 4 durably queued with
+  `wait_reason=quota_window_exhausted`, then dispatched in subsequent windows (completion times
+  ~0.5s / 25.7s / 55.6s = 30s cadence). `inspect` showed `qa requests 2/2` committed per window
+  across six windows — never oversubscribed.
+- **Token quota**: `qa tokens` windows settled to actual usage (25 tokens/request = 17 prompt + 8
+  completion; reservation was the conservative input estimate + 64 output). `inspect` showed e.g.
+  `qa tokens 100/60000` for 4 requests.
+- **Regression (official OpenAI SDK)**: non-stream and stream (`stream=True`) both succeeded against
+  the live backend through the gateway (`gpt-4-a`, finish `stop`, 6 stream chunks).
+- Dynamic AetherGate test port during verification: **39875** (changes on every `up`; re-run
   `scripts/dev/v2 url`).
 
 ## Decisions
-- Recovery is conservative: post-dispatch lease expiry is never auto-retried or auto-released;
-  `outcome_unknown` keeps its slot until explicit reconciliation.
-- Queue cap is a single global bound (not per-endpoint), hence a single global advisory lock.
-- FIFO is per-endpoint; cross-endpoint ordering is by each endpoint's oldest eligible request only,
-  solely to avoid unrelated-endpoint starvation.
-- Cancellation on disconnect is scheduled as a detached task so ASGI response-cycle cancellation
-  cannot abort the durable write.
+- Windows are fixed and UTC-epoch-anchored; no sliding-window semantics (documented).
+- `committed_units` records actual usage honestly and may exceed `limit_units`; overage is not
+  truncated or hidden.
+- Token estimation is a conservative upper bound; a fallback is documented as such and never
+  masquerades as an authoritative provider token count.
+- Unknown-usage post-dispatch failure commits the reserved amount (never releases, never invents);
+  reconciliation likewise commits reserved tokens — it can never create capacity.
+- A single global advisory lock remains for the queue cap; quota windows use their own row locks
+  (per limit+window), so the queue cap and quota admission are independent.
 
 ## Deferred
-- Provider RPM/TPM windows; TPM/token reservation; shared provider-account quota windows; project
-  budgets; retries/cooldown orchestration — later phases, to be reserved together with endpoint
-  capacity.
-- Fairness/reordering within a single endpoint beyond FIFO.
-- Caching/wake-up for empty-queue arrival; queue-content encryption key rotation.
-- `/v1/responses`; scoped API-credential auth to replace the dev bypass; full admin CRUD API; v1
-  SQLite migration.
+- Project monetary budgets and pricing/accounting settlement (needs price snapshots/reservations,
+  then participates in the same atomic admission transaction).
+- Bounded retries with jitter for eligible failures.
+- Sliding-window quotas (if ever needed) and per-provider tokenizer correctness beyond the
+  conservative estimate.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token. `docker compose run` needs
   `--no-deps`. The dynamic API host port changes every `up` (and when scaling workers recreates the
   api container); re-run `scripts/dev/v2 url`.
 - `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content (upstream behavior, not a gateway
-  defect), and the ollama backend serializes concurrent generation even across distinct endpoints.
-- The devseed derives endpoint name from provider `kind`, so a second distinct endpoint was seeded
-  with a separate provider name; consider making endpoint identity an explicit seed arg later.
+  defect), and the ollama backend serializes concurrent generation, so gateway dispatch timings do
+  not reflect upstream parallelism.
+- The LiteLLM token estimator is conservative but not verified as authoritative for this model; the
+  gateway treats it as an upper-bound reservation, never as a TPM guarantee (see `scheduler.md`).
+- The devseed derives endpoint name from provider `kind`; multiple distinct endpoints require
+  distinct provider kinds. Consider making endpoint identity an explicit seed arg later.
 
 ## Recommended Next Step
-Begin quota expansion (provider RPM/TPM windows, token reservations, shared-account quota groups,
-project budgets) on the now-solid scheduler invariants, reserved together with endpoint capacity.
+Implement project monetary budgets: add price snapshots/reservations, then fold budget checks into
+the same atomic quota+concurrency admission transaction — without conflating budget with throughput
+quota.
