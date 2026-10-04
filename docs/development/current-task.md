@@ -1,25 +1,26 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-011
+AGV2-012
 
 ## Title
-Harden accounting and budget scheduling invariants
+Identity phase 1 — scoped inference API credentials and durable authorization context
 
 ## Ownership
-Primary: accounting/audit  
-Coordinating: scheduler/queueing, contracts, platform/testing
+Primary: identity/auth  
+Coordinating: contracts, scheduler/queueing, admin API foundation, platform/testing
 
 ## Why This Task Exists
 
-AGV2-010 successfully added immutable pricing snapshots, usage records, optional project budgets,
-budget reservations, ledger entries, and idempotent settlement, with 202 passing tests and live
-nomnom verification.
+The inference, scheduler, quota, and accounting core is now live-verified and hardened.
 
-Code-level review found several accounting/scheduling invariants that the test suite did not fully
-cover. Fix these before moving into identity/auth or admin API work.
+The OpenAI data plane still relies on an explicit development-only authentication bypass. Replace that
+with the first production-capable identity boundary before exposing the administrative API.
 
-Do not expand into OIDC, admin CRUD, UI, Responses API, or migration from v1 in this task.
+This task implements machine/service authentication for the inference surface only.
+
+Human OIDC login, browser sessions, OAuth device flow, and full admin RBAC are the next identity/admin
+phase and remain out of scope here.
 
 ## Compaction Recovery
 
@@ -29,11 +30,11 @@ If context is compacted, summarized, restarted, or you become uncertain what rem
 2. re-read `project_spec.md`;
 3. re-read this file;
 4. re-read `docs/development/agent-handoff.md`;
-5. inspect `git status` and recent commits;
+5. inspect `git status` and recent history;
 6. continue from repository state.
 
-Do not ask the user whether to commit, push, continue, or stop when this file already specifies the
-required completion behavior.
+Do not ask the user whether to commit, push, continue, or stop when this task already specifies the
+required behavior.
 
 ## Before You Start
 
@@ -44,385 +45,531 @@ required completion behavior.
    - `project_spec.md`
    - `docs/development/agent-handoff.md`
    - `docs/development/current-task.md`
-   - `docs/architecture/accounting.md`
-   - `docs/architecture/scheduler.md`
-   - `src/aethergate/accounting/repository.py`
-   - `src/aethergate/accounting/service.py`
-   - `src/aethergate/scheduler/repository.py`
-   - `src/aethergate/scheduler/service.py`
-   - `tests/test_accounting.py`
-4. Preserve all AGV2-009/010 scheduler, quota, lease, fencing, and settlement invariants.
+   - `docs/architecture/security.md`
+   - `docs/architecture/admin-api.md`
+   - `docs/contracts/admin-v1-foundation.md`
+   - `src/aethergate/api/deps.py`
+   - current Project / Principal / ApiCredential domain + persistence code
+4. Preserve all scheduler/quota/accounting invariants through AGV2-011.
 5. Do not modify/delete legacy v1 `app/` or `frontend/src/`.
-6. Do not commit unrelated files.
+6. Do not commit unrelated local/untracked files.
 
-## Required Fixes
+## Goal
 
-### 1. Prevent project-budget head-of-line blocking
+A normal OpenAI client should authenticate to AetherGate using an AetherGate-issued Bearer API key:
 
-Current scheduling scope is still:
+```text
+Authorization: Bearer agk_...
+```
 
-`(endpoint_id, quota_group_id)`
+A successful credential lookup must yield the durable request context:
 
-That is insufficient after project budgets were added.
+- project ID;
+- principal ID;
+- API credential ID;
+- inference audience/scope.
 
-Example:
+That context is then persisted on the queued request exactly as the scheduler/accounting stack already
+expects.
 
-- same endpoint;
-- same quota group;
-- project A has an exhausted budget;
-- project B has budget headroom;
-- A's request is older.
+The raw API key must never be stored in PostgreSQL and must never be recoverable from normal reads,
+logs, backups, or admin DTOs.
 
-Project B must not remain blocked behind A merely because A is the oldest request in the shared
-endpoint/quota scope.
+## Credential Model
+
+Refine `ApiCredential` into a one-way-verifiable client credential.
+
+The current `secret_ref_id` concept is appropriate for retrievable upstream provider secrets, but
+not for high-entropy client API keys whose plaintext never needs to be recovered.
+
+Use a model with at least:
+
+- stable opaque ApiCredential ID;
+- project ID;
+- principal ID;
+- name;
+- key prefix / display prefix;
+- cryptographic verifier/hash;
+- audience;
+- scopes/permissions;
+- created_at;
+- expires_at;
+- revoked_at;
+- is_active;
+- optional last_used_at if it can be updated safely without creating a hot write bottleneck.
+
+### Raw key format
+
+Generate AetherGate API keys using a recognizable non-secret prefix such as:
+
+`agk_<public-prefix>_<secret-material>`
+
+Requirements:
+
+- at least 256 bits of CSPRNG secret entropy;
+- generated with Python's `secrets` module or equivalent;
+- public/display prefix contains no meaningful secret entropy;
+- raw key returned exactly once at create/rotate boundary;
+- only the one-way verifier/hash and safe prefix are persisted.
+
+### Hashing
+
+Because generated credentials are high-entropy random tokens, a one-way SHA-256 verifier is acceptable
+for this credential type.
+
+Requirements:
+
+- hash the full raw key using SHA-256;
+- never log the raw key;
+- never return the hash in API/admin read DTOs;
+- exact lookup by hash is acceptable;
+- use constant-time comparison anywhere direct comparison is still performed;
+- do not reuse password-hashing assumptions for these generated random keys.
+
+Document why this is safe only for high-entropy generated tokens, not user passwords.
+
+## Audience and Scope Separation
+
+Administrative and inference audiences are separate.
+
+For this phase implement at least:
+
+- audience: `inference`;
+- scope: `inference:invoke`.
+
+Design enums/contracts so future scopes can include resource/admin permissions without replacing the
+credential model.
+
+Requirements:
+
+- inference endpoint rejects credential with wrong audience;
+- inference endpoint rejects credential without `inference:invoke`;
+- future admin credentials must not become valid for inference merely because they exist;
+- do not create a shared master key.
+
+## Project / Principal Semantics
+
+A credential must resolve to an active project and active principal.
+
+Requirements:
+
+- principal belongs to the credential's project;
+- service-account principal is the normal machine-auth principal for this task;
+- user principal support may exist in the data model but do not invent human login flows here;
+- inactive project => deny;
+- inactive principal => deny;
+- inactive credential => deny;
+- expired credential => deny;
+- revoked credential => deny;
+- missing/unknown credential => deny.
+
+Never silently fall back to the development identity when a Bearer credential is invalid.
+
+## Bearer Parsing
+
+Implement strict standards-aware Bearer parsing.
+
+Requirements:
+
+- missing header => 401;
+- wrong scheme => 401;
+- malformed Bearer value => 401;
+- multiple/ambiguous credential values => reject;
+- leading/trailing junk => reject;
+- safe OpenAI-compatible structured error response;
+- `WWW-Authenticate: Bearer` where appropriate;
+- no raw token echoed in error/log output.
+
+Do not accept API keys from query strings.
+
+For compatibility, `Authorization: Bearer <key>` is the canonical inference mechanism.
+
+## Request Context
+
+Replace the development-only dependency chain with a real authenticated request-context resolver.
+
+Use a typed object instead of a bare tuple if practical, e.g.:
+
+- project_id;
+- principal_id;
+- api_credential_id;
+- audience;
+- scopes.
+
+Requirements:
+
+- scheduler/admission receives the authenticated context;
+- usage/accounting attribution remains correct;
+- context cannot be client-overridden in the JSON body;
+- context is safe to log only by opaque IDs, never raw token;
+- development bypass may still create the same typed RequestContext in dev mode.
+
+## Development Auth Bypass
+
+Keep the bypass only as a deliberate development/test escape hatch.
+
+Requirements:
+
+- `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` remains impossible in production;
+- when bypass is enabled and no Authorization header is supplied, use the seeded stable development
+  identity;
+- when an Authorization header is supplied, authenticate it normally even in development;
+- an invalid supplied key must fail; it must never fall through to bypass;
+- document bypass as development-only.
+
+The real nomnom smoke test must run with bypass **disabled**.
+
+## Credential Lifecycle Service
+
+Implement identity service/repository operations for at least:
+
+### Create
+- create service-account credential;
+- generate raw secret;
+- persist verifier/hash + safe prefix only;
+- return raw key once.
+
+### Read/list
+- metadata only;
+- no secret/hash.
+
+### Revoke
+- sets durable revocation state;
+- immediately prevents new requests.
+
+### Rotate
+Preferred semantics:
+- create a new credential/key;
+- revoke the old credential atomically;
+- return new raw key once;
+- preserve project/principal/scope metadata unless explicit approved changes are supplied.
+
+Do not delete old credential metadata on rotation; retain auditability.
+
+No HTTP admin routes required yet. These are service/repository/contract foundations for the next
+/admin/v1 phase.
+
+## Revocation and Queued Work
+
+Security requirement: revocation applies to queued work.
+
+This means credential authorization must be revalidated immediately before scheduler reservation /
+dispatch, not only at API enqueue time.
 
 Required behavior:
 
-- FIFO within the same effective admission scope;
-- a budget-blocked project must not block another project that can dispatch;
-- endpoint physical capacity remains shared;
-- provider quota remains shared;
-- project budget remains project-specific.
+- credential active when enqueued;
+- credential revoked while queued;
+- worker reaches request later;
+- request must not contact upstream;
+- request transitions to an explicit safe terminal authorization failure;
+- no quota, endpoint, or budget reservation survives;
+- no price snapshot/usage/ledger entry is created as dispatched work;
+- already-dispatched work is not retroactively duplicated/retried.
 
-For this phase, extend the effective scheduling scope to include project identity or another stable
-budget-policy scope key sufficient to avoid cross-project budget HOL blocking.
+Also revalidate:
 
-If no project is present, null project is its own scope.
+- project active state;
+- principal active state;
+- credential expiry;
+- required inference audience/scope.
 
-Requirements:
+Avoid copying authorization policy into the router and worker separately; use one identity/auth service.
 
-- persisted scope metadata must remain non-content;
-- route/quota/project scope must be revalidated before dispatch;
-- configuration changes must not dispatch under stale policy;
-- FIFO remains preserved within one effective project+quota+endpoint scope;
-- same-project newer work cannot bypass older eligible work.
+## Key Enumeration / Timing Safety
 
-Add real and deterministic tests.
-
-### 2. Make the documented lock order match the implementation
-
-AGV2-010 handoff/docs state a deterministic lock order beginning with project budget state before
-provider quota state, but current scheduler evaluation locks quota before budget.
-
-Choose one canonical order and use it everywhere.
-
-Preferred:
-
-1. queued request / scheduling-scope row;
-2. active price policy;
-3. project budget policy/windows in stable ID order;
-4. provider quota group/limit/windows in stable ID order;
-5. endpoint physical capacity;
-6. reservation/attempt/request state mutations.
+Credential verification should not leak whether a safe prefix exists more than necessary.
 
 Requirements:
 
-- implementation and documentation must agree;
-- all workers use the same ordering;
-- accounting/config edit paths that lock the same rows must follow a compatible order;
-- add stress/concurrency tests intended to expose deadlock/order regressions;
-- do not hold a DB transaction across provider inference.
-
-### 3. Enforce exactly one enabled price policy per route
-
-Current lookup assumes at most one enabled price policy and uses `scalar_one_or_none()`, but the DB
-does not enforce that invariant.
-
-Add a database-backed invariant:
-
-- at most one enabled `PricePolicy` per `RouteBinding`;
-- disabled historical/edit records may coexist;
-- concurrent enables cannot produce two active policies.
-
-Prefer a PostgreSQL partial unique index on `route_binding_id WHERE enabled = true`.
-
-Add service/repository behavior and tests so a conflict is a clear domain/admin validation error
-rather than an unexpected scheduler `MultipleResultsFound`.
-
-Do not rewrite migration `0007`; add `0008`.
-
-### 4. Enforce billing-unit-specific price shape
-
-Current domain/DB contracts allow enabled price policies such as:
-
-- request billing with `request_price = NULL`;
-- token billing with missing input/output prices.
-
-The accounting helpers currently turn missing values into zero, which can silently create unintended
-free pricing.
-
-Fix this.
-
-Required invariants:
-
-#### Request billing
-- `request_price` is required;
-- token input/output prices must be null or explicitly rejected as incompatible;
-- `unit_scale` may remain 1/default.
-
-#### Token billing
-- `input_price` and `output_price` are both required;
-- `request_price` must be null;
-- `unit_scale >= 1`.
-
-Zero price is allowed when explicitly configured as Decimal zero. Missing price is not equivalent to
-zero.
-
-Enforce this in:
-
-- domain models;
-- admin-v1 DTOs;
-- persistence/service validation;
-- database CHECK constraints in migration `0008`.
-
-Add tests proving missing vs explicit zero are distinct.
-
-### 5. Detect conflicting idempotent settlement replays
-
-The task requirement was:
-
-- identical replay => no-op/same canonical result;
-- conflicting replay => explicit invariant error.
-
-Current low-level `create_usage_record` / `create_ledger_entry` uses
-`ON CONFLICT DO NOTHING` and returns the existing row without visibly checking that the replay data
-matches the canonical row.
-
-Harden this.
-
-For UsageRecord:
-
-- same request ID + same canonical settlement fields => idempotent same result;
-- same request ID + conflicting amount/currency/snapshot/route/attempt/usage fields => explicit
-  accounting invariant error.
-
-For LedgerEntry:
-
-- same idempotency key + same canonical fields => idempotent same result;
-- same key + conflicting project/usage/type/amount/currency => explicit invariant error.
-
-Do not compare volatile timestamps in a way that breaks legitimate replay semantics; define the
-canonical equality set explicitly.
-
-Add `AccountingInvariantError` or equivalent, internal-only.
-
-Add direct repository/service tests and crash/retry scheduler tests.
-
-### 6. No orphan historical price snapshot for pre-dispatch failure
-
-Price snapshots are described as the immutable historical capture of the price used for dispatched
-work.
-
-Current claim flow creates the snapshot during reservation, then marks durable dispatch intent in a
-separate transaction. A cancellation/expiry/invariant failure between those phases can leave a price
-snapshot attached to a request that never dispatched.
-
-Fix the lifecycle.
-
-Required invariant:
-
-- a request that never reaches durable dispatch intent must not retain a historical active price
-  snapshot as if pricing was used;
-- no UsageRecord or usage ledger entry exists pre-dispatch;
-- budget reservations still must be priced deterministically before dispatch.
-
-Choose a clean design, for example:
-
-- distinguish a pending price capture from immutable dispatched snapshot; or
-- defer/finalize snapshot activation at durable dispatch; or
-- another design that preserves immutable historical snapshots without orphaning them.
-
-Do not simply delete snapshots that may already be referenced by dispatched historical usage.
-
-Add race tests for:
-
-- cancellation after resource reservation but before durable dispatch;
-- expiry between reservation and dispatch;
-- dispatch invariant failure;
-- normal dispatch still creates exactly one immutable snapshot.
-
-### 7. Price-policy mutation must not race historical capture
-
-A concurrent admin/service price-policy edit must not cause a request to reserve under one price and
-snapshot another.
-
-Required:
-
-- the active price-policy row used for budget evaluation remains consistently locked/captured through
-  the final dispatch pricing decision;
-- reservation amount and immutable snapshot derive from the same canonical values/version;
-- concurrent policy edits either occur before the request's pricing decision or after it, never
-  partially through it.
-
-Add a deterministic concurrency test.
+- primary lookup should be based on the full credential hash or an equivalent fixed-cost indexed
+  verifier;
+- safe prefix is display/debug metadata, not the authentication selector;
+- invalid keys return indistinguishable authentication errors;
+- no response reveals project/principal existence.
 
 ## Migration
 
-Do not rewrite `0001` through `0007`.
+Do not rewrite migrations `0001` through `0008`.
 
-Add migration `0008` for at least:
+Add migration `0009`.
 
-- unique enabled price policy per route;
-- billing-unit-specific price-policy CHECK constraints;
-- any persisted scheduling-scope/snapshot-lifecycle fields required by the chosen design.
+Migrate the v2 identity schema to support the new credential model.
+
+At minimum:
+
+- credential verifier/hash;
+- safe prefix;
+- audience;
+- scopes;
+- expires_at;
+- revoked_at;
+- timestamps as needed;
+- appropriate indexes/uniqueness.
+
+The current development credential rows created by earlier tasks must be handled explicitly.
+
+Do not invent recoverable raw keys for existing rows.
+
+Acceptable direction:
+
+- mark/replace old dev-only credentials through the dev-seed workflow;
+- migrate old schema metadata safely;
+- require newly generated credentials for real auth.
+
+Remove `secret_ref_id` from the client-credential contract if no longer semantically correct, or make
+a clearly documented transitional schema change. Do not leave two competing credential-secret models
+without explanation.
 
 Migration requirements:
 
-- live `0007 -> 0008` succeeds;
+- existing nomnom `0008 -> 0009` succeeds;
 - empty DB -> latest succeeds;
-- detect invalid existing price-policy rows before adding constraints;
-- do not silently reinterpret missing prices as zero;
-- fail migration with a clear diagnostic if existing data violates a new invariant and cannot be
-  safely repaired without guessing.
+- no raw key is created/stored by migration;
+- no secret material appears in migration logs.
+
+## Admin Contract Foundations
+
+Update admin-v1 DTO foundations for credential lifecycle.
+
+At minimum:
+
+- ApiCredentialCreate;
+- ApiCredentialCreateResult (metadata + one-time raw key);
+- ApiCredentialRead;
+- ApiCredentialRotateResult;
+- ApiCredentialRevoke request/result if needed.
+
+Normal read/list DTOs must never contain:
+
+- raw key;
+- key hash/verifier.
+
+Expose safe metadata:
+
+- prefix;
+- audience;
+- scopes;
+- expires_at;
+- revoked_at/is_active.
+
+Do not implement the HTTP admin router yet.
 
 ## Real Nomnom Verification — Required
 
-Use the existing dynamic-port Docker/Podman workflow.
+Use the normal dynamic-port Docker/Podman workflow.
 
-Verify the current backend/model rather than assuming it.
+Verify the current backend/model first; do not assume ports.
 
-### A. Cross-project budget no-HOL
+Run with:
 
-Create two development projects sharing:
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`
 
-- the same physical endpoint;
-- the same provider account;
-- the same effective provider quota group;
-- the same request-priced route pricing.
+### A. Real API-key inference
 
-Configure:
+1. create/seed an active project;
+2. create a service-account principal;
+3. generate an inference credential through the identity service/dev-safe credential tool;
+4. capture raw key only in the test process/environment;
+5. call AetherGate with the official OpenAI Python SDK using that API key;
+6. non-stream completion succeeds;
+7. streaming completion succeeds;
+8. persisted request/usage attribution matches the credential's project/principal/credential IDs.
 
-- project A budget exhausted;
-- project B budget available.
+Do not write the raw key into the handoff.
 
-Queue older A work, then B work.
-
-Prove:
-
-- A remains budget-blocked;
-- B dispatches through the same endpoint/quota resources;
-- B does not wait for A's budget reset;
-- endpoint and quota limits remain respected;
-- FIFO remains correct within project A.
-
-### B. Single enabled price policy
-
-Attempt concurrent enable/create of two active price policies for the same route.
-
-Prove exactly one can be active and the loser receives a deterministic validation/conflict error.
-
-### C. Price-shape validation
-
-Prove in the running/containerized service layer:
-
-- request price omitted => rejected;
-- request price explicitly 0 => accepted;
-- token input or output price omitted => rejected;
-- explicit token zero prices => accepted when otherwise valid.
-
-### D. Pre-dispatch snapshot lifecycle
-
-Force a request into the reservation/pre-dispatch race and cancel/expire it before durable dispatch.
+### B. Missing/invalid key
 
 Prove:
 
-- no historical active price snapshot remains associated as dispatched pricing;
-- no usage record;
-- no usage ledger debit;
-- budget reservation is safely released.
+- missing key => 401;
+- random invalid key => 401;
+- malformed/wrong Bearer scheme => 401;
+- no upstream call is made;
+- no scheduler request is enqueued.
 
-Then run normal dispatch and prove exactly one immutable snapshot is retained.
+### C. Expiry
 
-### E. Idempotent conflict handling
+Create a short-lived/expired test credential.
 
-Run a normal priced request, then replay settlement:
+Prove an expired credential cannot enqueue/dispatch work.
 
-- identical replay => same canonical usage/ledger state, no duplicates;
-- conflicting replay => explicit invariant error, no mutation.
+### D. Revocation before request
 
-### F. Regression
+Revoke credential, then call inference.
+
+Prove immediate rejection.
+
+### E. Revocation while queued
+
+Create a request that remains queued due to controlled endpoint/quota/budget capacity.
+
+Revoke its credential before dispatch.
+
+Prove:
+
+- worker revalidation catches revocation;
+- request never contacts upstream;
+- it terminates with authorization failure;
+- no live quota/budget/endpoint reservation remains;
+- no usage/ledger entry created.
+
+### F. Inactive project/principal
+
+Independently deactivate:
+
+- project;
+- principal.
+
+Prove both block inference safely.
+
+### G. Audience/scope separation
+
+Create credentials with:
+
+- wrong audience;
+- missing `inference:invoke` scope.
+
+Prove both fail even when otherwise active.
+
+### H. Rotation
+
+Rotate an active credential.
+
+Prove:
+
+- old raw key stops working;
+- new raw key works;
+- old metadata remains as revoked history;
+- new secret revealed once;
+- no raw key/hash appears in normal reads.
+
+### I. Dev bypass regression
+
+In dev/test mode only:
+
+- bypass enabled + no Authorization => seeded dev identity works;
+- bypass enabled + invalid Authorization => 401, no fallback;
+- production config + bypass enabled => startup/config validation fails.
+
+### J. Regression
 
 Re-run:
 
-- official OpenAI SDK non-stream and stream;
-- request-priced budget live test;
-- six-request/two-slot endpoint test;
-- shared/cross-quota tests;
-- outcome_unknown budget reconciliation;
-- full automated suite.
+- full scheduler/quota/accounting suite;
+- official SDK real non-stream/stream;
+- six-request/two-slot;
+- budget and shared-quota regressions.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. project A budget exhaustion does not HOL-block project B on same endpoint/quota;
-2. FIFO preserved within project;
-3. cross-project shared endpoint concurrency remains correct;
-4. cross-project shared provider quota remains correct;
-5. implementation lock order matches documented order;
-6. stress test does not deadlock under concurrent budget/quota claims;
-7. only one enabled price policy per route;
-8. concurrent enable conflict;
-9. request billing requires request_price;
-10. explicit request price zero accepted;
-11. token billing requires both input and output prices;
-12. token explicit zero prices accepted;
-13. incompatible price fields rejected;
-14. identical UsageRecord replay idempotent;
-15. conflicting UsageRecord replay raises invariant error;
-16. identical LedgerEntry replay idempotent;
-17. conflicting LedgerEntry replay raises invariant error;
-18. pre-dispatch cancellation does not leave historical snapshot;
-19. pre-dispatch expiry does not leave historical snapshot;
-20. dispatch invariant failure does not leave historical snapshot;
-21. normal dispatch creates exactly one immutable snapshot;
-22. concurrent price edit cannot split reservation and snapshot values;
-23. migration 0007 -> 0008;
-24. empty DB -> latest;
-25. existing accounting/quota/scheduler test suites remain green;
-26. official SDK regressions remain green.
+1. key generation entropy/format;
+2. raw key hashes to persisted verifier;
+3. raw key never persisted;
+4. normal DTO never exposes hash/raw key;
+5. valid inference credential resolves typed RequestContext;
+6. missing Authorization;
+7. malformed Bearer;
+8. wrong scheme;
+9. invalid key;
+10. inactive credential;
+11. revoked credential;
+12. expired credential;
+13. inactive project;
+14. inactive principal;
+15. principal/project mismatch rejected;
+16. wrong audience rejected;
+17. missing inference scope rejected;
+18. dev bypass absent-header behavior;
+19. invalid supplied key never falls through to bypass;
+20. production forbids bypass;
+21. create returns raw key once;
+22. rotate revokes old and creates new;
+23. old rotated key fails;
+24. revoke is durable/idempotent;
+25. queued revocation blocks pre-dispatch;
+26. queued auth failure leaves no quota reservation;
+27. queued auth failure leaves no budget reservation/snapshot;
+28. queued auth failure leaves no endpoint reservation/attempt;
+29. attribution reaches InferenceRequest;
+30. attribution reaches UsageRecord;
+31. migration 0008 -> 0009;
+32. empty DB -> latest;
+33. existing 220-test baseline remains green;
+34. official SDK chat regressions remain green.
 
-## Still Deferred
+## Logging / Security
 
-Do not implement:
+Never log:
 
-- OIDC/auth/RBAC;
-- scoped production API-key authentication;
-- admin HTTP CRUD;
-- Linux CLI;
-- React UI;
-- principal-level budgets;
-- FX;
-- invoices/payments/prepaid balance deduction;
-- retry/fallback orchestration;
-- `/v1/responses`;
-- embeddings;
-- v1 SQLite migration.
+- raw API key;
+- Authorization header;
+- credential hash;
+- provider secrets;
+- queue encryption key.
+
+Safe logs may include:
+
+- gateway request ID;
+- opaque credential ID;
+- opaque principal/project IDs;
+- safe public key prefix.
+
+Add canary tests proving auth failures do not emit raw credential material.
 
 ## Documentation
 
 Update:
 
-- `docs/architecture/accounting.md`;
-- `docs/architecture/scheduler.md`;
+- `docs/architecture/security.md`;
 - `docs/contracts/domain-model.md`;
 - `docs/contracts/admin-v1-foundation.md`;
+- `docs/architecture/scheduler.md` for pre-dispatch revalidation;
 - `docs/development/README.md`;
 - `docs/development/agent-handoff.md`.
 
-Do not modify the dated architecture audit.
+Document explicitly:
+
+- generated high-entropy API keys use one-way SHA-256 verification;
+- this is not a password hashing scheme;
+- inference and admin audiences remain separate;
+- dev bypass is never production auth;
+- queued work is authorization-revalidated before dispatch;
+- OIDC/browser/device-flow/admin RBAC remain next-phase work.
+
+Do not modify the dated audit.
+
+## Still Deferred
+
+Do not implement in this task:
+
+- OIDC authorization-code flow;
+- browser sessions/cookies/CSRF;
+- OAuth device flow;
+- full admin RBAC;
+- admin HTTP CRUD routes;
+- CLI;
+- React UI;
+- principal-level budgets;
+- retry/fallback orchestration;
+- `/v1/responses`;
+- embeddings;
+- v1 SQLite migration.
 
 ## Verification Before Commit
 
 - full containerized test suite;
-- migration `0007 -> 0008`;
+- migration `0008 -> 0009`;
 - empty DB -> latest;
 - ruff/lint;
 - `git diff --check`;
 - secret scan;
+- auth-log canary check;
 - legacy `app/` and `frontend/src/` untouched;
 - dated audit unchanged;
-- all required nomnom verification complete.
+- all required nomnom auth verification complete with bypass disabled.
 
 ## Handoff
 
@@ -430,20 +577,19 @@ Update `docs/development/agent-handoff.md` with concise evidence for:
 
 - implementation commit(s);
 - migration revision;
-- budget scheduling scope and cross-project no-HOL proof;
-- canonical lock order;
-- unique active-price-policy enforcement;
-- billing-unit price-shape rules;
-- idempotency conflict behavior;
-- pre-dispatch price-snapshot lifecycle;
-- concurrent price-edit behavior;
+- API key format/verifier design without secret values;
+- identity/request-context model;
+- audience/scope behavior;
+- queued revocation behavior;
+- real SDK auth result;
+- rotation/revocation result;
 - final test count;
 - dynamic AetherGate port;
 - backend/model;
 - issues/risks;
 - exactly one recommended next step.
 
-No credentials, prompts, completions, encryption keys, or large logs.
+Never include a raw API key, Authorization header, verifier/hash, credential secret, or large logs.
 
 ## Commit and Push
 
@@ -451,7 +597,7 @@ Use conventional commits on branch `v2`.
 
 Suggested primary commit:
 
-`fix(accounting): harden budget scheduling and price invariants`
+`feat(identity): add scoped inference API credentials`
 
 A handoff-only follow-up commit is allowed.
 
