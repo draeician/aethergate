@@ -203,6 +203,21 @@ class ClaimedWork:
     quota_group_id: str | None = None
 
 
+@dataclass
+class _QuotaEvaluation:
+    """Outcome of evaluating (but not mutating) a request's quota constraints.
+
+    ``outcome`` is one of ``ok``, ``exhausted``, ``cooldown``, ``too_large``,
+    ``unbounded_output``, or ``estimator_unavailable``. ``plan`` holds the locked
+    windows to mutate later (same transaction) only when ``outcome`` is ``ok`` or
+    ``exhausted``.
+    """
+
+    outcome: str
+    plan: scheduler_repository.QuotaReservationPlan | None = None
+    cooldown_until: datetime | None = None
+
+
 def _error_hint(exc: BaseException) -> str:
     if isinstance(exc, ProviderError):
         return exc.message
@@ -426,23 +441,26 @@ class SchedulingService:
             )
 
     async def claim_and_reserve(self, worker_id: str) -> ClaimedWork | str | None:
-        """Claim one eligible request (FIFO per endpoint) and reserve capacity.
+        """Claim one eligible request (FIFO per scheduling scope) and reserve capacity.
 
-        Iterates over endpoints that hold eligible queued work, oldest first. A
+        Iterates over scheduling scopes (endpoint + effective quota group) that
+        hold eligible queued work, oldest first. A quota-blocked scope is skipped
+        so it never strands unrelated capacity on the same endpoint, and a
         saturated endpoint is skipped so it never blocks an unrelated endpoint
         with available capacity. Returns :class:`ClaimedWork`, ``"full"`` when
-        every candidate endpoint is saturated, ``"processed"`` when a request
-        was resolved to a failure, or ``None`` when nothing is eligible.
+        every candidate endpoint is saturated, ``"processed"`` when a request was
+        resolved to a failure, ``"quota"`` when eligible work is quota-blocked, or
+        ``None`` when nothing is eligible.
         """
         now = utcnow()
         async with self._session_factory() as session:
-            endpoints = await scheduler_repository.list_queued_endpoints(session, now)
+            scopes = await scheduler_repository.list_queued_scopes(session, now)
 
         saw_full = False
         saw_processed = False
         saw_quota = False
-        for endpoint_id, _oldest in endpoints:
-            outcome = await self._claim_endpoint(worker_id, endpoint_id)
+        for endpoint_id, quota_group_id, _oldest in scopes:
+            outcome = await self._claim_scope(worker_id, endpoint_id, quota_group_id)
             if isinstance(outcome, ClaimedWork):
                 return outcome
             if outcome == "full":
@@ -460,15 +478,17 @@ class SchedulingService:
             return "full"
         return None
 
-    async def _claim_endpoint(
-        self, worker_id: str, endpoint_id: str | None
+    async def _claim_scope(
+        self, worker_id: str, endpoint_id: str | None, quota_group_id: str | None
     ) -> ClaimedWork | str | None:
-        """Claim and reserve the oldest eligible request for one endpoint.
+        """Claim and reserve the oldest eligible request for one scheduling scope.
 
-        Reservation now includes shared quota capacity, reserved in the same
-        transaction as physical endpoint capacity. Quota is checked before the
-        endpoint slot is held, so a request never occupies a slot while merely
-        waiting on a future quota window.
+        Quota is evaluated first (locking quota group/limit/window rows) without
+        mutating; endpoint capacity is evaluated second; only when every required
+        admission resource is known to fit are quota reservations, the endpoint
+        reservation, the attempt, and the request's reserved state mutated and
+        committed together. A request that cannot acquire every resource acquires
+        none of them (all-or-nothing).
         """
         now = utcnow()
         lease_expires = now + timedelta(seconds=self._settings.worker_lease_seconds)
@@ -476,8 +496,8 @@ class SchedulingService:
 
         async with self._session_factory() as session:
             async with session.begin():
-                request = await scheduler_repository.claim_next_queued_for_endpoint(
-                    session, now, endpoint_id
+                request = await scheduler_repository.claim_next_queued_for_scope(
+                    session, now, endpoint_id, quota_group_id
                 )
                 if request is None:
                     return None
@@ -502,23 +522,23 @@ class SchedulingService:
                 messages, params = deserialize_chat_payload(
                     self._encryptor.decrypt(request.payload_encrypted)
                 )
-                quota_group_id = (
+                effective_group_id = (
                     str(resolved.route_binding.quota_group_id)
                     if resolved.route_binding.quota_group_id is not None
                     else None
                 )
 
-                if quota_group_id is not None:
-                    outcome = await self._reserve_quota_capacity(
+                quota_eval: _QuotaEvaluation | None = None
+                if effective_group_id is not None:
+                    quota_eval = await self._evaluate_quota(
                         session,
-                        request_id=request_id,
                         resolved=resolved,
-                        quota_group_id=quota_group_id,
+                        quota_group_id=effective_group_id,
                         messages=messages,
                         params=params,
                         now=now,
                     )
-                    if outcome == "too_large":
+                    if quota_eval.outcome == "too_large":
                         await scheduler_repository.fail_request_direct(
                             session,
                             request_id=request_id,
@@ -527,7 +547,7 @@ class SchedulingService:
                             finished_at=now,
                         )
                         return "processed"
-                    if outcome == "unbounded_output":
+                    if quota_eval.outcome == "unbounded_output":
                         await scheduler_repository.fail_request_direct(
                             session,
                             request_id=request_id,
@@ -536,11 +556,34 @@ class SchedulingService:
                             finished_at=now,
                         )
                         return "processed"
-                    if outcome == "exhausted":
-                        request.wait_reason = "quota_window_exhausted"
+                    if quota_eval.outcome == "estimator_unavailable":
+                        await scheduler_repository.fail_request_direct(
+                            session,
+                            request_id=request_id,
+                            state=RequestState.FAILED,
+                            error_code="quota_token_estimator_unavailable",
+                            finished_at=now,
+                        )
+                        return "processed"
+                    if quota_eval.outcome == "cooldown":
+                        await scheduler_repository.set_request_wait_metadata(
+                            session,
+                            request_id=request_id,
+                            wait_reason="quota_group_cooldown",
+                            next_eligible_at=quota_eval.cooldown_until,
+                        )
                         return "quota"
-                    if outcome == "cooldown":
-                        request.wait_reason = "quota_group_cooldown"
+                    if quota_eval.outcome == "exhausted":
+                        assert quota_eval.plan is not None
+                        assert quota_eval.plan.blocking_limit is not None
+                        await scheduler_repository.set_request_wait_metadata(
+                            session,
+                            request_id=request_id,
+                            wait_reason="quota_window_exhausted",
+                            wait_limit_id=quota_eval.plan.blocking_limit.id,
+                            wait_limit_metric=quota_eval.plan.blocking_limit.metric,
+                            next_eligible_at=quota_eval.plan.next_eligible_at,
+                        )
                         return "quota"
 
                 endpoint = await scheduler_repository.lock_endpoint(session, resolved_endpoint_id)
@@ -558,7 +601,17 @@ class SchedulingService:
                     session, resolved_endpoint_id
                 )
                 if active >= endpoint.max_concurrency:
+                    await scheduler_repository.set_request_wait_metadata(
+                        session, request_id=request_id, wait_reason="endpoint_full"
+                    )
                     return "full"
+
+                # Every required resource fits: mutate quota + endpoint + attempt
+                # + request reserved state together (committed below).
+                if quota_eval is not None and quota_eval.plan is not None:
+                    await scheduler_repository.reserve_quota(
+                        session, request_id=request_id, plan=quota_eval.plan
+                    )
 
                 reservation = await scheduler_repository.create_reservation(
                     session,
@@ -583,6 +636,9 @@ class SchedulingService:
                 request.fencing_token = fencing_token
                 request.lease_expires_at = lease_expires
                 request.started_at = now
+                await scheduler_repository.clear_request_wait_metadata(
+                    session, request_id=request_id
+                )
 
                 attempt_id = attempt.id
                 reservation_id = reservation.id
@@ -601,18 +657,18 @@ class SchedulingService:
                     await scheduler_repository.release_reservation(
                         session, reservation_id, now
                     )
-                    if quota_group_id is not None:
+                    if effective_group_id is not None:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
                     return None
                 if dispatch == "not_reserved":
-                    if quota_group_id is not None:
+                    if effective_group_id is not None:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
                     return None
-                if quota_group_id is not None:
+                if effective_group_id is not None:
                     await scheduler_repository.commit_request_quota(
                         session, request_id=request_id, now=now
                     )
@@ -632,48 +688,51 @@ class SchedulingService:
             public_alias=public_alias,
             stream=stream,
             prepared=prepared,
-            quota_group_id=quota_group_id,
+            quota_group_id=effective_group_id,
         )
 
-    async def _reserve_quota_capacity(
+    async def _evaluate_quota(
         self,
         session: AsyncSession,
         *,
-        request_id: str,
         resolved: ResolvedRoute,
         quota_group_id: str,
         messages: list[Message],
         params: GenerationParams,
         now: datetime,
-    ) -> str:
-        """Reserve shared quota for a request, or report why it cannot proceed.
+    ) -> _QuotaEvaluation:
+        """Evaluate (lock, never mutate) a request's shared-quota constraints.
 
-        Returns ``"ok"``, ``"too_large"``, ``"unbounded_output"``,
-        ``"exhausted"``, or ``"cooldown"``.
+        Returns an outcome describing why the request cannot proceed, or ``ok``
+        with a plan whose windows are locked and ready to reserve in the same
+        transaction once every other admission resource is known to fit.
         """
         group = await scheduler_repository.get_quota_group_for_update(
             session, group_id=quota_group_id
         )
         if group is None:
-            return "too_large"
+            return _QuotaEvaluation(outcome="too_large")
         if group.cooldown_until is not None and group.cooldown_until > now:
-            return "cooldown"
+            return _QuotaEvaluation(outcome="cooldown", cooldown_until=group.cooldown_until)
+
         limits = await scheduler_repository.list_quota_limits_for_group(
             session, group_id=quota_group_id
         )
         if not limits:
-            return "ok"
+            return _QuotaEvaluation(outcome="ok")
 
         has_token = any(limit.metric == QuotaMetric.TOKENS for limit in limits)
         requested: dict[str, int] = {}
         token_units = 0
         if has_token:
             input_estimate = self._inference.estimate_tokens(resolved, messages, params)
+            if input_estimate is None:
+                return _QuotaEvaluation(outcome="estimator_unavailable")
             output_bound = params.max_tokens
             if output_bound is None:
                 output_bound = resolved.route_binding.default_output_tokens
             if output_bound is None:
-                return "unbounded_output"
+                return _QuotaEvaluation(outcome="unbounded_output")
             token_units = input_estimate + output_bound
         for limit in limits:
             if limit.metric == QuotaMetric.REQUESTS:
@@ -681,16 +740,14 @@ class SchedulingService:
             elif limit.metric == QuotaMetric.TOKENS:
                 requested[limit.id] = token_units
                 if token_units > limit.limit_units:
-                    return "too_large"
+                    return _QuotaEvaluation(outcome="too_large")
 
-        reserved = await scheduler_repository.reserve_quota(
-            session,
-            request_id=request_id,
-            limits=limits,
-            requested_by_limit=requested,
-            now=now,
+        plan = await scheduler_repository.plan_quota_reservation(
+            session, limits=limits, requested_by_limit=requested, now=now
         )
-        return "ok" if reserved else "exhausted"
+        if plan.blocking_limit is not None:
+            return _QuotaEvaluation(outcome="exhausted", plan=plan)
+        return _QuotaEvaluation(outcome="ok", plan=plan)
 
     async def _apply_cooldown(self, claim: ClaimedWork, exc: ProviderError) -> None:
         """Apply a shared-quota-group cooldown from a provider 429 response."""
@@ -897,6 +954,11 @@ class SchedulingService:
         request_id = RequestId(_new_id())
         queue_wait_until = now + timedelta(seconds=self._settings.queue_max_wait_seconds)
         expires_at = now + timedelta(seconds=self._settings.queue_total_lifetime_seconds)
+        quota_group_id = (
+            str(resolved.route_binding.quota_group_id)
+            if resolved.route_binding.quota_group_id is not None
+            else None
+        )
         await scheduler_repository.create_request(
             session,
             request_id=request_id,
@@ -905,6 +967,7 @@ class SchedulingService:
             api_credential_id=api_credential_id,
             model_alias_id=resolved.alias.id,
             endpoint_id=resolved.endpoint.id,
+            quota_group_id=quota_group_id,
             stream=stream,
             payload_encrypted=payload,
             queued_at=now,

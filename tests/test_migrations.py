@@ -35,6 +35,9 @@ EXPECTED_TABLES = {
     "provider_accounts",
     "endpoints",
     "quota_groups",
+    "quota_limits",
+    "quota_windows",
+    "quota_reservations",
     "model_aliases",
     "route_bindings",
     "inference_requests",
@@ -126,5 +129,36 @@ def test_migration_0003_to_0004() -> None:
             url, "inference_requests"
         )
         assert "ck_endpoints_max_concurrency_positive" in _check_constraints(url, "endpoints")
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0005_to_0006() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig56")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0005", env=env)
+        assert (
+            {"quota_group_id", "next_eligible_at", "wait_limit_id", "wait_limit_metric"}
+            & _columns(url, "inference_requests")
+        ) == set()
+        assert "ck_quota_limits_metric" not in _check_constraints(url, "quota_limits")
+        assert "ck_quota_reservations_state" not in _check_constraints(url, "quota_reservations")
+
+        _run_alembic("upgrade", "head", env=env)
+        assert {"quota_group_id", "next_eligible_at", "wait_limit_id", "wait_limit_metric"} <= (
+            _columns(url, "inference_requests")
+        )
+        assert "ck_quota_limits_metric" in _check_constraints(url, "quota_limits")
+        assert "ck_quota_reservations_state" in _check_constraints(url, "quota_reservations")
+        assert "ck_quota_windows_committed_nonneg" in _check_constraints(url, "quota_windows")
+        assert "ck_route_bindings_default_output_positive" in _check_constraints(
+            url, "route_bindings"
+        )
     finally:
         asyncio.run(drop_database(url))

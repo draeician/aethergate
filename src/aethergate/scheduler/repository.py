@@ -7,7 +7,8 @@ Callers must manage their own transaction boundaries via ``AsyncSession.begin``.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -35,6 +36,25 @@ ADMISSION_LOCK_KEY = 0x4147_5144  # "AGQD"
 
 def _new_id() -> str:
     return uuid.uuid4().hex
+
+
+@dataclass
+class QuotaReservationPlan:
+    """Locks/evaluation for one request's quota reservation across every limit.
+
+    ``windows`` are FOR UPDATE-locked rows for the current fixed window of each
+    limit (stable ID order); the caller may mutate them via :func:`reserve_quota`
+    in the same transaction after confirming every other admission resource fits.
+    ``blocking_limit`` is the first limit (stable order) that would be exceeded;
+    ``next_eligible_at`` is the earliest time every currently-blocking window has
+    rolled over to a fresh empty window (None when nothing blocks).
+    """
+
+    limits: list[models.QuotaLimit]
+    requested_by_limit: dict[str, int]
+    windows: dict[str, models.QuotaWindow]
+    blocking_limit: models.QuotaLimit | None
+    next_eligible_at: datetime | None
 
 
 def fixed_window_start(now: datetime, window_seconds: int) -> datetime:
@@ -90,6 +110,7 @@ async def create_request(
     api_credential_id: ApiCredentialId | None,
     model_alias_id: ModelAliasId,
     endpoint_id: EndpointId | None,
+    quota_group_id: str | None,
     stream: bool,
     payload_encrypted: bytes,
     queued_at: datetime,
@@ -103,6 +124,7 @@ async def create_request(
         api_credential_id=str(api_credential_id) if api_credential_id else None,
         model_alias_id=str(model_alias_id),
         endpoint_id=str(endpoint_id) if endpoint_id else None,
+        quota_group_id=quota_group_id,
         state=RequestState.QUEUED,
         stream=stream,
         payload_encrypted=payload_encrypted,
@@ -124,45 +146,61 @@ def _eligible_queued_predicate(now: datetime):
             models.InferenceRequest.queue_wait_until.is_(None),
             models.InferenceRequest.queue_wait_until > now,
         ),
+        or_(
+            models.InferenceRequest.next_eligible_at.is_(None),
+            models.InferenceRequest.next_eligible_at <= now,
+        ),
     )
 
 
-async def list_queued_endpoints(
+async def list_queued_scopes(
     session: AsyncSession, now: datetime
-) -> list[tuple[str | None, datetime]]:
-    """Return distinct endpoints with eligible queued work, oldest first.
+) -> list[tuple[str | None, str | None, datetime]]:
+    """Return distinct scheduling scopes with eligible queued work, oldest first.
 
-    FIFO is per endpoint; ordering across endpoints is by each endpoint's oldest
-    eligible queued request so a saturated endpoint never starves an unrelated
-    one. A null ``endpoint_id`` is grouped as its own bucket.
+    A scheduling scope is ``(endpoint_id, quota_group_id)``. A null endpoint or
+    null quota group is its own bucket. FIFO is per scope; ordering across scopes
+    is by each scope's oldest eligible queued request, so a quota-blocked scope
+    never strands unrelated capacity on the same endpoint.
     """
     result = await session.execute(
         select(
             models.InferenceRequest.endpoint_id,
+            models.InferenceRequest.quota_group_id,
             func.min(models.InferenceRequest.created_at),
         )
         .where(*_eligible_queued_predicate(now))
-        .group_by(models.InferenceRequest.endpoint_id)
+        .group_by(
+            models.InferenceRequest.endpoint_id,
+            models.InferenceRequest.quota_group_id,
+        )
         .order_by(func.min(models.InferenceRequest.created_at))
     )
-    return [(row[0], row[1]) for row in result.all()]
+    return [(row[0], row[1], row[2]) for row in result.all()]
 
 
-async def claim_next_queued_for_endpoint(
-    session: AsyncSession, now: datetime, endpoint_id: str | None
+async def claim_next_queued_for_scope(
+    session: AsyncSession,
+    now: datetime,
+    endpoint_id: str | None,
+    quota_group_id: str | None,
 ) -> models.InferenceRequest | None:
-    """Claim the oldest eligible queued request for a single endpoint (FIFO).
+    """Claim the oldest eligible queued request for one scheduling scope (FIFO).
 
-    Rows locked by another worker are skipped so concurrent claimers do not
-    block one another.
+    Rows locked by another worker are skipped so concurrent claimers do not block
+    one another.
     """
     if endpoint_id is None:
         endpoint_predicate = models.InferenceRequest.endpoint_id.is_(None)
     else:
         endpoint_predicate = models.InferenceRequest.endpoint_id == endpoint_id
+    if quota_group_id is None:
+        group_predicate = models.InferenceRequest.quota_group_id.is_(None)
+    else:
+        group_predicate = models.InferenceRequest.quota_group_id == quota_group_id
     stmt = (
         select(models.InferenceRequest)
-        .where(endpoint_predicate, *_eligible_queued_predicate(now))
+        .where(endpoint_predicate, group_predicate, *_eligible_queued_predicate(now))
         .order_by(models.InferenceRequest.created_at.asc(), models.InferenceRequest.id.asc())
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -572,6 +610,10 @@ async def reclaim_expired_reserved(session: AsyncSession, now: datetime) -> list
             "fencing_token": None,
             "lease_expires_at": None,
             "started_at": None,
+            "wait_reason": None,
+            "wait_limit_id": None,
+            "wait_limit_metric": None,
+            "next_eligible_at": None,
         }
         await session.execute(
             update(models.InferenceRequest)
@@ -771,6 +813,7 @@ async def _get_or_create_quota_window(
                 models.QuotaWindow.window_start == window_start,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if row is not None:
@@ -788,6 +831,7 @@ async def _get_or_create_quota_window(
                 models.QuotaWindow.window_start == window_start,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one()
 
@@ -817,19 +861,19 @@ async def get_quota_group_for_update(
     ).scalar_one_or_none()
 
 
-async def reserve_quota(
+async def plan_quota_reservation(
     session: AsyncSession,
     *,
-    request_id: str,
     limits: list[models.QuotaLimit],
     requested_by_limit: dict[str, int],
     now: datetime,
-) -> bool:
-    """Reserve quota across every limit, or reserve none (all-or-nothing).
+) -> QuotaReservationPlan:
+    """Lock and evaluate every quota window for a request, without mutating.
 
-    Locks every window first (stable ID order), checks combined committed +
-    reserved + requested capacity, then increments reservations. Returns False
-    without reserving anything when any limit would be exceeded.
+    Locks the current fixed window of each limit (stable ID order), computes the
+    first blocking limit and the earliest reset across blocking windows. The
+    caller must call :func:`reserve_quota` (same transaction) once every other
+    admission resource is known to fit, or roll back to reserve nothing.
     """
     ordered = sorted(limits, key=lambda limit: limit.id)
     windows: dict[str, models.QuotaWindow] = {}
@@ -839,14 +883,37 @@ async def reserve_quota(
             quota_limit_id=limit.id,
             window_start=fixed_window_start(now, limit.window_seconds),
         )
+    blocking: models.QuotaLimit | None = None
+    next_eligible: datetime | None = None
     for limit in ordered:
         units = requested_by_limit[limit.id]
         window = windows[limit.id]
         if window.committed_units + window.reserved_units + units > limit.limit_units:
-            return False
-    for limit in ordered:
-        units = requested_by_limit[limit.id]
-        window = windows[limit.id]
+            if blocking is None:
+                blocking = limit
+            reset = window.window_start + timedelta(seconds=limit.window_seconds)
+            if next_eligible is None or reset > next_eligible:
+                next_eligible = reset
+    return QuotaReservationPlan(
+        limits=ordered,
+        requested_by_limit=requested_by_limit,
+        windows=windows,
+        blocking_limit=blocking,
+        next_eligible_at=next_eligible,
+    )
+
+
+async def reserve_quota(
+    session: AsyncSession, *, request_id: str, plan: QuotaReservationPlan
+) -> None:
+    """Reserve quota across every limit using a pre-evaluated, locked plan.
+
+    The plan's windows are already FOR UPDATE-locked in this transaction and its
+    capacity was already confirmed to fit; this only applies the mutation.
+    """
+    for limit in plan.limits:
+        units = plan.requested_by_limit[limit.id]
+        window = plan.windows[limit.id]
         window.reserved_units += units
         session.add(
             models.QuotaReservation(
@@ -860,7 +927,6 @@ async def reserve_quota(
                 state="reserved",
             )
         )
-    return True
 
 
 async def commit_request_quota(
@@ -960,8 +1026,54 @@ async def release_quota_reservations(
 async def set_quota_group_cooldown(
     session: AsyncSession, *, group_id: str, cooldown_until: datetime
 ) -> None:
+    """Set a group cooldown monotonically: never shorten an existing one.
+
+    Locks the group row and keeps ``max(existing, new)`` so a concurrent or later
+    429 with a shorter Retry-After cannot shorten an already-longer cooldown.
+    """
+    group = await get_quota_group_for_update(session, group_id=group_id)
+    if group is None:
+        return
+    if group.cooldown_until is not None and group.cooldown_until > cooldown_until:
+        return
+    group.cooldown_until = cooldown_until
+
+
+async def set_request_wait_metadata(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    wait_reason: str,
+    wait_limit_id: str | None = None,
+    wait_limit_metric: str | None = None,
+    next_eligible_at: datetime | None = None,
+) -> None:
+    """Persist non-content metadata explaining why a queued request is blocked."""
     await session.execute(
-        update(models.QuotaGroup)
-        .where(models.QuotaGroup.id == group_id)
-        .values(cooldown_until=cooldown_until)
+        update(models.InferenceRequest)
+        .where(models.InferenceRequest.id == request_id)
+        .values(
+            wait_reason=wait_reason,
+            wait_limit_id=wait_limit_id,
+            wait_limit_metric=wait_limit_metric,
+            next_eligible_at=next_eligible_at,
+        )
+    )
+
+
+async def clear_request_wait_metadata(session: AsyncSession, request_id: str) -> None:
+    """Clear transient wait metadata once a request is no longer blocked.
+
+    The persisted scheduling scope (``quota_group_id``) is not cleared: it is the
+    request's effective scope, not transient wait state.
+    """
+    await session.execute(
+        update(models.InferenceRequest)
+        .where(models.InferenceRequest.id == request_id)
+        .values(
+            wait_reason=None,
+            wait_limit_id=None,
+            wait_limit_metric=None,
+            next_eligible_at=None,
+        )
     )

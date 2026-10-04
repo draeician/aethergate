@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import litellm
+from litellm.utils import huggingface_tokenizer_kind
 
 from aethergate.adapters.base import (
     ChatRequest,
@@ -57,23 +58,35 @@ class LiteLLMChatAdapter:
     def _messages_text(self, request: ChatRequest) -> str:
         return "\n".join(m.content for m in request.messages)
 
-    def estimate_input_tokens(self, request: ChatRequest) -> int:
-        """Conservative input-token estimate; never contacts upstream.
+    def estimate_input_tokens(self, request: ChatRequest) -> int | None:
+        """Return a conservative input-token estimate, or ``None``.
 
-        Uses LiteLLM's model token counter when available and applies an upward
-        safety margin; falls back to a documented conservative character bound
-        when the model has no registered tokenizer. The result is a conservative
-        upper bound, not an authoritative provider token count.
+        Only produces an estimate when LiteLLM registers a provider/model-specific
+        tokenizer for the resolved model. For models without one (for example the
+        nomnom Ollama ``qwen3.8-2b-distill``), LiteLLM would otherwise silently
+        fall back to a generic tiktoken encoding, which is not a defensible
+        conservative bound for arbitrary tokenizers. In that case this method
+        returns ``None`` so the scheduler can fail a token-quota request closed
+        instead of masquerading a generic heuristic as TPM protection.
         """
         model = self._litellm_model(request)
+        if not self._has_model_specific_tokenizer(model):
+            return None
         text = self._messages_text(request)
         try:
             count = litellm.token_counter(model=model, text=text)
-        except Exception:  # noqa: BLE001 - estimation is best-effort and conservative
-            count = 0
+        except Exception:  # noqa: BLE001 - estimation is best-effort
+            return None
         if isinstance(count, int) and count > 0:
             return count + max(1, count // 4)  # +25% conservative margin
-        return max(1, len(text) // 3)  # documented conservative fallback
+        return None
+
+    def _has_model_specific_tokenizer(self, model: str) -> bool:
+        """Whether LiteLLM has a provider/model-specific tokenizer for ``model``."""
+        try:
+            return huggingface_tokenizer_kind(model) is not None
+        except Exception:  # noqa: BLE001 - any failure means "unavailable"
+            return False
 
     def _kwargs(
         self, request: ChatRequest, secret: str | None

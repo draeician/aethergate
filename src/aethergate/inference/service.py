@@ -92,8 +92,12 @@ class InferenceService:
         resolved: ResolvedRoute,
         messages: list[Message],
         params: GenerationParams | None = None,
-    ) -> int:
-        """Conservative input-token estimate, without contacting upstream."""
+    ) -> int | None:
+        """Conservative input-token estimate, or ``None`` if unavailable.
+
+        Returns ``None`` when the adapter has no provider/model-specific tokenizer
+        for this route; the caller must fail closed for enforced token quotas.
+        """
         adapter = self._adapter_factory(resolved.provider.kind)
         return adapter.estimate_input_tokens(
             self._build_request(resolved, messages, params)

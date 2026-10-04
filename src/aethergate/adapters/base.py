@@ -76,11 +76,13 @@ class ChatAdapter(Protocol):
         self, request: ChatRequest, secret: str | None
     ) -> AsyncIterator[StreamChunk]: ...
 
-    def estimate_input_tokens(self, request: ChatRequest) -> int:
-        """Return a conservative upper bound on input tokens, without upstream contact.
+    def estimate_input_tokens(self, request: ChatRequest) -> int | None:
+        """Return a conservative upper bound on input tokens, or ``None``.
 
-        Provider/model-specific tokenizer behavior stays behind the adapter; the
-        scheduler consumes only the returned numeric reservation. The value is a
-        conservative estimate, never an authoritative provider token count.
+        ``None`` means no provider/model-specific tokenizer is known to be usable
+        for this route, so no defensible pre-dispatch estimate exists. Callers
+        that enforce token quotas must fail closed rather than substitute a
+        generic character/word heuristic. The returned value (when not ``None``)
+        is a conservative estimate, never an authoritative provider token count.
         """
         ...

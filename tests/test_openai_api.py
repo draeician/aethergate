@@ -36,6 +36,7 @@ from aethergate.egress import DestinationPolicy
 from aethergate.encryption import QueueEncryptor
 from aethergate.inference.service import InferenceService
 from aethergate.main import app
+from aethergate.persistence import db as persistence_db
 from aethergate.persistence import repository
 from aethergate.scheduler.service import ClaimedWork, SchedulingService
 from aethergate.secrets import EnvSecretResolver
@@ -162,6 +163,17 @@ async def api_client(sched_engine, monkeypatch):
     monkeypatch.setattr("aethergate.api.deps.get_settings", lambda: settings)
     app.dependency_overrides[api_deps.scheduler_service] = lambda: service
     app.dependency_overrides[api_deps.dev_request_context] = lambda: context
+
+    # The model listing/retrieval endpoints resolve their session via
+    # ``aethergate.persistence.db.get_session``, which reads the process-wide
+    # settings (and therefore the dev database). Override it so those endpoints
+    # read the same isolated test database the fixture seeds, not the dev DB.
+    async def _test_session():
+        factory = async_sessionmaker(sched_engine, expire_on_commit=False)
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[persistence_db.get_session] = _test_session
 
     worker = asyncio.create_task(_drain(service, "w-test"))
 

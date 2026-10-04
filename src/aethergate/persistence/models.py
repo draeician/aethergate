@@ -157,6 +157,9 @@ class QuotaLimit(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint("limit_units >= 1", name="ck_quota_limits_units_positive"),
         CheckConstraint("window_seconds >= 1", name="ck_quota_limits_window_positive"),
+        CheckConstraint(
+            "metric IN ('requests', 'tokens')", name="ck_quota_limits_metric"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
@@ -183,6 +186,8 @@ class QuotaWindow(Base, TimestampMixin):
         UniqueConstraint(
             "quota_limit_id", "window_start", name="uq_quota_windows_limit_start"
         ),
+        CheckConstraint("committed_units >= 0", name="ck_quota_windows_committed_nonneg"),
+        CheckConstraint("reserved_units >= 0", name="ck_quota_windows_reserved_nonneg"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
@@ -200,6 +205,22 @@ class QuotaReservation(Base, TimestampMixin):
     """A per-request reservation/commitment against one quota limit's window."""
 
     __tablename__ = "quota_reservations"
+
+    __table_args__ = (
+        CheckConstraint(
+            "reserved_units >= 0", name="ck_quota_reservations_reserved_nonneg"
+        ),
+        CheckConstraint(
+            "committed_units >= 0", name="ck_quota_reservations_committed_nonneg"
+        ),
+        CheckConstraint(
+            "metric IN ('requests', 'tokens')", name="ck_quota_reservations_metric"
+        ),
+        CheckConstraint(
+            "state IN ('reserved', 'committed', 'released')",
+            name="ck_quota_reservations_state",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
     request_id: Mapped[str] = mapped_column(
@@ -236,6 +257,12 @@ class ModelAlias(Base, TimestampMixin):
 
 class RouteBinding(Base, TimestampMixin):
     __tablename__ = "route_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "default_output_tokens IS NULL OR default_output_tokens >= 1",
+            name="ck_route_bindings_default_output_positive",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
     model_alias_id: Mapped[str] = mapped_column(
@@ -323,6 +350,23 @@ class InferenceRequest(Base, TimestampMixin):
     # Non-content scheduler explanation for a queued request (e.g. a blocking
     # quota window); plaintext and carries no prompt/completion content.
     wait_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Effective scheduling scope (endpoint + quota group) persisted as non-content
+    # metadata so the worker can group eligible queued work by scope. Revalidated
+    # against the freshly-resolved route immediately before dispatch.
+    quota_group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quota_groups.id"), nullable=True, index=True
+    )
+
+    # Earliest time this queued request may become eligible again (next fixed-window
+    # reset or cooldown expiry). When in the future, the worker skips the request.
+    next_eligible_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Limiting quota detail for inspection (why this request is blocked).
+    wait_limit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    wait_limit_metric: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class Reservation(Base, TimestampMixin):

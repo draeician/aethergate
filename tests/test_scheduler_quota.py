@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from aethergate.adapters.base import (
@@ -53,14 +54,16 @@ class QuotaMockAdapter:
         input_tokens: int = 1,
         total_tokens: int = 3,
         error: ProviderError | None = None,
+        estimate_available: bool = True,
     ) -> None:
         self.input_tokens = input_tokens
         self.total_tokens = total_tokens
         self.error = error
+        self.estimate_available = estimate_available
         self.complete_calls = 0
 
-    def estimate_input_tokens(self, request: ChatRequest) -> int:
-        return self.input_tokens
+    def estimate_input_tokens(self, request: ChatRequest) -> int | None:
+        return self.input_tokens if self.estimate_available else None
 
     async def complete(self, request: ChatRequest, secret: str | None) -> CompletionResult:
         self.complete_calls += 1
@@ -824,3 +827,626 @@ async def test_saturated_quota_group_does_not_block_unrelated_group(sched_engine
     outcome = await service.claim_and_reserve("w1")
     assert not isinstance(outcome, str) and outcome is not None
     assert outcome.request_id == b_id
+
+
+# --- all-or-nothing admission (endpoint full / inactive) --------------------
+
+
+async def _snapshot_windows(factory) -> set[tuple[str, int, int]]:
+    async with factory() as session:
+        rows = (
+            await session.execute(select(models.QuotaWindow))
+        ).scalars().all()
+        return {(w.quota_limit_id, w.committed_units, w.reserved_units) for w in rows}
+
+
+async def test_endpoint_full_leaves_no_quota_reservation(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(input_tokens=5)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(
+                session,
+                group_id="qg-1",
+                request_limits=[(10, 60)],
+                token_limits=[(10000, 60)],
+            )
+            await _seed_endpoint_alias_route(
+                session,
+                alias_id="alias-a",
+                alias_name="a",
+                endpoint_id="ep-a",
+                group_id="qg-1",
+                default_output_tokens=16,
+                max_concurrency=1,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    await _enqueue(service, context, alias="a")
+    b_id = await _enqueue(service, context, alias="a")
+
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    before = await _snapshot_windows(factory)
+
+    # Endpoint is full (max_concurrency=1); B must not reserve any quota.
+    assert await service.claim_and_reserve("w1") == "full"
+    assert await _reservations(factory, b_id) == []
+    assert await _snapshot_windows(factory) == before
+
+
+async def test_repeated_endpoint_full_claims_do_not_change_windows(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(input_tokens=5)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(
+                session,
+                group_id="qg-1",
+                request_limits=[(10, 60)],
+                token_limits=[(10000, 60)],
+            )
+            await _seed_endpoint_alias_route(
+                session,
+                alias_id="alias-a",
+                alias_name="a",
+                endpoint_id="ep-a",
+                group_id="qg-1",
+                default_output_tokens=16,
+                max_concurrency=1,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    await _enqueue(service, context, alias="a")
+    b_id = await _enqueue(service, context, alias="a")
+
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    before = await _snapshot_windows(factory)
+
+    for _ in range(4):
+        assert await service.claim_and_reserve("w1") == "full"
+
+    assert await _reservations(factory, b_id) == []
+    assert await _snapshot_windows(factory) == before
+
+
+async def test_endpoint_inactive_leaves_no_reservation(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(input_tokens=5)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(
+                session,
+                group_id="qg-1",
+                request_limits=[(10, 60)],
+                token_limits=[(10000, 60)],
+            )
+            await _seed_endpoint_alias_route(
+                session,
+                alias_id="alias-a",
+                alias_name="a",
+                endpoint_id="ep-a",
+                group_id="qg-1",
+                default_output_tokens=16,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    request_id = await _enqueue(service, context, alias="a")
+
+    # Deactivate the endpoint after enqueue: revalidation fails, nothing reserved.
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.Endpoint)
+                .where(models.Endpoint.id == "ep-a")
+                .values(is_active=False)
+            )
+
+    assert await service.claim_and_reserve("w1") == "processed"
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, request_id)
+        assert row.state == RequestState.FAILED
+    assert await _reservations(factory, request_id) == []
+    async with factory() as session:
+        assert await sched_repo.count_active_reservations(session, "ep-a") == 0
+
+
+# --- pre-dispatch cancellation / expiry release quota -----------------------
+
+
+async def test_cancellation_releases_token_but_not_committed_request_quota(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(input_tokens=5)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(
+                session,
+                group_id="qg-1",
+                request_limits=[(10, 60)],
+                token_limits=[(10000, 60)],
+            )
+            await _seed_endpoint_alias_route(
+                session,
+                alias_id="alias-a",
+                alias_name="a",
+                endpoint_id="ep-a",
+                group_id="qg-1",
+                default_output_tokens=16,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    request_id = await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+
+    # Dispatch commits the request-metric reservation immediately; the token
+    # reservation stays reserved until settlement. Simulate pre-settlement
+    # cancellation.
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == request_id)
+                .values(state=RequestState.RESERVED)
+            )
+
+    await service.request_cancellation(request_id)
+
+    res = await _reservations(factory, request_id)
+    by_metric = {r.metric: r for r in res}
+    assert set(by_metric) == {"requests", "tokens"}
+    # Reserved token capacity is returned to the window.
+    assert by_metric["tokens"].state == "released"
+    assert by_metric["tokens"].reserved_units == 0
+    # Committed request quota is never refunded on cancellation.
+    assert by_metric["requests"].state == "committed"
+    assert by_metric["requests"].committed_units == 1
+
+
+async def test_recovery_releases_token_but_not_committed_request_quota(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(input_tokens=5)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(
+                session,
+                group_id="qg-1",
+                request_limits=[(10, 60)],
+                token_limits=[(10000, 60)],
+            )
+            await _seed_endpoint_alias_route(
+                session,
+                alias_id="alias-a",
+                alias_name="a",
+                endpoint_id="ep-a",
+                group_id="qg-1",
+                default_output_tokens=16,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    request_id = await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == request_id)
+                .values(
+                    state=RequestState.RESERVED,
+                    lease_expires_at=datetime(2020, 1, 1, tzinfo=UTC),
+                )
+            )
+
+    await service.recover()
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, request_id)
+        assert row.state == RequestState.QUEUED  # reclaimed, pre-dispatch
+    res = await _reservations(factory, request_id)
+    by_metric = {r.metric: r for r in res}
+    assert set(by_metric) == {"requests", "tokens"}
+    assert by_metric["tokens"].state == "released"
+    assert by_metric["tokens"].reserved_units == 0
+    assert by_metric["requests"].state == "committed"
+    assert by_metric["requests"].committed_units == 1
+
+
+# --- same-endpoint cross-quota-scope ordering (no head-of-line blocking) ----
+
+
+async def test_same_endpoint_blocked_group_dispatches_other_group(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-a", request_limits=[(1, 60)])
+            await _seed_group(session, group_id="qg-b", request_limits=[(1, 60)])
+            # Both aliases route to the SAME endpoint (max_concurrency=2).
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a",
+                group_id="qg-a", max_concurrency=2,
+            )
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-b", alias_name="b", endpoint_id="ep-a",
+                group_id="qg-b", max_concurrency=2,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+
+    # Exhaust group A and hold its endpoint slot.
+    await _enqueue(service, context, alias="a")
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+
+    # A second A request (older) is quota-blocked; a B request (newer) on the
+    # same endpoint must still dispatch.
+    a2_id = await _enqueue(service, context, alias="a")
+    b_id = await _enqueue(service, context, alias="b")
+
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    assert outcome.request_id == b_id  # B dispatches despite older blocked A
+
+    async with factory() as session:
+        a2 = await sched_repo.get_request(session, a2_id)
+        assert a2.state == RequestState.QUEUED
+        assert a2.wait_reason == "quota_window_exhausted"
+
+
+async def test_fifo_within_group_on_shared_endpoint(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-a", request_limits=[(10, 60)])
+            await _seed_group(session, group_id="qg-b", request_limits=[(10, 60)])
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a",
+                group_id="qg-a", max_concurrency=4,
+            )
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-b", alias_name="b", endpoint_id="ep-a",
+                group_id="qg-b", max_concurrency=4,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, _factory, _enc, context = await _build(sched_engine, mock, context)
+
+    a1 = await _enqueue(service, context, alias="a")
+    a2 = await _enqueue(service, context, alias="a")
+    a3 = await _enqueue(service, context, alias="a")
+
+    seen: list[str] = []
+    for _ in range(3):
+        outcome = await service.claim_and_reserve("w1")
+        assert not isinstance(outcome, str) and outcome is not None
+        seen.append(outcome.request_id)
+
+    # FIFO within group A: a1 before a2 before a3.
+    assert seen == [a1, a2, a3]
+
+
+async def test_shared_endpoint_max_concurrency_across_groups(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-a", request_limits=[(10, 60)])
+            await _seed_group(session, group_id="qg-b", request_limits=[(10, 60)])
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a",
+                group_id="qg-a", max_concurrency=1,
+            )
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-b", alias_name="b", endpoint_id="ep-a",
+                group_id="qg-b", max_concurrency=1,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+
+    await _enqueue(service, context, alias="a")
+    b_id = await _enqueue(service, context, alias="b")
+
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    # Endpoint max_concurrency=1 is shared: B cannot dispatch while A holds it.
+    assert await service.claim_and_reserve("w1") == "full"
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, b_id)
+        assert row.state == RequestState.QUEUED
+        assert row.wait_reason == "endpoint_full"
+
+
+# --- token estimator fail-closed --------------------------------------------
+
+
+async def test_token_estimator_unavailable_fails_closed(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(estimate_available=False)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", token_limits=[(1000, 60)])
+            await _seed_endpoint_alias_route(
+                session,
+                alias_id="alias-a",
+                alias_name="a",
+                endpoint_id="ep-a",
+                group_id="qg-1",
+                default_output_tokens=16,
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    request_id = await _enqueue(service, context, alias="a")
+
+    assert await service.claim_and_reserve("w1") == "processed"
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, request_id)
+        assert row.state == RequestState.FAILED
+        assert row.error_code == "quota_token_estimator_unavailable"
+
+
+async def test_request_only_quota_works_without_estimator(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter(estimate_available=False)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", request_limits=[(10, 60)])
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a", group_id="qg-1"
+            )
+            context = await ensure_dev_identity(session)
+
+    service, _factory, _enc, context = await _build(sched_engine, mock, context)
+    await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    # No token limit, so the unavailable estimator does not matter.
+    assert not isinstance(outcome, str) and outcome is not None
+
+
+# --- monotonic cooldown -----------------------------------------------------
+
+
+async def test_cooldown_cannot_shorten(sched_engine):
+    await reset_schema(sched_engine)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", request_limits=[(10, 60)])
+
+    now = datetime(2026, 10, 4, 12, 0, 0, tzinfo=UTC)
+    long_until = now + timedelta(seconds=600)
+    short_until = now + timedelta(seconds=60)
+
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await sched_repo.set_quota_group_cooldown(
+                session, group_id="qg-1", cooldown_until=long_until
+            )
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await sched_repo.set_quota_group_cooldown(
+                session, group_id="qg-1", cooldown_until=short_until
+            )
+
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        group = await session.get(models.QuotaGroup, "qg-1")
+        assert group.cooldown_until == long_until
+
+
+async def test_concurrent_cooldown_preserves_max(sched_engine):
+    await reset_schema(sched_engine)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", request_limits=[(10, 60)])
+
+    now = datetime(2026, 10, 4, 12, 0, 0, tzinfo=UTC)
+    later = now + timedelta(seconds=900)
+
+    async def apply(delta_seconds: int) -> None:
+        async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+            async with session.begin():
+                await sched_repo.set_quota_group_cooldown(
+                    session, group_id="qg-1", cooldown_until=now + timedelta(seconds=delta_seconds)
+                )
+
+    await asyncio.gather(
+        apply(120), apply(300), apply(900), apply(30), apply(600), apply(60)
+    )
+
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        group = await session.get(models.QuotaGroup, "qg-1")
+        assert group.cooldown_until == later  # the maximum reset time wins
+
+
+# --- wait metadata ----------------------------------------------------------
+
+
+async def test_wait_metadata_identifies_scope(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", request_limits=[(1, 60)])
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a", group_id="qg-1"
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    await _enqueue(service, context, alias="a")
+    await _enqueue(service, context, alias="a")
+
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    assert await service.claim_and_reserve("w1") == "quota"
+
+    async with factory() as session:
+        queued = (
+            await session.execute(
+                select(models.InferenceRequest).where(
+                    models.InferenceRequest.state == RequestState.QUEUED
+                )
+            )
+        ).scalars().one()
+        assert queued.wait_reason == "quota_window_exhausted"
+        assert queued.wait_limit_id == "qg-1-r0"
+        assert queued.wait_limit_metric == "requests"
+        assert queued.next_eligible_at is not None
+        assert queued.quota_group_id == "qg-1"
+
+
+async def test_stale_wait_metadata_clears_when_eligible(sched_engine):
+    await reset_schema(sched_engine)
+    mock = QuotaMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", request_limits=[(1, 60)])
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a", group_id="qg-1"
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory, _enc, context = await _build(sched_engine, mock, context)
+    await _enqueue(service, context, alias="a")
+    blocked_id = await _enqueue(service, context, alias="a")
+
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    assert await service.claim_and_reserve("w1") == "quota"
+
+    # Force the blocked request's window to reset so it becomes eligible again.
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.QuotaWindow).values(committed_units=0, reserved_units=0)
+            )
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == blocked_id)
+                .values(next_eligible_at=None)
+            )
+
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    assert outcome.request_id == blocked_id
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, blocked_id)
+        assert row.wait_reason is None
+        assert row.wait_limit_id is None
+        assert row.wait_limit_metric is None
+        assert row.next_eligible_at is None
+
+
+# --- schema invariants (DB-enforced) ----------------------------------------
+
+
+async def test_quota_schema_constraints_reject_invalid(sched_engine):
+    await reset_schema(sched_engine)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            await _seed_group(session, group_id="qg-1", request_limits=[(1, 60)])
+            await _seed_endpoint_alias_route(
+                session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a", group_id="qg-1"
+            )
+
+    factory = async_sessionmaker(sched_engine, expire_on_commit=False)
+
+    async with factory() as session:
+        session.add(
+            models.QuotaLimit(
+                id="bad-metric",
+                quota_group_id="qg-1",
+                metric="bogus",
+                limit_units=1,
+                window_seconds=60,
+                enabled=True,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+    async with factory() as session:
+        session.add(
+            models.QuotaWindow(
+                id="bad-window",
+                quota_limit_id="qg-1-r0",
+                window_start=datetime(2026, 10, 4, tzinfo=UTC),
+                committed_units=-1,
+                reserved_units=0,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+    async with factory() as session:
+        session.add(
+            models.InferenceRequest(
+                id="req-x",
+                model_alias_id="alias-a",
+                state="queued",
+                stream=False,
+                payload_encrypted=b"x",
+                expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+            )
+        )
+        session.add(
+            models.QuotaReservation(
+                id="bad-state",
+                request_id="req-x",
+                quota_limit_id="qg-1-r0",
+                window_start=datetime(2026, 10, 4, tzinfo=UTC),
+                metric="requests",
+                reserved_units=1,
+                committed_units=0,
+                state="bogus",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+    async with factory() as session:
+        session.add(
+            models.RouteBinding(
+                id="rb-bad",
+                model_alias_id="alias-a",
+                endpoint_id="ep-a",
+                provider_account_id="acct-ollama",
+                upstream_model="qwen3.8-2b-distill:Q6_K",
+                default_output_tokens=0,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()

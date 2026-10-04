@@ -88,6 +88,12 @@ def test_adapter_rejects_unknown_provider_kind():
         LiteLLMChatAdapter()._litellm_model(_request(provider_kind="unknown"))
 
 
+def test_estimate_input_tokens_unavailable_for_ollama_without_tokenizer():
+    """No provider/model-specific tokenizer -> fail closed, no char heuristic."""
+    adapter = LiteLLMChatAdapter()
+    assert adapter.estimate_input_tokens(_request()) is None
+
+
 async def test_adapter_non_stream_result(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(
