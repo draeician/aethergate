@@ -93,3 +93,12 @@ class QueueFull(DomainError):
 
 class QueueTimeout(DomainError):
     """A queued request expired before it could be dispatched or completed."""
+
+
+class SchedulerInvariantError(Exception):
+    """A coupled scheduler state transition failed atomically (internal invariant).
+
+    Raised when a request + execution-attempt transition that must move together
+    cannot move together (missing/terminal row, stale fence, or ownership
+    mismatch). It is an internal correctness signal, never surfaced to clients.
+    """

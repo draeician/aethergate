@@ -22,6 +22,7 @@ from aethergate.domain.ids import (
     RequestId,
     ReservationId,
 )
+from aethergate.errors import SchedulerInvariantError
 from aethergate.persistence import models
 
 # Stable, documented advisory-lock key that serializes queue-cap admission
@@ -241,22 +242,37 @@ async def create_attempt(
     return row
 
 
-async def settle_request(
+async def settle(
     session: AsyncSession,
     *,
     request_id: str,
+    attempt_id: str,
+    reservation_id: str,
     fencing_token: int,
     state: str,
-    result_encrypted: bytes | None,
     finished_at: datetime,
+    result_encrypted: bytes | None = None,
     error_code: str | None = None,
+    upstream_request_id: str | None = None,
 ) -> bool:
-    """Transition a request to a terminal state iff the fence still matches."""
-    result = await session.execute(
+    """Atomically settle request+attempt to a terminal state and release capacity.
+
+    Both rows must be active (``dispatched``/``streaming``) and still owned by
+    ``fencing_token``. A request that is no longer active (for example recovery
+    already marked it ``outcome_unknown``) is a no-op returning ``False``, so a
+    late worker can never overwrite a conservative terminal state. The physical
+    reservation is released only after both rows transitioned; if the attempt
+    fails to transition, a :class:`SchedulerInvariantError` is raised so the
+    transaction rolls back rather than leaving a half-settled request.
+    """
+    request_result = await session.execute(
         update(models.InferenceRequest)
         .where(
             models.InferenceRequest.id == request_id,
             models.InferenceRequest.fencing_token == fencing_token,
+            models.InferenceRequest.state.in_(
+                [RequestState.DISPATCHED, RequestState.STREAMING]
+            ),
         )
         .values(
             state=state,
@@ -265,24 +281,15 @@ async def settle_request(
             finished_at=finished_at,
         )
     )
-    return result.rowcount == 1
+    if request_result.rowcount != 1:
+        return False
 
-
-async def settle_attempt(
-    session: AsyncSession,
-    *,
-    attempt_id: str,
-    fencing_token: int,
-    state: str,
-    finished_at: datetime,
-    upstream_request_id: str | None = None,
-    error_code: str | None = None,
-) -> bool:
-    result = await session.execute(
+    attempt_result = await session.execute(
         update(models.ExecutionAttempt)
         .where(
             models.ExecutionAttempt.id == attempt_id,
             models.ExecutionAttempt.fencing_token == fencing_token,
+            models.ExecutionAttempt.state.in_(["dispatched", "streaming"]),
         )
         .values(
             state=state,
@@ -291,7 +298,13 @@ async def settle_attempt(
             error_code=error_code,
         )
     )
-    return result.rowcount == 1
+    if attempt_result.rowcount != 1:
+        raise SchedulerInvariantError(
+            f"request {request_id} settled to {state} but attempt "
+            f"{attempt_id} did not transition"
+        )
+    await release_reservation(session, reservation_id, finished_at)
+    return True
 
 
 async def release_reservation(session: AsyncSession, reservation_id: str, now: datetime) -> None:
@@ -326,30 +339,57 @@ async def abandon_reserved_attempts(session: AsyncSession, request_id: str, now:
     return result.rowcount
 
 
-async def mark_attempt_dispatched(
-    session: AsyncSession, *, attempt_id: str, fencing_token: int
-) -> bool:
-    result = await session.execute(
-        update(models.ExecutionAttempt)
-        .where(
-            models.ExecutionAttempt.id == attempt_id,
-            models.ExecutionAttempt.fencing_token == fencing_token,
-            models.ExecutionAttempt.state == "reserved",
-        )
-        .values(state="dispatched")
-    )
-    return result.rowcount == 1
+async def mark_dispatched(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    attempt_id: str,
+    fencing_token: int,
+    now: datetime,
+) -> str:
+    """Atomically advance a reserved request+attempt to dispatched, or refuse.
 
+    Dispatch intent is made durable on the request and its attempt together.
+    Returns:
 
-async def mark_request_dispatched(
-    session: AsyncSession, *, request_id: str, fencing_token: int
-) -> bool:
-    """Transition a request from ``reserved`` to ``dispatched`` iff fence matches.
+    - ``"dispatched"`` when both rows advanced to dispatched;
+    - ``"expired"`` when the request was still reserved but past its total
+      lifetime, in which case it is terminally expired and its attempt
+      abandoned (the caller must release the reservation);
+    - ``"not_reserved"`` when the request is no longer reserved (cancelled or
+      otherwise transitioned), meaning a competing path already released its
+      reservation.
 
-    The state guard means a request cancelled (or otherwise transitioned) after
-    reservation is never re-marked as dispatched.
+    Raises :class:`SchedulerInvariantError` if the request advanced but the
+    attempt did not (coupled invariant broken).
     """
-    result = await session.execute(
+    request_row = (
+        await session.execute(
+            select(models.InferenceRequest)
+            .where(models.InferenceRequest.id == request_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if request_row is None or request_row.state != RequestState.RESERVED:
+        return "not_reserved"
+
+    if request_row.expires_at <= now:
+        await session.execute(
+            update(models.InferenceRequest)
+            .where(models.InferenceRequest.id == request_id)
+            .values(state=RequestState.EXPIRED, finished_at=now)
+        )
+        await session.execute(
+            update(models.ExecutionAttempt)
+            .where(
+                models.ExecutionAttempt.id == attempt_id,
+                models.ExecutionAttempt.state == "reserved",
+            )
+            .values(state="abandoned", finished_at=now)
+        )
+        return "expired"
+
+    request_result = await session.execute(
         update(models.InferenceRequest)
         .where(
             models.InferenceRequest.id == request_id,
@@ -358,7 +398,24 @@ async def mark_request_dispatched(
         )
         .values(state=RequestState.DISPATCHED)
     )
-    return result.rowcount == 1
+    if request_result.rowcount != 1:
+        return "not_reserved"
+
+    attempt_result = await session.execute(
+        update(models.ExecutionAttempt)
+        .where(
+            models.ExecutionAttempt.id == attempt_id,
+            models.ExecutionAttempt.fencing_token == fencing_token,
+            models.ExecutionAttempt.state == "reserved",
+        )
+        .values(state="dispatched")
+    )
+    if attempt_result.rowcount != 1:
+        raise SchedulerInvariantError(
+            f"request {request_id} dispatched but attempt {attempt_id} "
+            f"did not transition"
+        )
+    return "dispatched"
 
 
 async def renew_lease(
@@ -366,20 +423,39 @@ async def renew_lease(
     *,
     request_id: str,
     attempt_id: str,
+    worker_id: str,
     fencing_token: int,
     lease_expires_at: datetime,
+    now: datetime,
 ) -> bool:
-    """Renew request and attempt ownership for the current fencing token.
+    """Renew request+attempt ownership all-or-nothing.
 
-    Only a request/attempt still owned by this worker (matching fence, still in
-    an active dispatched/streaming state) is renewed. A stale worker whose fence
-    changed, or whose work reached a terminal state, cannot renew.
+    Succeeds only when both rows are active (``dispatched``/``streaming``), still
+    owned by this worker (matching fence and ``worker_id``), and the request's
+    total lifetime has not already expired. The new lease is clamped so it never
+    outlives ``expires_at``, so a heartbeat cannot keep an execution alive past
+    its lifetime. Returns ``False`` (no change) when any precondition fails, and
+    raises :class:`SchedulerInvariantError` if the request renewed but the attempt
+    did not, rolling back the partial update.
     """
+    expires_at = (
+        await session.execute(
+            select(models.InferenceRequest.expires_at).where(
+                models.InferenceRequest.id == request_id
+            )
+        )
+    ).scalar_one_or_none()
+    if expires_at is None or expires_at <= now:
+        return False
+    if lease_expires_at > expires_at:
+        lease_expires_at = expires_at
+
     request_result = await session.execute(
         update(models.InferenceRequest)
         .where(
             models.InferenceRequest.id == request_id,
             models.InferenceRequest.fencing_token == fencing_token,
+            models.InferenceRequest.worker_id == worker_id,
             models.InferenceRequest.state.in_(
                 [RequestState.DISPATCHED, RequestState.STREAMING]
             ),
@@ -388,15 +464,22 @@ async def renew_lease(
     )
     if request_result.rowcount != 1:
         return False
-    await session.execute(
+
+    attempt_result = await session.execute(
         update(models.ExecutionAttempt)
         .where(
             models.ExecutionAttempt.id == attempt_id,
             models.ExecutionAttempt.fencing_token == fencing_token,
+            models.ExecutionAttempt.worker_id == worker_id,
             models.ExecutionAttempt.state.in_(["dispatched", "streaming"]),
         )
         .values(lease_expires_at=lease_expires_at)
     )
+    if attempt_result.rowcount != 1:
+        raise SchedulerInvariantError(
+            f"request {request_id} lease renewed but attempt {attempt_id} "
+            f"did not transition"
+        )
     return True
 
 
@@ -523,12 +606,22 @@ async def mark_outcome_unknown_expired(session: AsyncSession, now: datetime) -> 
 
     count = 0
     for row in rows:
-        await session.execute(
+        request_result = await session.execute(
             update(models.InferenceRequest)
-            .where(models.InferenceRequest.id == row.id)
+            .where(
+                models.InferenceRequest.id == row.id,
+                models.InferenceRequest.state.in_(
+                    [RequestState.DISPATCHED, RequestState.STREAMING]
+                ),
+            )
             .values(state=RequestState.OUTCOME_UNKNOWN)
         )
-        await session.execute(
+        if request_result.rowcount != 1:
+            raise SchedulerInvariantError(
+                f"request {row.id} not marked outcome_unknown: "
+                f"unexpected state during recovery"
+            )
+        attempt_result = await session.execute(
             update(models.ExecutionAttempt)
             .where(
                 models.ExecutionAttempt.request_id == row.id,
@@ -536,6 +629,11 @@ async def mark_outcome_unknown_expired(session: AsyncSession, now: datetime) -> 
             )
             .values(state="outcome_unknown", finished_at=now)
         )
+        if attempt_result.rowcount != 1:
+            raise SchedulerInvariantError(
+                f"request {row.id} marked outcome_unknown but its active "
+                f"attempt did not transition"
+            )
         count += 1
     return count
 

@@ -8,7 +8,11 @@ full admin API/UI is a later milestone.
 Usage:
     python -m aethergate.reconcile list
     python -m aethergate.reconcile resolve <request_id> \\
-        --disposition failed|cancelled|succeeded --by <operator>
+        --disposition failed|cancelled --by <operator>
+
+Only ``failed`` and ``cancelled`` are reconcilable dispositions. ``succeeded``
+is rejected because an outcome_unknown request's result was never persisted, so
+a success cannot be reconstructed without the (unavailable) payload.
 
 It never prints prompt/completion content.
 """
@@ -57,7 +61,7 @@ def main() -> None:
     resolve = sub.add_parser("resolve", help="reconcile one outcome_unknown request")
     resolve.add_argument("request_id")
     resolve.add_argument(
-        "--disposition", required=True, choices=["failed", "cancelled", "succeeded"]
+        "--disposition", required=True, choices=["failed", "cancelled"]
     )
     resolve.add_argument("--by", required=True, help="operator identity for the audit record")
 

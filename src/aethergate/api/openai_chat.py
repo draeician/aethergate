@@ -133,6 +133,13 @@ async def _stream_worker_events(
     whose upstream did not already signal a finish reason; failed/cancelled/
     expired/outcome_unknown streams terminate without pretending successful
     model completion. Client disconnect is durably propagated to the scheduler.
+
+    The trailing ``data: [DONE]`` line is a transport termination marker, not a
+    success signal: it is emitted when the SSE stream ends for any reason
+    (success, failure, cancellation, expiry, or client disconnect). Consumers
+    (including the official OpenAI SDKs) treat ``[DONE]`` only as end-of-stream,
+    never as evidence of successful model completion, so emitting it on a failed
+    stream is safe and correct.
     """
     created = int(time.time())
     role_sent = False

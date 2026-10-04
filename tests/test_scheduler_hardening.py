@@ -30,14 +30,16 @@ from aethergate.domain import entities as domain
 from aethergate.domain.enums import Capability, RequestState
 from aethergate.domain.ids import (
     EndpointId,
+    ExecutionAttemptId,
     ModelAliasId,
     ProviderAccountId,
     ProviderId,
+    ReservationId,
     RouteBindingId,
 )
 from aethergate.egress import DestinationPolicy
 from aethergate.encryption import QueueEncryptor
-from aethergate.errors import ProviderError, QueueFull
+from aethergate.errors import ProviderError, QueueFull, SchedulerInvariantError
 from aethergate.inference.service import InferenceService
 from aethergate.persistence import models, repository
 from aethergate.scheduler import repository as sched_repo
@@ -344,7 +346,7 @@ async def test_reconciliation_releases_intended_reservation(sched_engine):
         assert await sched_repo.count_active_reservations(session, "ep-ollama") == 1
 
     # reconciling again must fail (no longer outcome_unknown)
-    assert await service.reconcile(a.request_id, "succeeded", "x") is False
+    assert await service.reconcile(a.request_id, "cancelled", "x") is False
 
 
 # 6. concurrent recovery workers are idempotent/safe
@@ -635,3 +637,159 @@ async def test_database_check_rejects_invalid_capacity(sched_engine):
         with pytest.raises(IntegrityError):
             await session.flush()
         await session.rollback()
+
+
+# 17. worker enforces total lifetime without any API waiter
+
+
+async def test_worker_enforces_total_lifetime_without_api_waiter(sched_engine):
+    service, factory, _enc, mock, context = await _build(
+        sched_engine, max_concurrency=1,
+        queue_total_lifetime_seconds=0.3,
+        worker_lease_seconds=0.5, worker_heartbeat_seconds=0.05,
+    )
+    mock._delay = 1.0  # longer than the total lifetime
+    ids = await _enqueue(service, context, "gpt-4", 1)
+    claim = await service.claim_and_reserve("w1")
+    assert not isinstance(claim, str) and claim is not None
+
+    await service.run_complete(claim)
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, ids[0])
+        assert row.state == RequestState.EXPIRED
+        assert row.error_code == "lifetime_exceeded"
+        assert await sched_repo.count_active_reservations(session, "ep-ollama") == 0
+
+
+# 18. heartbeat refuses to renew an execution past its total lifetime
+
+
+async def test_heartbeat_refuses_to_renew_expired_execution(sched_engine):
+    service, factory, _enc, _mock, context = await _build(sched_engine, max_concurrency=1)
+    await _enqueue(service, context, "gpt-4", 1)
+    claim = await service.claim_and_reserve("w1")
+    assert not isinstance(claim, str) and claim is not None
+
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == claim.request_id)
+                .values(expires_at=datetime(2020, 1, 1, tzinfo=UTC))
+            )
+
+    assert await service._renew_lease(claim) is False
+
+
+# 19. a reserved request past its total lifetime is expired, not dispatched
+
+
+async def test_reserved_past_lifetime_not_dispatched(sched_engine):
+    service, factory, _enc, _mock, context = await _build(sched_engine, max_concurrency=1)
+    ids = await _enqueue(service, context, "gpt-4", 1)
+
+    now = utcnow()
+    async with factory() as session:
+        async with session.begin():
+            row = await sched_repo.get_request(session, ids[0])
+            row.state = RequestState.RESERVED
+            row.worker_id = "w1"
+            row.fencing_token = 12345
+            row.lease_expires_at = now + timedelta(seconds=10)
+            row.expires_at = now - timedelta(seconds=1)
+            await sched_repo.create_reservation(
+                session,
+                reservation_id=ReservationId("res-1"),
+                request_id=ids[0],
+                endpoint_id="ep-ollama",
+                acquired_at=now,
+            )
+            await sched_repo.create_attempt(
+                session,
+                attempt_id=ExecutionAttemptId("att-1"),
+                request_id=ids[0],
+                endpoint_id="ep-ollama",
+                reservation_id="res-1",
+                fencing_token=12345,
+                worker_id="w1",
+                lease_expires_at=now + timedelta(seconds=10),
+                started_at=now,
+            )
+
+    async with factory() as session:
+        async with session.begin():
+            outcome = await sched_repo.mark_dispatched(
+                session,
+                request_id=ids[0],
+                attempt_id="att-1",
+                fencing_token=12345,
+                now=utcnow(),
+            )
+            assert outcome == "expired"
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, ids[0])
+        assert row.state == RequestState.EXPIRED
+        attempt_state = (
+            await session.execute(
+                select(models.ExecutionAttempt.state).where(
+                    models.ExecutionAttempt.request_id == ids[0]
+                )
+            )
+        ).scalar_one()
+        assert attempt_state == "abandoned"
+
+
+# 20. reconcile rejects an unverifiable ``succeeded`` disposition
+
+
+async def test_reconcile_rejects_succeeded(sched_engine):
+    service, factory, _enc, _mock, context = await _build(sched_engine, max_concurrency=1)
+    await _enqueue(service, context, "gpt-4", 1)
+    claim = await service.claim_and_reserve("w1")
+    assert not isinstance(claim, str) and claim is not None
+
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == claim.request_id)
+                .values(lease_expires_at=datetime(2020, 1, 1, tzinfo=UTC))
+            )
+
+    await service.recover()
+
+    with pytest.raises(ValueError):
+        await service.reconcile(claim.request_id, "succeeded", "op")
+
+
+# 21. a half-renewal (request ok, attempt terminal) rolls back atomically
+
+
+async def test_attempt_renewal_invariant_raises(sched_engine):
+    service, factory, _enc, _mock, context = await _build(sched_engine, max_concurrency=1)
+    ids = await _enqueue(service, context, "gpt-4", 1)
+    claim = await service.claim_and_reserve("w1")
+    assert not isinstance(claim, str) and claim is not None
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, ids[0])
+        original_lease = row.lease_expires_at
+
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.ExecutionAttempt)
+                .where(models.ExecutionAttempt.id == claim.attempt_id)
+                .values(state="succeeded")
+            )
+
+    with pytest.raises(SchedulerInvariantError):
+        await service._renew_lease(claim)
+
+    # The request renewal must have rolled back atomically with the attempt.
+    async with factory() as session:
+        row = await sched_repo.get_request(session, ids[0])
+        assert row.state == RequestState.DISPATCHED
+        assert row.lease_expires_at == original_lease

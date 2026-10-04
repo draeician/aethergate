@@ -152,6 +152,7 @@ class EndpointCreate(ContractModel):
     provider_account_id: ProviderAccountId
     name: str = Field(min_length=1)
     base_destination: str = Field(min_length=1)
+    max_concurrency: int = Field(default=1, ge=1)
 
 
 class EndpointRead(ContractModel):
@@ -159,12 +160,14 @@ class EndpointRead(ContractModel):
     provider_account_id: ProviderAccountId
     name: str
     base_destination: str
+    max_concurrency: int
     is_active: bool
 
 
 class EndpointUpdate(ContractModel):
     name: str | None = Field(default=None, min_length=1)
     base_destination: str | None = Field(default=None, min_length=1)
+    max_concurrency: int | None = Field(default=None, ge=1)
     is_active: bool | None = None
 
 

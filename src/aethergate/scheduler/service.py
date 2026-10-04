@@ -43,6 +43,7 @@ from aethergate.errors import (
     QueueFull,
     ResourceInactive,
     RouteUnresolved,
+    SchedulerInvariantError,
     SecretResolutionError,
     UnsupportedProvider,
 )
@@ -59,10 +60,13 @@ TERMINAL_STATES = {
     RequestState.OUTCOME_UNKNOWN,
 }
 
+# Only ``failed``/``cancelled`` are reconcilable dispositions. ``succeeded`` is
+# deliberately excluded: an outcome_unknown request's result was never persisted,
+# so an operator cannot reconstruct a trustworthy success without supplying the
+# payload, which phase 1 does not support.
 RECONCILABLE_STATES = {
     RequestState.FAILED,
     RequestState.CANCELLED,
-    RequestState.SUCCEEDED,
 }
 
 _MAX_ERROR_CODE_LENGTH = 64
@@ -190,6 +194,7 @@ class ClaimedWork:
     request_id: str
     attempt_id: str
     reservation_id: str
+    worker_id: str
     fencing_token: int
     endpoint_id: str
     public_alias: str
@@ -526,16 +531,23 @@ class SchedulingService:
                 stream = request.stream
 
             async with session.begin():
-                dispatched = await scheduler_repository.mark_request_dispatched(
-                    session, request_id=request_id, fencing_token=fencing_token
+                dispatch = await scheduler_repository.mark_dispatched(
+                    session,
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    fencing_token=fencing_token,
+                    now=now,
                 )
-                if not dispatched:
+                if dispatch == "expired":
+                    # Reserved but past total lifetime: expired without dispatching.
+                    await scheduler_repository.release_reservation(
+                        session, reservation_id, now
+                    )
+                    return None
+                if dispatch == "not_reserved":
                     # Cancelled or otherwise transitioned after reservation; the
                     # competing path already released the reservation.
                     return None
-                await scheduler_repository.mark_attempt_dispatched(
-                    session, attempt_id=attempt_id, fencing_token=fencing_token
-                )
 
         async with self._session_factory() as session:
             row = await scheduler_repository.get_request(session, request_id)
@@ -550,6 +562,7 @@ class SchedulingService:
             request_id=request_id,
             attempt_id=attempt_id,
             reservation_id=reservation_id,
+            worker_id=worker_id,
             fencing_token=fencing_token,
             endpoint_id=resolved_endpoint_id,
             public_alias=public_alias,
@@ -633,16 +646,26 @@ class SchedulingService:
                 return
 
     async def _renew_lease(self, claim: ClaimedWork) -> bool:
-        lease_expires = utcnow() + timedelta(seconds=self._settings.worker_lease_seconds)
+        now = utcnow()
+        lease_expires = now + timedelta(seconds=self._settings.worker_lease_seconds)
         async with self._session_factory() as session:
             async with session.begin():
-                return await scheduler_repository.renew_lease(
-                    session,
-                    request_id=claim.request_id,
-                    attempt_id=claim.attempt_id,
-                    fencing_token=claim.fencing_token,
-                    lease_expires_at=lease_expires,
-                )
+                try:
+                    return await scheduler_repository.renew_lease(
+                        session,
+                        request_id=claim.request_id,
+                        attempt_id=claim.attempt_id,
+                        worker_id=claim.worker_id,
+                        fencing_token=claim.fencing_token,
+                        lease_expires_at=lease_expires,
+                        now=now,
+                    )
+                except SchedulerInvariantError:
+                    logger.exception(
+                        "lease renewal invariant broken for request=%s",
+                        claim.request_id,
+                    )
+                    raise
 
     async def _append_event(self, request_id: str, seq: int, event: bytes) -> None:
         encrypted = self._encryptor.encrypt(event)
@@ -661,31 +684,33 @@ class SchedulingService:
         error_code: str | None = None,
         upstream_request_id: str | None = None,
     ) -> None:
+        """Settle to a terminal state, overriding to ``expired`` past lifetime.
+
+        Once the request's total lifetime has expired, the durable state is
+        ``expired`` (with ``lifetime_exceeded``) regardless of the worker's local
+        outcome, so a result can never be persisted for a request the client has
+        already abandoned.
+        """
         now = utcnow()
         async with self._session_factory() as session:
             async with session.begin():
-                ok = await scheduler_repository.settle_request(
+                row = await scheduler_repository.get_request(session, claim.request_id)
+                if row is not None and row.expires_at <= now:
+                    state = RequestState.EXPIRED
+                    result_encrypted = None
+                    upstream_request_id = None
+                    error_code = "lifetime_exceeded"
+                await scheduler_repository.settle(
                     session,
                     request_id=claim.request_id,
+                    attempt_id=claim.attempt_id,
+                    reservation_id=claim.reservation_id,
                     fencing_token=claim.fencing_token,
                     state=state,
+                    finished_at=now,
                     result_encrypted=result_encrypted,
                     error_code=error_code,
-                    finished_at=now,
-                )
-                if not ok:
-                    return
-                await scheduler_repository.settle_attempt(
-                    session,
-                    attempt_id=claim.attempt_id,
-                    fencing_token=claim.fencing_token,
-                    state=state,
-                    finished_at=now,
                     upstream_request_id=upstream_request_id,
-                    error_code=error_code,
-                )
-                await scheduler_repository.release_reservation(
-                    session, claim.reservation_id, now
                 )
 
     async def _enqueue(
