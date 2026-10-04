@@ -1,14 +1,14 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-004
+AGV2-005
 
 ## Title
-First real OpenAI-compatible inference through AetherGate v2
+Durable scheduler phase 1 — PostgreSQL queue, worker ownership, and endpoint concurrency
 
 ## Ownership
-Primary: provider adapters + OpenAI API surface  
-Coordinating: contracts, catalog/routing, platform/testing
+Primary: scheduler/queueing  
+Coordinating: contracts, provider adapters, catalog/routing, platform/testing, identity/auth
 
 ## Before You Start
 
@@ -19,363 +19,417 @@ Coordinating: contracts, catalog/routing, platform/testing
    - `project_spec.md`
    - `docs/development/agent-handoff.md`
    - `docs/development/current-task.md`
-   - `docs/contracts/openai-compatibility-baseline.md`
-   - `docs/contracts/domain-model.md`
+   - `docs/architecture/scheduler.md`
    - `docs/architecture/provider-model.md`
    - `docs/architecture/security.md`
-   - `docs/architecture/scheduler.md`
-4. Verify the current official LiteLLM SDK documentation before relying on retry, streaming, provider
-   naming, or custom-api-base behavior.
-5. Do not commit unrelated local/untracked support files.
-6. Do not modify or delete the legacy v1 `app/` or `frontend/src/` implementation.
+   - `docs/contracts/domain-model.md`
+   - `src/aethergate/inference/service.py`
+   - `src/aethergate/api/openai_chat.py`
+4. Preserve the successful AGV2-004 provider-adapter and OpenAI compatibility behavior.
+5. Do not modify/delete legacy v1 `app/` or `frontend/src/`.
+6. Do not commit unrelated local/untracked files.
 
 ## Goal
 
-Send real inference through the containerized v2 gateway on nomnom.
+Replace direct API-process dispatch with the first durable AetherGate scheduling path.
 
-At task completion, the following path must work with an existing real inference backend:
+The required real behavior is:
 
 ```text
-official OpenAI client
-    -> AetherGate v2 container
-    -> public ModelAlias
-    -> RouteBinding
-    -> Endpoint / ProviderAccount / Provider
-    -> LiteLLM provider adapter
-    -> existing nomnom inference backend
-    -> AetherGate
-    -> client
+endpoint max_concurrency = 2
+
+six simultaneous valid requests A B C D E F
+
+A + B -> dispatched
+C D E F -> queued durably in PostgreSQL
+
+A completes -> C becomes eligible
+B completes -> D becomes eligible
+...
 ```
 
-Both non-streaming and streaming Chat Completions must succeed.
+The API must keep ordinary synchronous Chat Completions semantics: the client waits on the normal
+request and eventually receives the normal OpenAI-compatible response. Do not invent a `202`
+workflow or custom queue-status SSE events.
 
-This is intentionally a **direct-dispatch milestone**. It does not implement the durable scheduler,
-queueing, quota reservations, retries, or fallback policy.
+This is **scheduler phase 1**. It establishes durable queueing, physical endpoint concurrency,
+multi-worker ownership, encrypted queued content, and conservative recovery. Provider RPM/TPM,
+project budgets, richer quota windows, and retry orchestration are later scheduler phases.
 
-## Important: Do Not Guess Ports or Backend Details
+## Architectural Requirements
 
-The nomnom host is the development test bed.
+- PostgreSQL remains the single scheduling/coordination authority.
+- No process-local capacity counters.
+- Correctness must hold with multiple worker processes.
+- No database transaction remains open while waiting for upstream inference.
+- Use row-level locking / `FOR UPDATE SKIP LOCKED` where appropriate, but do not treat it as the
+  whole scheduler design.
+- Capacity is reserved transactionally before dispatch.
+- Persist request/attempt/reservation ownership before contacting upstream.
+- Use leases + fencing tokens.
+- A lease expiration after dispatch does **not** prove upstream stopped.
+- Never release an ambiguous in-flight slot and immediately retry as if safe.
+- No hidden LiteLLM retries/fallbacks; keep AGV2-004's one upstream call per execution attempt.
+- Queue order for this milestone is strict FIFO among requests competing for the same endpoint,
+  subject to eligibility. Document head-of-line implications; do not silently reorder.
 
-Before configuring a real backend:
+## Schema / Migrations
 
-1. inspect current listeners;
-2. inspect currently running Docker/Podman containers;
-3. inspect existing local developer diagnostic files as read-only hints if useful
-   (`ollama_direct.py`, `diagnose.py`, `inspect_routing.py`, etc.);
-4. probe candidate existing local inference services safely;
-5. determine an actual reachable backend and model;
-6. determine how the AetherGate container can reach it.
+Do not rewrite migrations `0001` or `0002`.
 
-Do not assume Ollama, llama.cpp, a particular port, a particular model, or a particular container name.
+Add versioned migration(s) beginning with `0003`.
 
-Do not start, stop, reconfigure, or replace an existing inference service just to make the test pass.
+### Endpoint capacity
 
-Do not commit discovered host ports, credentials, or nomnom-specific backend addresses into normal
-application configuration.
+Add explicit physical concurrency configuration to Endpoint:
 
-The AetherGate API itself must continue using the dynamic loopback host-port behavior from AGV2-003.
+- `max_concurrency`
+- positive integer;
+- safe migration/backfill behavior;
+- development seed support.
 
-## Fix the Provider-Model Contract Gap
+Do not pretend aliases create capacity. Capacity belongs to the physical endpoint/deployment.
 
-AGV2-003 exposed a concrete missing concept: a `RouteBinding` identifies the public alias and endpoint,
-but does not identify the provider-facing model/deployment name that must actually be invoked.
+### Durable request state
 
-Fix this explicitly.
+Persist scheduler records sufficient to represent:
 
-Preferred direction:
+- inference request;
+- execution attempt;
+- endpoint-capacity reservation;
+- worker ownership / lease;
+- fencing token;
+- queued/started/completed timestamps;
+- deadline / expiry;
+- cancellation request;
+- terminal outcome;
+- encrypted request payload;
+- encrypted result / streaming event payload where required by the implementation.
 
-- add a provider-facing/upstream model identifier to `RouteBinding` (for example
-  `upstream_model`);
-- keep it separate from the public `ModelAlias.name`;
-- treat the value as provider-specific opaque configuration;
-- never derive it implicitly from the public alias unless an administrator explicitly configured the
-  same string.
+Use the existing typed IDs.
 
-Update:
+Do not store prompts/messages/completions in plaintext.
 
-- domain contract;
-- admin v1 DTO foundation;
-- persistence model/repository;
-- catalog resolution result;
-- docs;
-- tests.
+### Queue-content encryption
 
-Do **not** rewrite migration `0001`, because it has already been applied on nomnom.
+The security direction already requires temporary queue payload storage to be encrypted,
+access-controlled, and expiring.
 
-Add migration `0002` for the new persisted field.
-
-If safe NOT NULL migration cannot be done without inventing a value for possible existing rows, add
-the column compatibly and make the application reject unresolved routes until the value is
-configured. Document the later tightening migration.
-
-Do not introduce a larger ProviderModel entity unless the concrete implementation proves it is
-necessary.
-
-## Provider Adapter Boundary
-
-Create a provider-adapter module under `src/aethergate/` with a narrow internal interface.
-
-Implement the first adapter using the LiteLLM Python SDK.
-
-Requirements:
-
-- pin/range LiteLLM deliberately in `pyproject.toml`;
-- call a single explicitly resolved route;
-- AetherGate chooses the endpoint, account, provider and upstream model before entering the adapter;
-- do not use LiteLLM Router for AetherGate routing;
-- do not enable LiteLLM fallbacks;
-- disable LiteLLM/provider retry loops for this milestone so one admitted AetherGate execution maps
-  to one upstream attempt;
-- use explicit timeouts;
-- support non-streaming and streaming Chat Completions;
-- support the actual provider kind discovered on nomnom;
-- structure provider-kind translation so additional providers can be added without changing API
-  routers;
-- resolve provider credential material only through `SecretResolver`;
-- never log or return provider secret material;
-- never let inference clients supply `api_base`, provider credentials, arbitrary headers, or an
-  upstream destination.
-
-LiteLLM currently supports async completions and streaming, and its own Router can perform retry and
-fallback behavior. AetherGate must not delegate scheduler/retry ownership to that Router.
-
-## Egress / Destination Guard
-
-The upstream destination comes only from administrator-controlled persisted configuration, never
-from the inference request.
-
-Add a minimal explicit destination policy before provider dispatch.
+Implement encryption at the application boundary using a key that is **outside PostgreSQL**.
 
 Requirements:
 
-- only supported schemes;
-- reject URL userinfo;
-- reject known metadata/link-local destinations;
-- use an explicit configured allowlist for upstream hosts in this milestone;
-- private/LAN targets may be explicitly allowlisted for nomnom development;
-- redirects must not escape the approved destination policy;
-- do not create a permissive "allow all" production default.
+- required runtime key for scheduler operation;
+- generated/persisted only in the gitignored nomnom development environment by developer tooling;
+- never committed;
+- never logged;
+- production mode must fail closed when the key is absent/invalid;
+- authenticated encryption (for example AES-GCM or Fernet from a maintained crypto library);
+- request payloads, final completion content, and persisted stream content/events must not be
+  plaintext database columns;
+- metadata needed for scheduling may remain unencrypted if it contains no prompt/completion content.
 
-The exact enterprise egress implementation can be strengthened later, but the first real inference
-path must not establish an arbitrary SSRF primitive.
+Document key rotation as deferred unless safely straightforward.
 
-## OpenAI-Compatible API Surface
+## Worker Process
 
-Implement:
+Add a real v2 execution-worker entrypoint and a Compose worker service using the same image.
 
-- `GET /v1/models`
-- `GET /v1/models/{model}`
-- `POST /v1/chat/completions`
+The API service must no longer directly call the provider adapter for scheduled Chat Completions.
 
-### Models
+Worker responsibilities:
 
-- publish active public model aliases, not provider-facing model names;
-- do not expose endpoint/provider secrets or internal routing data;
-- unknown model retrieval returns an OpenAI-compatible structured error.
+1. select an eligible queued request;
+2. re-resolve/revalidate the route immediately before reservation/dispatch;
+3. obtain endpoint capacity transactionally;
+4. create/update reservation and execution-attempt ownership with lease + fencing;
+5. commit;
+6. transition to dispatch intent durably before contacting upstream;
+7. perform inference outside the DB transaction;
+8. publish encrypted result/events;
+9. settle terminal state and release capacity only when outcome is known;
+10. wake/poll for the next eligible request.
 
-### Chat Completions
+Multiple worker containers/processes must not double-dispatch the same request.
 
-Support enough of the pinned compatibility contract to work with the current official OpenAI Python
-SDK and the real nomnom backend.
+The initial wake-up mechanism may be bounded PostgreSQL polling. LISTEN/NOTIFY is optional and is not
+a second authority.
+
+## Conservative Lease / Recovery Rules
+
+Implement and test at least:
+
+- lease expires while still safely pre-dispatch/reserved -> may be reclaimed/requeued only if the
+  persisted state proves upstream was never contacted;
+- lease expires after durable dispatch intent -> transition/conservatively surface
+  `outcome_unknown`;
+- `outcome_unknown` continues to consume the physical endpoint slot until explicitly reconciled;
+- no automatic retry of an ambiguous attempt;
+- fencing prevents a stale worker from committing terminal state after ownership changed.
+
+Provide a development/admin-safe reconciliation helper if needed for tests, but do not invent the
+full admin API in this task.
+
+## API Waiting / Result Delivery
+
+### Non-streaming
+
+`POST /v1/chat/completions` with `stream=false` must:
+
+1. validate/auth/resolve sufficiently to reject invalid requests before queueing;
+2. enqueue the encrypted request durably;
+3. wait for terminal result up to configured queue/total deadline;
+4. return the same OpenAI-compatible completion shape established in AGV2-004.
+
+If the request expires before dispatch, return a safe documented timeout/service error without
+contacting upstream.
+
+### Streaming
+
+Do not regress AGV2-004 streaming.
+
+`stream=true` must also pass through scheduler admission before upstream dispatch.
+
+Because worker and API are separate processes, implement a safe cross-process stream/result channel.
+For this phase, a PostgreSQL-backed encrypted event sequence is acceptable.
 
 Requirements:
 
-- public `model` resolves through `aethergate.catalog`;
-- unknown alias: explicit model-not-found response;
-- inactive/unavailable route: explicit safe error;
-- ambiguous route: explicit safe error;
-- no unknown-model fallback;
-- forward supported semantic generation parameters instead of silently dropping them;
-- client transport/provider-control fields are rejected and never forwarded;
-- unsupported semantic features must fail explicitly rather than being silently ignored;
-- keep LiteLLM parameter dropping disabled unless a provider-specific, documented compatibility
-  adapter explicitly handles the difference;
-- JSON responses are actual JSON objects;
-- response `model` should preserve the public AetherGate model alias rather than leaking an internal
-  provider/deployment name;
-- generate a gateway request ID and return it consistently;
-- preserve upstream request ID separately when available;
-- map provider failures to structured safe errors without credentials or internal URLs.
+- no prompt/completion text stored plaintext;
+- monotonically ordered per-request event sequence;
+- API emits standard Chat Completions SSE only;
+- no queue-status events;
+- first SSE content begins only after dispatch/streaming starts;
+- `[DONE]` termination remains correct;
+- client disconnect while still queued cancels the queued request;
+- client disconnect during streaming requests upstream cancellation/stream close where feasible;
+- never retry after any content was delivered.
 
-Do not implement `/v1/responses` or embeddings in this task. They remain part of the v2 target but
-come after this first real inference milestone.
+Document event-retention/cleanup behavior.
 
-## Streaming
+## Queue Bounds / Deadlines
 
-Implement proper SSE for `stream=true`.
+Add explicit settings with safe defaults for:
 
-Requirements:
+- maximum queued requests;
+- per-request maximum queue wait;
+- maximum total request lifetime;
+- scheduler poll interval;
+- worker lease duration.
 
-- valid `data: <json>\n\n` events;
-- correct terminating behavior for Chat Completions;
-- no custom queue-status events;
-- public alias in emitted model fields;
-- client disconnect/cancellation closes the upstream stream promptly;
-- no retry after content has begun streaming;
-- upstream error after headers/stream start is handled without inventing a new HTTP status.
+A full per-principal occupancy policy is deferred until scoped credential authentication lands, but
+the schema/design must leave room for it.
 
-Test with the official OpenAI Python client, not curl alone.
+When the global queue is full, reject new work with a safe overload error rather than growing
+without bound.
 
-## Temporary Development Authentication Policy
+## Development Identity During Temporary Auth Bypass
 
-Do not invent the final identity/auth design inside this task.
+Do not invent the final OIDC/auth system here.
 
-For this first nomnom smoke test, inference may be unauthenticated **only** under an explicit
-development-only setting and only while the Compose API remains loopback-bound.
+While AGV2-004's explicit development-only auth bypass exists, scheduler records still need stable
+attribution.
 
-Requirements:
+Use an explicit development-only seeded Project/Principal/ApiCredential context for bypassed requests,
+or an equivalent typed RequestContext that is impossible to activate in production.
 
-- the bypass must be explicit, not accidental;
-- it must be impossible to enable the bypass in production mode;
-- production startup/config validation must reject an insecure inference-auth bypass;
-- document this as temporary;
-- do not treat it as the final API-key implementation.
+Do not make scheduler identity fields meaningless/random per request.
 
-If the existing contracts make it straightforward to add correct scoped API credential
-authentication without expanding this task substantially, that is acceptable, but do not design an
-entire identity system here.
+Production mode must still reject inference auth bypass.
 
-## Development Seed / Test Configuration
+## Development Seed
 
-Because the admin API is not implemented yet, provide a clearly development-only, idempotent way to
-seed the minimum inference configuration through the service/repository layer.
+Extend the idempotent dev seed so nomnom can configure:
 
-It must accept values via environment/arguments rather than hard-code nomnom specifics:
+- public alias;
+- upstream model;
+- endpoint destination;
+- upstream allowlist;
+- endpoint `max_concurrency`;
+- development request identity/context required by the scheduler.
 
-- provider kind;
-- provider-facing model identifier;
-- public model alias;
-- endpoint/base destination;
-- optional secret-reference/environment variable name;
-- allowed upstream host.
+Do not hard-code nomnom values in normal configuration.
 
-It may manipulate the v2 database only as explicitly documented development/bootstrap tooling.
-Normal production administration will later go through `/admin/v1`.
+## Real Nomnom Concurrency Test — Required
 
-Do not commit actual provider keys.
+Use the existing discovered nomnom Ollama backend unless current inspection shows that environment
+changed. Do not assume its port/model without verifying.
 
-## Real Nomnom Smoke Test — Required
+Run AetherGate through Docker/Podman using the existing dynamic host-port workflow.
 
-The task is not complete merely because mocked tests pass.
+Required real test:
 
-After implementation:
+1. start clean/current v2 stack and migrations;
+2. seed an endpoint with `max_concurrency=2`;
+3. use the official OpenAI Python SDK;
+4. launch six non-streaming Chat Completions concurrently against the same public alias;
+5. make requests long enough to observe overlapping execution;
+6. capture scheduler state/timestamps;
+7. prove no more than 2 attempts are in dispatched/streaming execution simultaneously;
+8. prove at least 4 requests were queued while the first two occupied capacity;
+9. prove all six eventually complete successfully;
+10. prove FIFO dispatch order for this single-endpoint case;
+11. verify no request was double-dispatched;
+12. run a second real test with at least one streaming request passing through scheduler admission.
 
-1. inspect current nomnom listener/container state;
-2. identify an existing real inference backend and model;
-3. start AetherGate v2 using `scripts/dev/v2 up`;
-4. obtain the dynamically allocated AetherGate host port using the existing helper;
-5. run migrations through `0002`;
-6. seed the discovered backend/model through the dev seed path;
-7. verify `GET /v1/models`;
-8. use the current official OpenAI Python SDK against the printed AetherGate base URL;
-9. complete one real non-streaming Chat Completion;
-10. complete one real streaming Chat Completion and consume it to completion;
-11. verify the public alias, not the internal upstream model name, is exposed to the client;
-12. verify an unknown alias does not hit the backend;
-13. verify a client cannot override the upstream destination/credential;
-14. stop the AetherGate v2 stack cleanly when verification is finished.
+The handoff must include a concise timestamp/state table or equivalent evidence. Do not include
+prompt/completion bodies.
 
-Record the discovered backend type/model and the AetherGate dynamically allocated test port in the
-handoff if non-sensitive. Do not record credentials.
+## Multi-worker Test — Required
 
-If no existing reachable inference backend can be found, do not guess or create one. Implement and
-verify everything else, then mark the task BLOCKED in the handoff with the exact non-secret
-discovery evidence. Do not falsely claim the inference milestone succeeded.
+Run at least two scheduler worker processes/containers against the same PostgreSQL database.
+
+Prove with deterministic integration tests and the real nomnom test where practical:
+
+- no double dispatch;
+- shared `max_concurrency=2` is enforced across workers;
+- killing/restarting one worker while requests are only queued does not lose them;
+- pre-dispatch lease recovery is safe;
+- post-dispatch ambiguous ownership is not automatically retried/released.
+
+Do not claim multi-worker safety based only on unit mocks.
+
+## Observability
+
+Add scheduler-safe metadata/logging/metrics foundation sufficient to inspect:
+
+- request ID;
+- queue entered timestamp;
+- dispatch timestamp;
+- terminal timestamp;
+- queue wait duration;
+- endpoint ID;
+- current state;
+- reservation/attempt ID;
+- worker ID/fencing generation.
+
+Never log prompt/completion content or secret values.
+
+A small development inspection command is acceptable until the admin API/UI exists.
 
 ## Automated Tests
 
-Add deterministic tests for at least:
+Add deterministic offline/integration coverage for at least:
 
-1. route binding requires/handles the upstream model identifier correctly;
-2. migration `0002`;
-3. model listing exposes only public active aliases;
-4. model retrieval;
-5. unknown model;
-6. inactive route/resource;
-7. ambiguous route;
-8. provider adapter receives resolved endpoint/model rather than client-controlled destination;
-9. LiteLLM retries/fallback are disabled by AetherGate adapter configuration;
-10. client transport override fields are rejected;
-11. non-streaming response shape;
-12. streaming SSE shape and termination;
-13. public alias replacement in responses/chunks;
-14. provider error mapping/redaction;
-15. destination allowlist/metadata-address rejection;
-16. development auth bypass cannot be enabled in production;
-17. client cancellation closes an upstream stream;
-18. official OpenAI Python SDK interoperability against an in-process/mock upstream.
+1. FIFO queue order;
+2. endpoint `max_concurrency`;
+3. six requests / two slots;
+4. two workers sharing one endpoint limit;
+5. atomic reservation under concurrent claims;
+6. queue-full rejection;
+7. queue expiry before dispatch;
+8. encrypted request payload at rest;
+9. encrypted completion/stream content at rest;
+10. no plaintext canary prompt in relevant PostgreSQL content columns;
+11. fencing rejects stale worker completion;
+12. safe reclaim before dispatch;
+13. post-dispatch lease expiry -> `outcome_unknown`;
+14. `outcome_unknown` keeps capacity reserved;
+15. queued client cancellation;
+16. streaming event order;
+17. scheduled non-stream OpenAI SDK interoperability;
+18. scheduled streaming OpenAI SDK interoperability;
+19. restart persistence of queued work;
+20. worker process starts independently from API.
 
-Keep tests offline except the separately documented required nomnom smoke test.
+Keep ordinary tests offline; the required nomnom smoke/load test is separate.
+
+## Compose / Developer Workflow
+
+Update `deploy/v2/compose.yaml` and `scripts/dev/v2` so:
+
+- API + PostgreSQL + scheduler worker(s) can be started together;
+- PostgreSQL remains un-published;
+- API host port remains dynamically allocated on loopback;
+- at least two workers can be run for the multi-worker verification;
+- migration/test helpers still work;
+- developer tooling can inspect queue state without exposing content.
+
+Do not hard-code a host port.
 
 ## Documentation
 
-Update/create as needed:
+Update:
 
-- `docs/architecture/provider-model.md`
+- `docs/architecture/scheduler.md`
+- `docs/architecture/v2-overview.md`
 - `docs/contracts/domain-model.md`
-- `docs/contracts/openai-compatibility-baseline.md`
 - `docs/development/README.md`
 
-Clearly state that this milestone directly dispatches and **does not yet queue**.
+Clearly document that scheduler phase 1 enforces **physical endpoint concurrency only**.
+
+Explicitly defer, rather than fake:
+
+- provider RPM windows;
+- TPM/token reservation;
+- shared provider-account quota windows;
+- project budgets;
+- retries/cooldown;
+- fairness modes beyond FIFO.
+
+Those become later phases and must eventually be reserved together with endpoint capacity.
 
 Do not modify the dated audit.
 
 ## Out of Scope
 
-Do not implement:
+Do not implement in this task:
 
-- durable scheduler/queue;
-- quota reservation;
-- concurrency slots;
-- retries/fallback orchestration;
-- accounting settlement;
-- full OIDC/session system;
-- admin CRUD API;
-- web console changes;
 - `/v1/responses`;
 - embeddings;
-- v1 SQLite migration.
+- full API-key/OIDC/session system;
+- admin CRUD API;
+- React changes;
+- accounting/ledger settlement;
+- provider RPM/TPM enforcement;
+- retry/fallback orchestration;
+- v1 SQLite migration;
+- production secret backend.
 
 ## Verification
 
 Before committing:
 
-- full unit/contract test suite;
+- full unit/contract/integration suite;
 - containerized tests;
-- ruff/lint checks;
+- migration from empty DB through latest revision;
+- ruff/lint;
 - `git diff --check`;
 - repository secret scan;
-- confirm `app/` and `frontend/src/` untouched;
-- confirm audit unchanged;
-- complete the real nomnom non-stream + stream smoke test if a backend is available.
+- confirm legacy `app/` and `frontend/src/` untouched;
+- confirm dated audit unchanged;
+- complete the required real six-request/two-slot nomnom test;
+- complete the required scheduled streaming test;
+- complete multi-worker verification.
 
 ## Handoff
 
 Update `docs/development/agent-handoff.md` with:
 
-- branch and starting commit;
-- implementation commit(s);
-- provider adapter boundary;
-- upstream-model contract/migration result;
-- discovered non-sensitive nomnom backend type/model;
-- dynamically allocated AetherGate host port;
-- real non-streaming inference result;
-- real streaming inference result;
-- official OpenAI SDK test result;
-- verification commands/results;
-- decisions/deferred items;
-- risks/issues;
+- branch / starting commit / implementation commits;
+- migration revisions;
+- scheduler schema and worker topology;
+- queue encryption approach;
+- actual dynamically assigned AetherGate host port;
+- actual verified backend/model (non-sensitive);
+- six-request/two-slot evidence;
+- multi-worker evidence;
+- streaming-through-scheduler result;
+- worker recovery/fencing evidence;
+- exact summarized test results;
+- deferred scheduler phases;
+- issues/risks;
 - exactly one recommended next step.
 
-Do not include credentials, secret values, or large logs.
+No credentials, prompt text, completion text, encryption keys, or large logs.
 
 ## Commit and Push
 
-Commit all work on branch `v2` using conventional commits.
+Use conventional commits on branch `v2`.
 
 Suggested primary message:
 
-`feat(inference): add first v2 chat completion path`
+`feat(scheduler): add durable endpoint-concurrency queue`
 
 A separate handoff-only follow-up commit is allowed.
 
@@ -383,6 +437,6 @@ A separate handoff-only follow-up commit is allowed.
 
 Never push directly to `main`.
 
-The task is complete only when `origin/v2` contains the work and updated handoff. A successful
-real nomnom inference smoke test is required unless the handoff explicitly records a genuine
-environmental blocker.
+The task is complete only when `origin/v2` contains the work and updated handoff, and the real
+six-request/two-slot nomnom test has passed or the handoff records a genuine environmental blocker
+with evidence.
