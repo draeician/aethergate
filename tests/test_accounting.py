@@ -27,22 +27,38 @@ from aethergate.adapters.base import (
     Usage,
 )
 from aethergate.config import Settings
+from aethergate.contracts.admin_v1 import PricePolicyCreate, PricePolicyUpdate
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import BillingUnit, Capability, RequestState
+from aethergate.domain.enums import (
+    BillingUnit,
+    Capability,
+    PrincipalKind,
+    QuotaMetric,
+    RequestState,
+)
 from aethergate.domain.ids import (
+    ApiCredentialId,
     BudgetPolicyId,
     EndpointId,
     ModelAliasId,
     PricePolicyId,
+    PrincipalId,
     ProjectId,
     ProviderAccountId,
     ProviderId,
+    QuotaGroupId,
+    QuotaLimitId,
     RouteBindingId,
+    SecretRefId,
 )
 from aethergate.egress import DestinationPolicy
 from aethergate.encryption import QueueEncryptor
-from aethergate.errors import ProviderError
+from aethergate.errors import (
+    AccountingInvariantError,
+    PricePolicyConflictError,
+    ProviderError,
+)
 from aethergate.inference.service import InferenceService
 from aethergate.persistence import models, repository
 from aethergate.scheduler import repository as sched_repo
@@ -242,6 +258,7 @@ async def _seed_route(
     alias_name: str,
     endpoint_id: str,
     max_concurrency: int = 8,
+    quota_group_id: str | None = None,
 ) -> RouteBindingId:
     endpoint = await repository.get_endpoint(session, EndpointId(endpoint_id))
     if endpoint is None:
@@ -271,9 +288,78 @@ async def _seed_route(
             endpoint_id=EndpointId(endpoint_id),
             provider_account_id=ProviderAccountId("acct-ollama"),
             upstream_model="qwen3.8-2b-distill:Q6_K",
+            quota_group_id=QuotaGroupId(quota_group_id) if quota_group_id else None,
         ),
     )
     return RouteBindingId(f"rb-{alias_id}")
+
+
+async def _seed_quota_group(
+    session,
+    *,
+    group_id: str,
+    request_limits: list[tuple[int, int]] | None = None,
+) -> None:
+    await repository.create_quota_group(
+        session,
+        domain.QuotaGroup(
+            id=QuotaGroupId(group_id),
+            provider_account_id=ProviderAccountId("acct-ollama"),
+            name=f"group-{group_id}",
+        ),
+    )
+    for i, (limit_units, window_seconds) in enumerate(request_limits or []):
+        await repository.create_quota_limit(
+            session,
+            domain.QuotaLimit(
+                id=QuotaLimitId(f"{group_id}-r{i}"),
+                quota_group_id=QuotaGroupId(group_id),
+                metric=QuotaMetric.REQUESTS,
+                limit_units=limit_units,
+                window_seconds=window_seconds,
+            ),
+        )
+
+
+async def _seed_project_context(
+    session,
+    *,
+    project_id: str,
+    project_name: str,
+) -> tuple[ProjectId, PrincipalId, ApiCredentialId]:
+    """Seed a full attribution identity for a non-dev project and return its context."""
+    project = await repository.create_project(
+        session,
+        domain.Project(id=ProjectId(project_id), name=project_name),
+    )
+    principal = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId(f"{project_id}-principal"),
+            project_id=project.id,
+            kind=PrincipalKind.USER,
+            name=f"{project_name}-principal",
+        ),
+    )
+    secret_ref = await repository.create_secret_ref(
+        session,
+        domain.SecretRef(
+            id=SecretRefId(f"{project_id}-secret"),
+            name=f"{project_name}-credential",
+            created_at=datetime.now(UTC),
+        ),
+    )
+    credential = await repository.create_api_credential(
+        session,
+        domain.ApiCredential(
+            id=ApiCredentialId(f"{project_id}-credential"),
+            project_id=project.id,
+            principal_id=principal.id,
+            name=f"{project_name}-credential",
+            secret_ref_id=secret_ref.id,
+        ),
+    )
+    return project.id, principal.id, credential.id
 
 
 async def _seed_price_policy(
@@ -895,3 +981,449 @@ async def test_outcome_unknown_keeps_budget_then_reconcile_commits(sched_engine)
         window = (await session.execute(select(models.BudgetWindow))).scalar_one()
         assert window.committed_amount == Decimal("0.050000000000")
     assert await _count(factory, models.UsageRecord) == 0
+
+
+# ---------------------------------------------------------------------------
+# AGV2-011 — billing-unit price shape (fix 4)
+# ---------------------------------------------------------------------------
+
+
+def test_request_billing_requires_request_price():
+    with pytest.raises(ValidationError):
+        domain.PricePolicy(
+            id=PricePolicyId("pp-shape-1"),
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.REQUEST,
+            currency="USD",
+        )
+
+
+def test_request_billing_explicit_zero_accepted():
+    policy = domain.PricePolicy(
+        id=PricePolicyId("pp-shape-2"),
+        route_binding_id=RouteBindingId("rb-1"),
+        billing_unit=BillingUnit.REQUEST,
+        currency="USD",
+        request_price=Decimal("0"),
+    )
+    assert policy.request_price == Decimal("0")
+
+
+def test_request_billing_rejects_token_prices():
+    with pytest.raises(ValidationError):
+        domain.PricePolicy(
+            id=PricePolicyId("pp-shape-3"),
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.REQUEST,
+            currency="USD",
+            request_price=Decimal("0.05"),
+            input_price=Decimal("0.01"),
+        )
+
+
+def test_token_billing_requires_input_and_output():
+    with pytest.raises(ValidationError):
+        domain.PricePolicy(
+            id=PricePolicyId("pp-shape-4"),
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.TOKEN,
+            currency="USD",
+            input_price=Decimal("0.5"),
+        )
+
+
+def test_token_billing_explicit_zero_prices_accepted():
+    policy = domain.PricePolicy(
+        id=PricePolicyId("pp-shape-5"),
+        route_binding_id=RouteBindingId("rb-1"),
+        billing_unit=BillingUnit.TOKEN,
+        currency="USD",
+        input_price=Decimal("0"),
+        output_price=Decimal("0"),
+    )
+    assert policy.input_price == Decimal("0")
+    assert policy.output_price == Decimal("0")
+
+
+def test_token_billing_rejects_request_price():
+    with pytest.raises(ValidationError):
+        domain.PricePolicy(
+            id=PricePolicyId("pp-shape-6"),
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.TOKEN,
+            currency="USD",
+            request_price=Decimal("0.05"),
+            input_price=Decimal("0.5"),
+            output_price=Decimal("1.5"),
+        )
+
+
+def test_price_policy_create_dto_shape():
+    with pytest.raises(ValidationError):
+        PricePolicyCreate(
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.REQUEST,
+            currency="USD",
+        )
+    dto = PricePolicyCreate(
+        route_binding_id=RouteBindingId("rb-1"),
+        billing_unit=BillingUnit.REQUEST,
+        currency="USD",
+        request_price=Decimal("0"),
+    )
+    assert dto.request_price == Decimal("0")
+    with pytest.raises(ValidationError):
+        PricePolicyCreate(
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.TOKEN,
+            currency="USD",
+            input_price=Decimal("0.5"),
+        )
+    with pytest.raises(ValidationError):
+        PricePolicyCreate(
+            route_binding_id=RouteBindingId("rb-1"),
+            billing_unit=BillingUnit.REQUEST,
+            currency="USD",
+            request_price=Decimal("0.05"),
+            input_price=Decimal("0.5"),
+        )
+
+
+def test_price_policy_update_rejects_incompatible_fields():
+    with pytest.raises(ValidationError):
+        PricePolicyUpdate(billing_unit=BillingUnit.REQUEST, input_price=Decimal("0.5"))
+    with pytest.raises(ValidationError):
+        PricePolicyUpdate(billing_unit=BillingUnit.TOKEN, request_price=Decimal("0.05"))
+
+
+# ---------------------------------------------------------------------------
+# AGV2-011 — one enabled price policy per route (fix 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_only_one_enabled_price_policy_per_route(sched_engine):
+    await reset_schema(sched_engine)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            with pytest.raises(PricePolicyConflictError):
+                await repository.create_price_policy(
+                    session,
+                    domain.PricePolicy(
+                        id=PricePolicyId("pp-conflict"),
+                        route_binding_id=rb,
+                        billing_unit=BillingUnit.REQUEST,
+                        currency="USD",
+                        request_price=Decimal("0.06"),
+                    ),
+                )
+
+
+async def test_disabled_price_policy_coexists_with_enabled(sched_engine):
+    await reset_schema(sched_engine)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await repository.create_price_policy(
+                session,
+                domain.PricePolicy(
+                    id=PricePolicyId("pp-disabled"),
+                    route_binding_id=rb,
+                    billing_unit=BillingUnit.REQUEST,
+                    currency="USD",
+                    request_price=Decimal("0.05"),
+                    enabled=False,
+                ),
+            )
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        rows = (await session.execute(select(models.PricePolicy))).scalars().all()
+        assert len(rows) == 2
+        assert sum(1 for r in rows if r.enabled) == 1
+
+
+# ---------------------------------------------------------------------------
+# AGV2-011 — conflicting idempotent settlement replays (fix 5)
+# ---------------------------------------------------------------------------
+
+
+async def test_conflicting_usage_record_replay_raises(sched_engine):
+    await reset_schema(sched_engine)
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory = await _build(sched_engine, mock)
+    request_id = await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    await service.run_complete(outcome)
+
+    async with factory() as session:
+        async with session.begin():
+            row = await sched_repo.get_request(session, request_id)
+            with pytest.raises(AccountingInvariantError):
+                await accounting_repo.create_usage_record(
+                    session,
+                    request_id=request_id,
+                    execution_attempt_id=outcome.attempt_id,
+                    project_id=row.project_id,
+                    principal_id=row.principal_id,
+                    api_credential_id=row.api_credential_id,
+                    model_alias_id=row.model_alias_id,
+                    route_binding_id=str(rb),
+                    provider_account_id="acct-ollama",
+                    price_snapshot_id=row.price_snapshot_id,
+                    billing_unit="request",
+                    input_units=0,
+                    output_units=0,
+                    request_units=1,
+                    amount=Decimal("0.99"),
+                    currency="USD",
+                    recorded_at=datetime.now(UTC),
+                    upstream_request_id=None,
+                )
+    # The conflicting replay must not have mutated anything.
+    assert await _count(factory, models.UsageRecord) == 1
+
+
+async def test_conflicting_ledger_entry_replay_raises(sched_engine):
+    await reset_schema(sched_engine)
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context = await ensure_dev_identity(session)
+
+    service, factory = await _build(sched_engine, mock)
+    request_id = await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    await service.run_complete(outcome)
+
+    async with factory() as session:
+        async with session.begin():
+            row = await sched_repo.get_request(session, request_id)
+            usage_record = (await session.execute(select(models.UsageRecord))).scalar_one()
+            with pytest.raises(AccountingInvariantError):
+                await accounting_repo.create_ledger_entry(
+                    session,
+                    project_id=row.project_id,
+                    usage_record_id=usage_record.id,
+                    entry_type="usage_debit",
+                    amount=Decimal("0.99"),
+                    currency="USD",
+                    created_at=datetime.now(UTC),
+                    idempotency_key=f"usage:{usage_record.id}",
+                )
+    assert await _count(factory, models.LedgerEntry) == 1
+
+
+# ---------------------------------------------------------------------------
+# AGV2-011 — cross-project budget head-of-line blocking (fix 1)
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_project_budget_does_not_hol_block(sched_engine):
+    await reset_schema(sched_engine)
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context_a = await ensure_dev_identity(session)
+            context_b = await _seed_project_context(
+                session, project_id="proj-b", project_name="project-b"
+            )
+            await _seed_budget_policy(
+                session, project_id=context_a[0], name="a-budget",
+                limit_amount=Decimal("0.05"), window_seconds=60,
+            )
+            await _seed_budget_policy(
+                session, project_id=context_b[0], name="b-budget",
+                limit_amount=Decimal("1"), window_seconds=60,
+            )
+
+    service, factory = await _build(sched_engine, mock)
+    a1 = await _enqueue(service, context_a, alias="a")
+    a2 = await _enqueue(service, context_a, alias="a")
+    b1 = await _enqueue(service, context_b, alias="a")
+
+    # Oldest is project A; it dispatches first (FIFO within project A).
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    assert first.request_id == a1
+
+    # A's budget is now exhausted; project B must not be blocked behind A's
+    # older (budget-blocked) work.
+    second = await service.claim_and_reserve("w1")
+    assert not isinstance(second, str) and second is not None
+    assert second.request_id == b1
+
+    # Only A's remaining request is left, budget-blocked and ineligible until its
+    # window resets (nothing else is eligible to claim).
+    third = await service.claim_and_reserve("w1")
+    assert third is None
+
+    # A2 stayed budget-blocked and holds no endpoint slot.
+    async with factory() as session:
+        row = await sched_repo.get_request(session, a2)
+        assert row.state == RequestState.QUEUED
+        assert row.wait_reason == "budget_window_exhausted"
+        assert await sched_repo.count_active_reservations(session, "ep-a") == 2
+
+
+# ---------------------------------------------------------------------------
+# AGV2-011 — pre-dispatch price-snapshot lifecycle (fix 6)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_request_priced_route_and_budget(sched_engine):
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context = await ensure_dev_identity(session)
+            await _seed_budget_policy(
+                session, project_id=context[0], name="usd-budget",
+                limit_amount=Decimal("1"), window_seconds=60,
+            )
+    service, factory = await _build(sched_engine, mock)
+    return service, factory, context, rb
+
+
+async def test_pre_dispatch_cancel_discards_snapshot(sched_engine):
+    await reset_schema(sched_engine)
+    service, factory, context, _rb = await _seed_request_priced_route_and_budget(sched_engine)
+    request_id = await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    assert await _count(factory, models.PriceSnapshot) == 1
+
+    # Back to reserved (pre-dispatch) then cancel.
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == request_id)
+                .values(state=RequestState.RESERVED)
+            )
+    await service.request_cancellation(request_id)
+
+    assert await _count(factory, models.PriceSnapshot) == 0
+    assert await _count(factory, models.UsageRecord) == 0
+    assert await _count(factory, models.LedgerEntry) == 0
+    async with factory() as session:
+        reservation = (
+            await session.execute(select(models.BudgetReservation))
+        ).scalar_one()
+        assert reservation.state == "released"
+
+
+async def test_pre_dispatch_expiry_discards_snapshot(sched_engine):
+    await reset_schema(sched_engine)
+    service, factory, context, _rb = await _seed_request_priced_route_and_budget(sched_engine)
+    await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    assert await _count(factory, models.PriceSnapshot) == 1
+
+    # Simulate pre-dispatch lease expiry: back to reserved with an expired lease.
+    async with factory() as session:
+        async with session.begin():
+            row = await session.get(models.InferenceRequest, outcome.request_id)
+            row.state = RequestState.RESERVED
+            row.lease_expires_at = datetime(2020, 1, 1, tzinfo=UTC)
+    await service.recover()
+
+    assert await _count(factory, models.PriceSnapshot) == 0
+    assert await _count(factory, models.UsageRecord) == 0
+    async with factory() as session:
+        reservation = (
+            await session.execute(select(models.BudgetReservation))
+        ).scalar_one()
+        assert reservation.state == "released"
+
+
+async def test_normal_dispatch_retains_exactly_one_snapshot(sched_engine):
+    await reset_schema(sched_engine)
+    service, factory, context, _rb = await _seed_request_priced_route_and_budget(sched_engine)
+    await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    await service.run_complete(outcome)
+
+    assert await _count(factory, models.PriceSnapshot) == 1
+    assert await _count(factory, models.UsageRecord) == 1
+    assert await _count(factory, models.LedgerEntry) == 1
+
+
+# ---------------------------------------------------------------------------
+# AGV2-011 — concurrent price edit cannot split reservation and snapshot (fix 7)
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_price_edit_cannot_split_reservation_and_snapshot(sched_engine):
+    await reset_schema(sched_engine)
+    service, factory, context, rb = await _seed_request_priced_route_and_budget(sched_engine)
+    await _enqueue(service, context, alias="a")
+
+    async def claim():
+        return await service.claim_and_reserve("w1")
+
+    async def edit_price():
+        await asyncio.sleep(0)
+        async with factory() as session:
+            async with session.begin():
+                await session.execute(
+                    update(models.PricePolicy)
+                    .where(models.PricePolicy.route_binding_id == str(rb))
+                    .values(request_price=Decimal("0.99"))
+                )
+
+    outcome, _ = await asyncio.gather(claim(), edit_price())
+    assert not isinstance(outcome, str) and outcome is not None
+    await service.run_complete(outcome)
+
+    async with factory() as session:
+        snapshot = (await session.execute(select(models.PriceSnapshot))).scalar_one()
+        reservation = (
+            await session.execute(select(models.BudgetReservation))
+        ).scalar_one()
+        usage = (await session.execute(select(models.UsageRecord))).scalar_one()
+        assert snapshot.request_price in (
+            Decimal("0.050000000000"),
+            Decimal("0.990000000000"),
+        )
+        assert reservation.committed_amount == snapshot.request_price
+        assert usage.amount == snapshot.request_price

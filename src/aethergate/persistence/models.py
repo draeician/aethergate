@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     Numeric,
@@ -26,6 +27,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -459,6 +461,22 @@ class PricePolicy(Base, TimestampMixin):
             "output_price IS NULL OR output_price >= 0",
             name="ck_price_policies_output_price_nonneg",
         ),
+        CheckConstraint(
+            "billing_unit <> 'request' OR "
+            "(request_price IS NOT NULL AND input_price IS NULL AND output_price IS NULL)",
+            name="ck_price_policies_request_shape",
+        ),
+        CheckConstraint(
+            "billing_unit <> 'token' OR "
+            "(request_price IS NULL AND input_price IS NOT NULL AND output_price IS NOT NULL)",
+            name="ck_price_policies_token_shape",
+        ),
+        Index(
+            "uq_price_policies_one_enabled_per_route",
+            "route_binding_id",
+            unique=True,
+            postgresql_where=text("enabled"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
@@ -603,8 +621,8 @@ class BudgetReservation(Base, TimestampMixin):
     budget_policy_id: Mapped[str] = mapped_column(
         ForeignKey("project_budget_policies.id"), nullable=False, index=True
     )
-    price_snapshot_id: Mapped[str] = mapped_column(
-        ForeignKey("price_snapshots.id"), nullable=False
+    price_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("price_snapshots.id"), nullable=True
     )
     window_start: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from aethergate.contracts.common import ContractModel
 from aethergate.domain.enums import (
@@ -310,6 +310,24 @@ class PricePolicyCreate(ContractModel):
     enabled: bool = True
     name: str | None = None
 
+    @model_validator(mode="after")
+    def _validate_price_shape(self) -> PricePolicyCreate:
+        if self.billing_unit == BillingUnit.REQUEST:
+            if self.request_price is None:
+                raise ValueError("request billing requires request_price")
+            if self.input_price is not None or self.output_price is not None:
+                raise ValueError(
+                    "request billing must not set input_price or output_price"
+                )
+        elif self.billing_unit == BillingUnit.TOKEN:
+            if self.input_price is None or self.output_price is None:
+                raise ValueError(
+                    "token billing requires both input_price and output_price"
+                )
+            if self.request_price is not None:
+                raise ValueError("token billing must not set request_price")
+        return self
+
 
 class PricePolicyRead(ContractModel):
     id: PricePolicyId
@@ -333,6 +351,18 @@ class PricePolicyUpdate(ContractModel):
     output_price: NonNegativeMoney | None = None
     enabled: bool | None = None
     name: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_incompatible_prices(self) -> PricePolicyUpdate:
+        if self.billing_unit == BillingUnit.REQUEST and (
+            self.input_price is not None or self.output_price is not None
+        ):
+            raise ValueError(
+                "request billing must not set input_price or output_price"
+            )
+        if self.billing_unit == BillingUnit.TOKEN and self.request_price is not None:
+            raise ValueError("token billing must not set request_price")
+        return self
 
 
 # --- Project budget policies -------------------------------------------------

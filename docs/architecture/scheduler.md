@@ -14,9 +14,11 @@ For an endpoint with two concurrent slots and six valid arrivals A-F: A/B dispat
 queue. Releasing one completed slot admits the next eligible queued request only when every other
 constraint also permits it. FIFO describes admission/dispatch order, not completion order. (Settled)
 
-FIFO is enforced **per endpoint**. A saturated endpoint must never block an unrelated endpoint with
-available capacity: the scheduler dispatches the oldest eligible queued request within each endpoint,
-and chooses among endpoints by each endpoint's oldest eligible queued request. (Settled)
+FIFO is enforced **per effective admission scope** (`endpoint + quota group + project`). A saturated
+endpoint must never block an unrelated endpoint with available capacity: the scheduler dispatches
+the oldest eligible queued request within each scope, and chooses among scopes by each scope's oldest
+eligible queued request. Adding the project to the scope means a budget-blocked project does not
+head-of-line block another project that shares the same endpoint/quota resources. (Settled)
 
 ## Lifecycle
 
@@ -141,12 +143,15 @@ Token-quota semantics:
   until explicit reconciliation or window expiry; reconciliation commits (never creates) capacity.
   Pre-dispatch cancellation/reclaim releases token reservations (upstream never contacted).
 
-Atomic admission and lock order (deterministic, tested):
+Atomic admission and lock order (deterministic, tested). As of AGV2-011 the canonical order across
+quota, budget, and endpoint admission is:
 
-1. quota group (FOR UPDATE), then quota limits in stable ID order;
-2. current quota-window rows (get-or-create under the unique constraint, then FOR UPDATE);
-3. endpoint row / physical concurrency;
-4. request/attempt/reservation state.
+1. request / scheduling-scope row(s);
+2. active price policy;
+3. project budget policy / budget windows (stable ID order);
+4. quota group (FOR UPDATE), then quota limits and quota-window rows in stable ID order;
+5. endpoint row / physical concurrency;
+6. request/attempt/reservation state.
 
 If any required quota lacks capacity, none of the request's capacity is acquired; no DB transaction
 remains open while waiting for a reset; multiple workers cannot oversubscribe a window. A request
@@ -165,7 +170,7 @@ Eligibility/queue behavior:
 - When a free physical slot exists but a quota window is exhausted, the request stays queued with a
   non-content `wait_reason` (e.g. `quota_window_exhausted`), no execution attempt is created, and the
   worker does not spin hot. An unrelated endpoint/group with capacity still dispatches. FIFO within
-  the same endpoint + quota scope is preserved.
+  the same endpoint + quota group + project scope is preserved.
 
 Schema: migration `0005` adds `quota_groups.provider_account_id` (+ NOT NULL) and
 `quota_groups.cooldown_until`; creates `quota_limits`, `quota_windows` (unique
@@ -185,9 +190,13 @@ here.
   creates priced usage.
 - **Budget admission.** Budget evaluation participates in the same all-or-nothing admission
   transaction as request/token quota and endpoint physical capacity. `_evaluate_budget` locks (never
-  mutates) the price policy and budget windows, then reserves only when every constraint admits.
-  Lock order: request/scope rows -> project budget policy/windows -> provider quota group/limit/
-  windows -> endpoint physical capacity -> request/attempt/reservation mutations.
+  mutates) the active price policy and budget windows, then reserves only when every constraint admits.
+  Lock order: request/scope rows -> active price policy -> project budget policy/windows -> provider
+  quota group/limit/windows -> endpoint physical capacity -> request/attempt/reservation mutations.
+- **Snapshot lifecycle.** The effective price is captured at reservation (so budget reservations are
+  priced deterministically) and becomes the immutable historical snapshot only for work that reaches
+  durable dispatch intent; a pre-dispatch cancel/reclaim/dispatch-failure discards the snapshot so no
+  orphan snapshot survives for work that never dispatched.
 - **Budget wait metadata.** A budget-exhausted request stays queued with
   `wait_reason=budget_window_exhausted`, `wait_limit_metric="budget"`, and `next_eligible_at` (next
   window reset) — distinct from quota and endpoint-full waiting. Budget-blocked work holds no
@@ -209,7 +218,9 @@ Schema: migration `0007` creates `price_policies`, `price_snapshots`, `project_b
 `inference_requests.price_snapshot_id` (and its index) and `inference_requests.wait_limit_metric`;
 adds CHECK constraints for currency format, positive budget/window amounts, nonnegative
 reserved/committed amounts, supported reservation/ledger states/types, positive unit scale, and
-idempotency uniqueness.
+idempotency uniqueness. Migration `0008` adds the one-enabled-price-policy-per-route partial unique
+index, billing-unit-specific price-shape CHECK constraints, and relaxes
+`budget_reservations.price_snapshot_id` to nullable for the snapshot lifecycle.
 
 ## Conservative lease / recovery (phase 1 rules)
 

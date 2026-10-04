@@ -118,6 +118,34 @@ def _check_constraints(url: str, table: str) -> set[str]:
     return names
 
 
+def _indexes(url: str, table: str) -> set[str]:
+    engine = create_async_engine(url)
+    async def _names() -> set[str]:
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: {ix["name"] for ix in inspect(sync_conn).get_indexes(table)}
+            )
+    names = asyncio.run(_names())
+    asyncio.run(engine.dispose())
+    return names
+
+
+def _nullable_columns(url: str, table: str) -> set[str]:
+    engine = create_async_engine(url)
+    async def _names() -> set[str]:
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: {
+                    c["name"]
+                    for c in inspect(sync_conn).get_columns(table)
+                    if c["nullable"]
+                }
+            )
+    names = asyncio.run(_names())
+    asyncio.run(engine.dispose())
+    return names
+
+
 def test_migration_0003_to_0004() -> None:
     if not TEST_DATABASE_URL:
         pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
@@ -200,5 +228,36 @@ def test_migration_0006_to_0007() -> None:
         assert "ck_budget_reservations_state" in _check_constraints(url, "budget_reservations")
         assert "ck_usage_records_billing_unit" in _check_constraints(url, "usage_records")
         assert "ck_ledger_entries_type" in _check_constraints(url, "ledger_entries")
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0007_to_0008() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig78")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0007", env=env)
+        assert "ck_price_policies_request_shape" not in _check_constraints(
+            url, "price_policies"
+        )
+        assert "uq_price_policies_one_enabled_per_route" not in _indexes(
+            url, "price_policies"
+        )
+        assert "price_snapshot_id" not in _nullable_columns(url, "budget_reservations")
+
+        _run_alembic("upgrade", "head", env=env)
+        assert "ck_price_policies_request_shape" in _check_constraints(
+            url, "price_policies"
+        )
+        assert "ck_price_policies_token_shape" in _check_constraints(
+            url, "price_policies"
+        )
+        assert "uq_price_policies_one_enabled_per_route" in _indexes(url, "price_policies")
+        assert "price_snapshot_id" in _nullable_columns(url, "budget_reservations")
     finally:
         asyncio.run(drop_database(url))

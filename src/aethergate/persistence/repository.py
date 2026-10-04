@@ -7,6 +7,7 @@ objects never escape this module.
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
@@ -26,6 +27,7 @@ from aethergate.domain.ids import (
     RouteBindingId,
     SecretRefId,
 )
+from aethergate.errors import PricePolicyConflictError
 from aethergate.persistence import models
 
 
@@ -495,6 +497,20 @@ def _price_policy_to_domain(row: models.PricePolicy) -> domain.PricePolicy:
 async def create_price_policy(
     session: AsyncSession, entity: domain.PricePolicy
 ) -> domain.PricePolicy:
+    if entity.enabled:
+        existing = (
+            await session.execute(
+                select(models.PricePolicy)
+                .where(
+                    models.PricePolicy.route_binding_id == str(entity.route_binding_id),
+                    models.PricePolicy.enabled.is_(True),
+                )
+                .with_for_update()
+            )
+        ).scalars().first()
+        if existing is not None:
+            raise PricePolicyConflictError(str(entity.route_binding_id))
+
     row = models.PricePolicy(
         id=str(entity.id),
         route_binding_id=str(entity.route_binding_id),
@@ -508,8 +524,18 @@ async def create_price_policy(
         name=entity.name,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_price_policy_conflict(exc):
+            raise PricePolicyConflictError(str(entity.route_binding_id)) from exc
+        raise
     return _price_policy_to_domain(row)
+
+
+def _is_price_policy_conflict(exc: IntegrityError) -> bool:
+    message = str(exc.orig).lower() if exc.orig else ""
+    return "uq_price_policies_one_enabled_per_route" in message
 
 
 async def get_price_policy_for_route_binding(

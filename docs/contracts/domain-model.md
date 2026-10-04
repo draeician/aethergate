@@ -52,7 +52,10 @@ floating point (`float`) is rejected for money and pricing. There is no
 
 - `PricePolicy` — mutable pricing configuration associated with a `RouteBinding` (request or token
   billing unit, `currency`, positive `unit_scale`, non-negative prices, `enabled`). Editable; not the
-  historical record.
+  historical record. Billing-unit price shape is validated: request billing requires `request_price`
+  and rejects token prices; token billing requires both `input_price` and `output_price` and rejects
+  `request_price`. Missing price is not equivalent to zero (an explicit `Decimal("0")` is a valid zero
+  price; a missing required price is rejected).
 - `PriceSnapshot` — immutable capture of the effective price at a dispatch decision (source policy
   ID, route binding, provider account, model alias, billing unit, currency, unit scale, prices,
   captured timestamp). Never updated/deleted in normal operation.

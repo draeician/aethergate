@@ -23,10 +23,14 @@ Quota DTOs (scheduler phase 2):
 - `RouteBindingCreate`/`Read`/`Update` carry `default_output_tokens` (positive) and
   `quota_group_id`, for the default bounded output-token reservation.
 
-Accounting DTOs (AGV2-010):
+Accounting DTOs (AGV2-010/011):
 
 - `PricePolicyCreate`/`Read`/`Update` — route pricing (request or token billing unit), currency,
   positive `unit_scale`, non-negative `request_price`/`input_price`/`output_price`, `enabled`.
+  Billing-unit price shape is validated at the DTO boundary: request billing requires `request_price`
+  and rejects token prices; token billing requires both input and output prices and rejects
+  `request_price`; explicit zero prices are allowed. `PricePolicyUpdate` rejects incompatible price
+  fields (partial updates cannot require a price).
 - `ProjectBudgetPolicyCreate`/`Read`/`Update` — project spending-cap policy (positive
   `limit_amount`, positive `window_seconds`, currency, `enabled`). Update DTOs do not expose mutable
   historical accounting fields.

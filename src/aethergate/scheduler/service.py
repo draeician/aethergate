@@ -387,8 +387,11 @@ class SchedulingService:
                     await scheduler_repository.release_quota_reservations(
                         session, request_id=request_id, now=now
                     )
-                    await accounting_repository.release_budget_reservations(
-                        session, request_id=request_id, now=now
+                    await self._release_pre_dispatch_accounting(
+                        session,
+                        request_id=request_id,
+                        snapshot_id=row.price_snapshot_id,
+                        now=now,
                     )
                 else:
                     await scheduler_repository.set_cancellation_requested(session, request_id)
@@ -467,8 +470,12 @@ class SchedulingService:
                 expired = await scheduler_repository.expire_overdue_queued(session, now)
                 reclaimed = await scheduler_repository.reclaim_expired_reserved(session, now)
                 for request_id in reclaimed:
-                    await accounting_repository.release_budget_reservations(
-                        session, request_id=request_id, now=now
+                    row = await scheduler_repository.get_request_for_update(session, request_id)
+                    await self._release_pre_dispatch_accounting(
+                        session,
+                        request_id=request_id,
+                        snapshot_id=row.price_snapshot_id if row is not None else None,
+                        now=now,
                     )
                 unknown = await scheduler_repository.mark_outcome_unknown_expired(session, now)
         if expired or reclaimed or unknown:
@@ -482,8 +489,8 @@ class SchedulingService:
     async def claim_and_reserve(self, worker_id: str) -> ClaimedWork | str | None:
         """Claim one eligible request (FIFO per scheduling scope) and reserve capacity.
 
-        Iterates over scheduling scopes (endpoint + effective quota group) that
-        hold eligible queued work, oldest first. A quota-blocked scope is skipped
+        Iterates over scheduling scopes (endpoint + effective quota group + project)
+        that hold eligible queued work, oldest first. A quota-blocked scope is skipped
         so it never strands unrelated capacity on the same endpoint, and a
         saturated endpoint is skipped so it never blocks an unrelated endpoint
         with available capacity. Returns :class:`ClaimedWork`, ``"full"`` when
@@ -500,8 +507,10 @@ class SchedulingService:
         saw_processed = False
         saw_quota = False
         saw_budget = False
-        for endpoint_id, quota_group_id, _oldest in scopes:
-            outcome = await self._claim_scope(worker_id, endpoint_id, quota_group_id)
+        for endpoint_id, quota_group_id, project_id, _oldest in scopes:
+            outcome = await self._claim_scope(
+                worker_id, endpoint_id, quota_group_id, project_id
+            )
             if isinstance(outcome, ClaimedWork):
                 return outcome
             if outcome == "full":
@@ -524,12 +533,17 @@ class SchedulingService:
         return None
 
     async def _claim_scope(
-        self, worker_id: str, endpoint_id: str | None, quota_group_id: str | None
+        self,
+        worker_id: str,
+        endpoint_id: str | None,
+        quota_group_id: str | None,
+        project_id: str | None,
     ) -> ClaimedWork | str | None:
         """Claim and reserve the oldest eligible request for one scheduling scope.
 
-        Quota is evaluated first (locking quota group/limit/window rows) without
-        mutating; endpoint capacity is evaluated second; only when every required
+        Admission evaluates budget (locking the active price policy and project
+        budget windows) before provider quota (locking the quota group/limit/
+        window rows) and endpoint physical capacity; only when every required
         admission resource is known to fit are quota reservations, the endpoint
         reservation, the attempt, and the request's reserved state mutated and
         committed together. A request that cannot acquire every resource acquires
@@ -542,7 +556,7 @@ class SchedulingService:
         async with self._session_factory() as session:
             async with session.begin():
                 request = await scheduler_repository.claim_next_queued_for_scope(
-                    session, now, endpoint_id, quota_group_id
+                    session, now, endpoint_id, quota_group_id, project_id
                 )
                 if request is None:
                     return None
@@ -572,6 +586,53 @@ class SchedulingService:
                     if resolved.route_binding.quota_group_id is not None
                     else None
                 )
+
+                budget_eval = await self._evaluate_budget(
+                    session,
+                    resolved=resolved,
+                    project_id=request.project_id,
+                    messages=messages,
+                    params=params,
+                    now=now,
+                )
+                if budget_eval.outcome == "too_large":
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="budget_request_too_large",
+                        finished_at=now,
+                    )
+                    return "processed"
+                if budget_eval.outcome == "unbounded_output":
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="budget_unbounded_output",
+                        finished_at=now,
+                    )
+                    return "processed"
+                if budget_eval.outcome == "estimator_unavailable":
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="budget_token_estimator_unavailable",
+                        finished_at=now,
+                    )
+                    return "processed"
+                if budget_eval.outcome == "exhausted":
+                    assert budget_eval.blocking_policy is not None
+                    await scheduler_repository.set_request_wait_metadata(
+                        session,
+                        request_id=request_id,
+                        wait_reason="budget_window_exhausted",
+                        wait_limit_id=budget_eval.blocking_policy.id,
+                        wait_limit_metric="budget",
+                        next_eligible_at=budget_eval.next_eligible_at,
+                    )
+                    return "budget"
 
                 quota_eval: _QuotaEvaluation | None = None
                 if effective_group_id is not None:
@@ -630,53 +691,6 @@ class SchedulingService:
                             next_eligible_at=quota_eval.plan.next_eligible_at,
                         )
                         return "quota"
-
-                budget_eval = await self._evaluate_budget(
-                    session,
-                    resolved=resolved,
-                    project_id=request.project_id,
-                    messages=messages,
-                    params=params,
-                    now=now,
-                )
-                if budget_eval.outcome == "too_large":
-                    await scheduler_repository.fail_request_direct(
-                        session,
-                        request_id=request_id,
-                        state=RequestState.FAILED,
-                        error_code="budget_request_too_large",
-                        finished_at=now,
-                    )
-                    return "processed"
-                if budget_eval.outcome == "unbounded_output":
-                    await scheduler_repository.fail_request_direct(
-                        session,
-                        request_id=request_id,
-                        state=RequestState.FAILED,
-                        error_code="budget_unbounded_output",
-                        finished_at=now,
-                    )
-                    return "processed"
-                if budget_eval.outcome == "estimator_unavailable":
-                    await scheduler_repository.fail_request_direct(
-                        session,
-                        request_id=request_id,
-                        state=RequestState.FAILED,
-                        error_code="budget_token_estimator_unavailable",
-                        finished_at=now,
-                    )
-                    return "processed"
-                if budget_eval.outcome == "exhausted":
-                    assert budget_eval.blocking_policy is not None
-                    await scheduler_repository.set_request_wait_metadata(
-                        session,
-                        request_id=request_id,
-                        wait_reason="budget_window_exhausted",
-                        wait_limit_id=budget_eval.blocking_policy.id,
-                        wait_limit_metric="budget",
-                        next_eligible_at=budget_eval.next_eligible_at,
-                    )
-                    return "budget"
 
                 endpoint = await scheduler_repository.lock_endpoint(session, resolved_endpoint_id)
                 if endpoint is None or not endpoint.is_active:
@@ -784,8 +798,8 @@ class SchedulingService:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
-                    await accounting_repository.release_budget_reservations(
-                        session, request_id=request_id, now=now
+                    await self._release_pre_dispatch_accounting(
+                        session, request_id=request_id, snapshot_id=price_snapshot_id, now=now
                     )
                     return None
                 if dispatch == "not_reserved":
@@ -793,8 +807,8 @@ class SchedulingService:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
-                    await accounting_repository.release_budget_reservations(
-                        session, request_id=request_id, now=now
+                    await self._release_pre_dispatch_accounting(
+                        session, request_id=request_id, snapshot_id=price_snapshot_id, now=now
                     )
                     return None
                 if effective_group_id is not None:
@@ -819,6 +833,27 @@ class SchedulingService:
             prepared=prepared,
             quota_group_id=effective_group_id,
         )
+
+    async def _release_pre_dispatch_accounting(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: str,
+        snapshot_id: str | None,
+        now: datetime,
+    ) -> None:
+        """Release budget and discard the pre-dispatch snapshot for a request that
+        never reached durable dispatch intent (so no orphan snapshot survives)."""
+        await accounting_repository.release_budget_reservations(
+            session, request_id=request_id, now=now
+        )
+        if snapshot_id is not None:
+            await scheduler_repository.clear_price_snapshot_reference(
+                session, request_id
+            )
+            await accounting_repository.discard_price_snapshot(
+                session, snapshot_id=snapshot_id
+            )
 
     async def _evaluate_quota(
         self,

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aethergate.domain.enums import (
     BillingUnit,
@@ -288,6 +288,24 @@ class PricePolicy(Entity):
         if value < 1:
             raise ValueError("unit_scale must be >= 1")
         return value
+
+    @model_validator(mode="after")
+    def _validate_price_shape(self) -> PricePolicy:
+        if self.billing_unit == BillingUnit.REQUEST:
+            if self.request_price is None:
+                raise ValueError("request billing requires request_price")
+            if self.input_price is not None or self.output_price is not None:
+                raise ValueError(
+                    "request billing must not set input_price or output_price"
+                )
+        elif self.billing_unit == BillingUnit.TOKEN:
+            if self.input_price is None or self.output_price is None:
+                raise ValueError(
+                    "token billing requires both input_price and output_price"
+                )
+            if self.request_price is not None:
+                raise ValueError("token billing must not set request_price")
+        return self
 
 
 class PriceSnapshot(Entity):

@@ -12,10 +12,11 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aethergate.errors import AccountingInvariantError
 from aethergate.persistence import models
 
 
@@ -249,7 +250,11 @@ async def commit_budget_reservations_conservative(
 async def release_budget_reservations(
     session: AsyncSession, *, request_id: str, now: datetime
 ) -> None:
-    """Release still-reserved budget for a request that never dispatched."""
+    """Release still-reserved budget for a request that never dispatched.
+
+    Detaches the released reservation from its pre-dispatch price snapshot so the
+    caller may discard the snapshot without violating the foreign key.
+    """
     reservations = await list_budget_reservations_for_request(session, request_id=request_id)
     for reservation in reservations:
         if reservation.state != "reserved":
@@ -263,6 +268,20 @@ async def release_budget_reservations(
         reservation.reserved_amount = Decimal("0")
         reservation.state = "released"
         reservation.released_at = now
+        reservation.price_snapshot_id = None
+
+
+async def discard_price_snapshot(
+    session: AsyncSession, *, snapshot_id: str
+) -> None:
+    """Delete a pre-dispatch price snapshot that never backed dispatched usage.
+
+    Only safe for a snapshot whose owning request never reached durable dispatch
+    intent (no usage record and no dispatched historical usage reference it).
+    """
+    await session.execute(
+        delete(models.PriceSnapshot).where(models.PriceSnapshot.id == snapshot_id)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +349,70 @@ async def create_usage_record(
     result = await session.execute(
         select(models.UsageRecord).where(models.UsageRecord.request_id == request_id)
     )
-    return result.scalar_one()
+    row = result.scalar_one()
+    _assert_usage_record_matches(
+        row,
+        execution_attempt_id=execution_attempt_id,
+        project_id=project_id,
+        principal_id=principal_id,
+        api_credential_id=api_credential_id,
+        model_alias_id=model_alias_id,
+        route_binding_id=route_binding_id,
+        provider_account_id=provider_account_id,
+        price_snapshot_id=price_snapshot_id,
+        billing_unit=billing_unit,
+        input_units=input_units,
+        output_units=output_units,
+        request_units=request_units,
+        amount=amount,
+        currency=currency,
+    )
+    return row
+
+
+def _assert_usage_record_matches(
+    row: models.UsageRecord,
+    *,
+    execution_attempt_id: str,
+    project_id: str | None,
+    principal_id: str | None,
+    api_credential_id: str | None,
+    model_alias_id: str,
+    route_binding_id: str,
+    provider_account_id: str,
+    price_snapshot_id: str,
+    billing_unit: str,
+    input_units: int,
+    output_units: int,
+    request_units: int | None,
+    amount: Decimal,
+    currency: str,
+) -> None:
+    """Reject an idempotent replay whose canonical settlement fields differ."""
+    mismatches = [
+        field
+        for field, actual, expected in (
+            ("execution_attempt_id", row.execution_attempt_id, execution_attempt_id),
+            ("project_id", row.project_id, project_id),
+            ("principal_id", row.principal_id, principal_id),
+            ("api_credential_id", row.api_credential_id, api_credential_id),
+            ("model_alias_id", row.model_alias_id, model_alias_id),
+            ("route_binding_id", row.route_binding_id, route_binding_id),
+            ("provider_account_id", row.provider_account_id, provider_account_id),
+            ("price_snapshot_id", row.price_snapshot_id, price_snapshot_id),
+            ("billing_unit", row.billing_unit, billing_unit),
+            ("input_units", row.input_units, input_units),
+            ("output_units", row.output_units, output_units),
+            ("request_units", row.request_units, request_units),
+            ("amount", row.amount, amount),
+            ("currency", row.currency, currency),
+        )
+        if actual != expected
+    ]
+    if mismatches:
+        raise AccountingInvariantError(
+            f"usage record {row.id} replay conflicts on {', '.join(mismatches)}"
+        )
 
 
 async def get_ledger_entry_by_idempotency_key(
@@ -379,4 +461,40 @@ async def create_ledger_entry(
             models.LedgerEntry.idempotency_key == idempotency_key
         )
     )
-    return result.scalar_one()
+    row = result.scalar_one()
+    _assert_ledger_entry_matches(
+        row,
+        project_id=project_id,
+        usage_record_id=usage_record_id,
+        entry_type=entry_type,
+        amount=amount,
+        currency=currency,
+    )
+    return row
+
+
+def _assert_ledger_entry_matches(
+    row: models.LedgerEntry,
+    *,
+    project_id: str | None,
+    usage_record_id: str | None,
+    entry_type: str,
+    amount: Decimal,
+    currency: str,
+) -> None:
+    """Reject an idempotent replay whose canonical settlement fields differ."""
+    mismatches = [
+        field
+        for field, actual, expected in (
+            ("project_id", row.project_id, project_id),
+            ("usage_record_id", row.usage_record_id, usage_record_id),
+            ("entry_type", row.entry_type, entry_type),
+            ("amount", row.amount, amount),
+            ("currency", row.currency, currency),
+        )
+        if actual != expected
+    ]
+    if mismatches:
+        raise AccountingInvariantError(
+            f"ledger entry {row.id} replay conflicts on {', '.join(mismatches)}"
+        )

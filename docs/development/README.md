@@ -121,7 +121,7 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 ## Migrations
 
-The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0007`; `0003`
+The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0008`; `0003`
 adds scheduler tables, `endpoints.max_concurrency`, and a `BigInteger` fencing token; `0004` adds a
 positive-concurrency CHECK on `endpoints` and reconciliation metadata on `inference_requests`;
 `0005` adds shared provider-account request/token quotas — `quota_limits`, `quota_windows`,
@@ -129,5 +129,7 @@ positive-concurrency CHECK on `endpoints` and reconciliation metadata on `infere
 `route_bindings.default_output_tokens`, `inference_requests.wait_reason`; `0006` hardens shared-quota
 admission metadata; `0007` adds the accounting foundation — `price_policies`, `price_snapshots`,
 `project_budget_policies`, `budget_windows`, `budget_reservations`, `usage_records`,
-`ledger_entries`, `inference_requests.price_snapshot_id`). Schema is applied only
-via `scripts/dev/v2 migrate`; startup never calls `create_all()`.
+`ledger_entries`, `inference_requests.price_snapshot_id`; `0008` enforces accounting invariants — the
+one-enabled-price-policy-per-route partial unique index, billing-unit price-shape CHECK constraints,
+and a nullable `budget_reservations.price_snapshot_id` for the snapshot lifecycle). Schema is applied
+only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

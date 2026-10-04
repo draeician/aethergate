@@ -110,3 +110,28 @@ class SchedulerInvariantError(Exception):
     cannot move together (missing/terminal row, stale fence, or ownership
     mismatch). It is an internal correctness signal, never surfaced to clients.
     """
+
+
+class AccountingInvariantError(Exception):
+    """An accounting invariant was violated during settlement (internal).
+
+    Raised when an idempotent settlement replay supplies data that conflicts with
+    the already-persisted canonical record. It is an internal correctness signal,
+    never surfaced to clients. A conflicting replay must not mutate state.
+    """
+
+
+class PricePolicyConflictError(DomainError):
+    """A second enabled price policy would violate the one-per-route invariant.
+
+    Surfaces a clear domain/admin validation error instead of an unexpected
+    scheduler ``MultipleResultsFound``. The database partial unique index is the
+    authoritative backstop; this error is raised by the service/repository layer
+    when the conflict can be detected before commit.
+    """
+
+    def __init__(self, route_binding_id: str) -> None:
+        super().__init__(
+            f"route binding {route_binding_id!r} already has an enabled price policy"
+        )
+        self.route_binding_id = route_binding_id

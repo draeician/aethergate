@@ -55,14 +55,24 @@ admission/dispatch decision. Editing a `PricePolicy` never alters an existing sn
 
 A `PricePolicy` supports (Settled):
 
-- **Request pricing** — `billing_unit=request`; fixed `request_price`; exact pre-dispatch budget
-  reservation is possible without token estimation.
-- **Token pricing** — `billing_unit=token`; `input_price` / `output_price`; positive integer
-  `unit_scale` (e.g. price per 1,000,000 units); pre-dispatch reservation requires a trustworthy
-  input-token estimate plus a bounded output reservation.
+- **Request pricing** — `billing_unit=request`; fixed `request_price` (required); exact pre-dispatch
+  budget reservation is possible without token estimation. Token `input_price`/`output_price` must
+  be null/absent.
+- **Token pricing** — `billing_unit=token`; `input_price` / `output_price` (both required); positive
+  integer `unit_scale` (e.g. price per 1,000,000 units); `request_price` must be null/absent;
+  pre-dispatch reservation requires a trustworthy input-token estimate plus a bounded output
+  reservation.
 
-Both carry `currency` and `enabled`. No float prices; validation is billing-unit specific. No
+Both carry `currency` and `enabled`. No float prices; validation is billing-unit specific. Missing
+price is not equivalent to zero: an explicit `Decimal("0")` is a valid zero price, while a missing
+price for a required field is rejected at the domain, DTO, service, and database CHECK layers. No
 image/audio pricing behavior beyond contract extensibility in this task. (Settled)
+
+At most one enabled `PricePolicy` exists per `RouteBinding`. Disabled historical/edit records may
+coexist; the database enforces the invariant with a partial unique index
+(`uq_price_policies_one_enabled_per_route` on `route_binding_id WHERE enabled`), and the
+service/repository layer surfaces a conflict as a clear domain validation error
+(`PricePolicyConflictError`) rather than a scheduler `MultipleResultsFound`. (Settled)
 
 ### Price snapshot
 
@@ -79,7 +89,10 @@ A `PriceSnapshot` captures, at minimum (Settled):
 - captured timestamp.
 
 Once created, application code must not update/delete a snapshot during normal operation. A request
-that never reaches dispatch never creates historical priced usage. (Settled)
+that never reaches durable dispatch intent must not retain a historical active price snapshot: the
+snapshot is captured at reservation (so budget reservations are priced deterministically) but is
+discarded when the request never dispatches (pre-dispatch cancel, reclaim, or dispatch failure). A
+request that never reaches dispatch never creates historical priced usage. (Settled)
 
 ## Project budget policy
 
@@ -196,8 +209,12 @@ Settlement can be retried after worker/API/process interruption without double c
 - DB uniqueness/idempotency for `UsageRecord`;
 - DB uniqueness/idempotency for the usage `LedgerEntry`;
 - `BudgetReservation` settles at most once;
-- repeated settlement with the same data is a no-op/same result;
-- conflicting second settlement is an explicit invariant error, never silent overwrite;
+- repeated settlement with the same canonical data is a no-op/same result;
+- conflicting second settlement raises `AccountingInvariantError` (internal-only), never a silent
+  overwrite;
+- the canonical equality set excludes volatile timestamps: for `UsageRecord` it is
+  attempt/project/principal/credential/alias/route/account/snapshot/billing-unit/input/output/
+  request-units/amount/currency; for `LedgerEntry` it is project/usage-record/type/amount/currency;
 - no double budget commit; no duplicate ledger debit.
 
 Crash/retry fault-injection tests cover this.
@@ -207,15 +224,17 @@ Crash/retry fault-injection tests cover this.
 Monetary budget evaluation participates in the same all-or-nothing admission plan as request/token
 quota and endpoint physical capacity. Deterministic lock order (Settled):
 
-1. request / scheduling-scope row(s);
-2. project budget policy / budget windows (stable ID order);
-3. provider quota group / limit / windows (stable ID order);
-4. endpoint physical capacity;
-5. request / attempt / reservation mutations.
+1. request / scheduling-scope row(s) (scope = endpoint + quota group + project);
+2. active price policy;
+3. project budget policy / budget windows (stable ID order);
+4. provider quota group / limit / windows (stable ID order);
+5. endpoint physical capacity;
+6. request / attempt / reservation mutations.
 
 No open database transaction spans provider inference. Budget cannot oversubscribe, quota cannot
 oversubscribe, endpoint cannot oversubscribe, and no partial reservation survives a failed combined
-admission.
+admission. A budget-blocked project does not head-of-line block another project sharing the same
+endpoint/quota resources (the scheduling scope includes project identity).
 
 ## Domain / admin contract foundation
 

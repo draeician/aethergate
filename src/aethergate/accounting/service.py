@@ -14,15 +14,17 @@ from aethergate.domain.value_objects import quantize_money
 from aethergate.persistence import models
 
 
-def _as_decimal(value: Decimal | None) -> Decimal:
-    return value if value is not None else Decimal("0")
+def _require_price(value: Decimal | None, field: str) -> Decimal:
+    if value is None:
+        raise ValueError(f"{field} is required for this billing unit")
+    return value
 
 
 def request_reservation_amount(price: models.PricePolicy | models.PriceSnapshot) -> Decimal:
     """Exact per-request monetary amount for a request-priced route."""
     if price.billing_unit != BillingUnit.REQUEST.value:
         raise ValueError("request_reservation_amount requires a request-priced route")
-    return quantize_money(_as_decimal(price.request_price))
+    return quantize_money(_require_price(price.request_price, "request_price"))
 
 
 def token_amount(
@@ -41,9 +43,11 @@ def token_amount(
     scale = Decimal(str(price.unit_scale))
     if scale <= 0:
         raise ValueError("unit_scale must be positive")
+    input_price = _require_price(price.input_price, "input_price")
+    output_price = _require_price(price.output_price, "output_price")
     amount = (
-        Decimal(input_units) * _as_decimal(price.input_price)
-        + Decimal(output_units) * _as_decimal(price.output_price)
+        Decimal(input_units) * input_price
+        + Decimal(output_units) * output_price
     ) / scale
     return quantize_money(amount)
 

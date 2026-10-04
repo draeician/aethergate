@@ -155,28 +155,32 @@ def _eligible_queued_predicate(now: datetime):
 
 async def list_queued_scopes(
     session: AsyncSession, now: datetime
-) -> list[tuple[str | None, str | None, datetime]]:
+) -> list[tuple[str | None, str | None, str | None, datetime]]:
     """Return distinct scheduling scopes with eligible queued work, oldest first.
 
-    A scheduling scope is ``(endpoint_id, quota_group_id)``. A null endpoint or
-    null quota group is its own bucket. FIFO is per scope; ordering across scopes
-    is by each scope's oldest eligible queued request, so a quota-blocked scope
-    never strands unrelated capacity on the same endpoint.
+    A scheduling scope is ``(endpoint_id, quota_group_id, project_id)``. A null
+    endpoint, null quota group, or null project is its own bucket. Including the
+    project prevents a budget-blocked project from head-of-line blocking another
+    project sharing the same endpoint/quota scope. FIFO is per scope; ordering
+    across scopes is by each scope's oldest eligible queued request, so a
+    quota-blocked scope never strands unrelated capacity on the same endpoint.
     """
     result = await session.execute(
         select(
             models.InferenceRequest.endpoint_id,
             models.InferenceRequest.quota_group_id,
+            models.InferenceRequest.project_id,
             func.min(models.InferenceRequest.created_at),
         )
         .where(*_eligible_queued_predicate(now))
         .group_by(
             models.InferenceRequest.endpoint_id,
             models.InferenceRequest.quota_group_id,
+            models.InferenceRequest.project_id,
         )
         .order_by(func.min(models.InferenceRequest.created_at))
     )
-    return [(row[0], row[1], row[2]) for row in result.all()]
+    return [(row[0], row[1], row[2], row[3]) for row in result.all()]
 
 
 async def claim_next_queued_for_scope(
@@ -184,6 +188,7 @@ async def claim_next_queued_for_scope(
     now: datetime,
     endpoint_id: str | None,
     quota_group_id: str | None,
+    project_id: str | None,
 ) -> models.InferenceRequest | None:
     """Claim the oldest eligible queued request for one scheduling scope (FIFO).
 
@@ -198,9 +203,18 @@ async def claim_next_queued_for_scope(
         group_predicate = models.InferenceRequest.quota_group_id.is_(None)
     else:
         group_predicate = models.InferenceRequest.quota_group_id == quota_group_id
+    if project_id is None:
+        project_predicate = models.InferenceRequest.project_id.is_(None)
+    else:
+        project_predicate = models.InferenceRequest.project_id == project_id
     stmt = (
         select(models.InferenceRequest)
-        .where(endpoint_predicate, group_predicate, *_eligible_queued_predicate(now))
+        .where(
+            endpoint_predicate,
+            group_predicate,
+            project_predicate,
+            *_eligible_queued_predicate(now),
+        )
         .order_by(models.InferenceRequest.created_at.asc(), models.InferenceRequest.id.asc())
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -368,6 +382,15 @@ async def release_reservation(session: AsyncSession, reservation_id: str, now: d
         update(models.Reservation)
         .where(models.Reservation.id == reservation_id)
         .values(released_at=now)
+    )
+
+
+async def clear_price_snapshot_reference(session: AsyncSession, request_id: str) -> None:
+    """Detach a request's pre-dispatch price snapshot reference before deletion."""
+    await session.execute(
+        update(models.InferenceRequest)
+        .where(models.InferenceRequest.id == request_id)
+        .values(price_snapshot_id=None)
     )
 
 
