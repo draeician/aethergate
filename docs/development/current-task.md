@@ -1,31 +1,22 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-006
+AGV2-007
 
 ## Title
-Scheduler phase 1 correctness hardening before quota expansion
+Close residual scheduler invariants before quota expansion
 
 ## Ownership
 Primary: scheduler/queueing  
-Coordinating: platform/testing, provider adapters, OpenAI API surface
+Coordinating: contracts, platform/testing, OpenAI API surface
 
 ## Why This Task Exists
 
-AGV2-005 proved the primary happy path on nomnom:
+AGV2-006 materially hardened scheduler phase 1 and passed the required nomnom failure-mode tests.
+A code-level review still found a small set of correctness gaps that should be fixed before adding
+RPM/TPM/shared-account quotas.
 
-- six concurrent requests;
-- endpoint `max_concurrency=2`;
-- four requests durably queued;
-- FIFO dispatch for the single-endpoint test;
-- two workers sharing one PostgreSQL scheduler;
-- queued work survived worker restart;
-- streaming traversed the scheduler.
-
-Before adding RPM/TPM/shared-account quotas or budgets, fix the correctness gaps exposed by review of
-the actual phase-1 implementation.
-
-Do not expand scheduler scope until these invariants are solid.
+This is a narrow invariant-closure task. Do not expand into new quota features yet.
 
 ## Before You Start
 
@@ -39,347 +30,279 @@ Do not expand scheduler scope until these invariants are solid.
    - `docs/architecture/scheduler.md`
    - `src/aethergate/scheduler/repository.py`
    - `src/aethergate/scheduler/service.py`
-   - `src/aethergate/worker.py`
+   - `src/aethergate/contracts/admin_v1.py`
    - `src/aethergate/api/openai_chat.py`
-   - scheduler tests and migrations
-4. Preserve AGV2-005's successful OpenAI/inference behavior.
+   - `src/aethergate/persistence/models.py`
+4. Preserve the successful AGV2-004 through AGV2-006 behavior.
 5. Do not modify/delete legacy v1 `app/` or `frontend/src/`.
 6. Do not commit unrelated local/untracked files.
 
-## Required Corrections
+## Required Fixes
 
-### 1. Healthy in-flight work must renew its lease
+### 1. Lease renewal must be all-or-nothing for request + attempt + worker identity
 
-Current phase-1 behavior sets a lease once before dispatch but does not renew it while a healthy
-request is executing.
+Current `renew_lease` updates the request row, then updates the execution-attempt row but does not
+check whether the attempt update succeeded. It also does not verify the worker identity explicitly.
 
-That can cause a long-running but healthy inference to be marked `outcome_unknown` merely because it
-outlived `worker_lease_seconds`.
+Fix this invariant:
 
-Implement active lease renewal / heartbeat for dispatched and streaming work.
+A heartbeat is successful only if the same current owner still owns both the request and the active
+execution attempt.
 
 Requirements:
 
-- renew both request and attempt ownership for the current fencing token;
-- renewal must be conditional on worker identity/fence/state;
-- stale workers must not renew after ownership changes;
-- heartbeat must stop promptly when execution terminates;
-- healthy requests lasting multiple lease periods must never become `outcome_unknown`;
-- actual worker death/loss after dispatch must still become `outcome_unknown` conservatively;
-- no long-lived DB transaction during provider inference.
+- match `request_id`;
+- match `attempt_id`;
+- match `worker_id`;
+- match `fencing_token`;
+- require active dispatched/streaming state;
+- update request and attempt lease expiries in one transaction;
+- if either expected row cannot be renewed, the heartbeat operation must fail atomically;
+- do not leave one row renewed and the other stale;
+- a stale worker must never keep one side alive.
 
-Choose heartbeat frequency safely below lease duration and validate settings so an invalid heartbeat /
-lease relationship fails configuration.
+Update `ClaimedWork`/call signatures as needed so worker identity is available to renewal.
 
-### 2. Recovery must update request and attempt consistently
+Add tests where:
+- request fence is stale;
+- attempt fence is stale;
+- request worker_id differs;
+- attempt worker_id differs;
+- attempt row is missing/terminal;
+- no partial lease extension is committed in any failed case.
 
-When post-dispatch ownership expires:
+### 2. Coupled scheduler state transitions must not partially succeed
 
-- request -> `outcome_unknown`;
-- corresponding execution attempt -> `outcome_unknown`;
-- reservation remains active;
-- worker/fence history remains auditable;
+Review and harden all transitions that logically require both request + attempt state to move
+together.
+
+At minimum inspect:
+
+- reserved -> dispatched;
+- heartbeat renewal;
+- successful terminal settlement;
+- failed/cancelled terminal settlement;
+- outcome_unknown recovery.
+
+Current code ignores the result of `mark_attempt_dispatched` and `settle_attempt` after successfully
+updating the request.
+
+Required invariant:
+
+- if a transition requires both request and attempt, either both expected rows transition in one DB
+  transaction or the transaction fails/rolls back;
+- never contact upstream unless dispatch intent is durably recorded on both request and attempt;
+- never release a reservation after only one side of terminal settlement succeeded;
+- unexpected rowcount/state mismatch must be surfaced as a scheduler invariant error and logged
+  without content/secrets;
+- do not silently repair by guessing.
+
+Add an explicit internal `SchedulerInvariantError` or equivalent.
+
+Add fault-injection tests that deliberately make the attempt/request state inconsistent before each
+transition and prove no partial commit or premature capacity release occurs.
+
+### 3. Enforce total request lifetime independently of the API waiter
+
+AGV2-006 correctly aligned the API wait with persisted `expires_at`, but execution lifetime is
+still primarily driven by the API-side waiter calling cancellation.
+
+The scheduler/worker must independently enforce the persisted total-lifetime deadline.
+
+Requirements:
+
+- queued requests: existing queue-wait/total expiry remains correct;
+- reserved pre-dispatch requests past total lifetime must not dispatch;
+- dispatched/streaming requests reaching `expires_at` must trigger cancellation/termination handling
+  even if the API process disappeared;
+- worker heartbeat must not keep an already-expired execution alive indefinitely;
+- where upstream cancellation is known and successful -> terminal expired/cancelled and release;
+- where execution may still be running and termination outcome is ambiguous -> `outcome_unknown`
+  and keep reservation;
 - no automatic retry;
-- no slot release until explicit reconciliation.
+- API presence is not required for deadline enforcement.
 
-Pre-dispatch reclaim must also be concurrency-safe when multiple workers perform recovery.
+The worker should enforce this using durable state/deadline, not a process-local timer as the source
+of truth.
 
-Use row locking / conditional updates so concurrent recovery loops cannot produce inconsistent attempt,
-request, or reservation state.
+Add tests for:
+- API process/waiter absent;
+- execution runs beyond `expires_at`;
+- stream runs beyond `expires_at`;
+- expired request does not keep receiving lease renewal forever;
+- conservative outcome if upstream task cannot be proven stopped.
 
-### 3. Remove cross-endpoint head-of-line blocking
+### 4. Endpoint `max_concurrency` must exist in admin v1 contracts
 
-Current scheduler selects the globally oldest queued request. If that request's endpoint is full, the
-worker returns `full`, which can prevent eligible requests for other endpoints from dispatching.
+AGV2-006 added domain + DB + devseed validation, but the initial admin DTOs still omit the field.
 
-Required scheduling rule for this phase:
+Update:
 
-- FIFO **per endpoint**;
-- a saturated endpoint must not block an unrelated endpoint with available capacity;
-- within one endpoint, older eligible queued work dispatches before newer work;
-- no silent global reordering claim beyond what is required to avoid unrelated-endpoint starvation.
-
-Implement this correctly under multiple workers.
-
-Document the precise ordering rule in `docs/architecture/scheduler.md`.
-
-### 4. Make queue-cap admission atomic
-
-Current admission performs a count followed by insert. Concurrent API requests can race and exceed
-`queue_max_requests`.
-
-Enforce the global queue bound transactionally.
-
-Acceptable approaches include:
-
-- a scheduler-control/admission row locked during count+insert;
-- PostgreSQL advisory locking with a clearly documented stable lock key;
-- another PostgreSQL-transactional design with equivalent correctness.
-
-Do not use a process-local semaphore/counter.
-
-Add a concurrent test proving the configured cap cannot be exceeded.
-
-### 5. Enforce queue-wait deadline separately from total lifetime
-
-`queue_wait_until` is persisted but currently not enforced by queued-request expiry.
-
-Semantics:
-
-- `queue_max_wait_seconds`: maximum time a request may remain undispatched in the queue;
-- `queue_total_lifetime_seconds`: end-to-end maximum lifetime including execution/streaming.
+- `EndpointCreate`
+- `EndpointRead`
+- `EndpointUpdate`
 
 Requirements:
 
-- queued requests crossing `queue_wait_until` expire without contacting upstream;
-- requests already dispatched are governed by total lifetime, not queue-wait deadline;
-- API waiting deadline must correspond to the persisted request deadline, not a fresh independent
-  timer that can drift from DB state;
-- timeout returned to the client must not leave forgotten queued work that later dispatches.
+- create has an explicit positive default or required value consistent with the domain model;
+- read always exposes effective configured physical concurrency;
+- update accepts positive integer only;
+- 0 and negative values rejected by Pydantic before persistence;
+- docs updated so future web/CLI/admin API clients can configure endpoint capacity through the shared
+  contract.
 
-### 6. Client disconnect/cancellation must reach durable scheduler state
+Do not implement the admin HTTP API yet.
 
-Streaming API generator currently does not reliably request durable cancellation when the client
-disconnects. Non-streaming timeout/disconnect also needs explicit behavior.
+### 5. Reconciliation semantics for `succeeded` must be coherent
 
-Requirements:
+Current reconciliation can mark an `outcome_unknown` request as `succeeded` without supplying a
+recoverable result payload. That can leave a logically succeeded request with no completion/usage
+data.
 
-#### While queued
-- disconnect/cancel -> durable cancellation request;
-- queued request must not later dispatch;
-- cancellation transitions to a terminal state and no capacity reservation is created.
+Choose and document one safe behavior:
 
-#### Reserved but pre-dispatch
-- cancellation may safely cancel/release before upstream contact if ownership/state proves dispatch
-  has not begun.
+Preferred:
+- phase-1 reconciliation allows only `failed` or `cancelled` unless the operator supplies a
+  validated reconstructed result through an explicit typed/internal path.
 
-#### Dispatched/streaming
-- cancellation requests upstream stream/request closure where supported;
-- if upstream cancellation outcome is known, settle cancelled and release capacity;
-- if cancellation outcome is ambiguous, use `outcome_unknown` conservatively and keep capacity;
-- never replay/retry automatically.
+If supporting `succeeded`:
+- require complete validated result metadata/content;
+- encrypt the reconstructed result at rest;
+- never create a `succeeded` request that the normal result reader cannot interpret.
 
-FastAPI/ASGI disconnect handling should be tested; do not rely solely on generator garbage collection.
+Do not invent result content.
 
-### 7. Do not synthesize successful stream termination after a scheduler failure
+Update CLI help/tests accordingly.
 
-The current stream API can emit a synthetic `finish_reason="stop"` and `[DONE]` even when the
-scheduler terminal state is failed/cancelled/expired/outcome_unknown and no finish event was observed.
+### 6. Streaming terminal behavior must be documented precisely
 
-Correct this.
+AGV2-006 correctly stopped synthesizing `finish_reason="stop"` for failed streams, but still emits
+the SSE terminal marker `[DONE]` for terminal failures.
 
-Requirements:
-
-- successful terminal stream -> standard completion termination;
-- pre-first-byte failure may return an appropriate HTTP/OpenAI structured error when still possible;
-- failure after stream headers/content started must terminate in the safest compatible way without
-  pretending successful model completion;
-- do not invent `finish_reason=stop` for failed/cancelled/outcome_unknown executions;
-- document the chosen behavior and test official OpenAI SDK handling where practical.
-
-### 8. Endpoint concurrency must be constrained positive at every layer
-
-`Endpoint.max_concurrency` must be >= 1.
-
-Enforce it:
-
-- domain/admin DTO validation;
-- persistence/database CHECK constraint via new migration (do not rewrite `0003`);
-- dev seed validation;
-- tests.
-
-Add migration `0004` or later.
-
-### 9. Worker shutdown must be graceful
-
-The worker currently installs signal handlers that call `loop.stop()` while `run_until_complete()`
-is active.
-
-Replace this with cooperative graceful shutdown.
+Determine and document the intended Chat Completions compatibility behavior using the pinned OpenAI
+contract and official SDK behavior.
 
 Requirements:
 
-- SIGTERM/SIGINT stops new claiming;
-- active execution is not abruptly abandoned by event-loop teardown;
-- bounded graceful shutdown behavior is documented;
-- if forced shutdown occurs during dispatched work, lease/recovery semantics remain conservative;
-- normal Docker/Podman stop does not produce event-loop-stopped runtime errors.
+- do not claim a failed upstream generation completed successfully;
+- do not synthesize a normal finish reason for failure;
+- preserve official SDK interoperability;
+- document whether `[DONE]` is a transport termination marker vs successful model completion;
+- test the chosen behavior explicitly.
 
-## Explicit Reconciliation Path for outcome_unknown
-
-Add a development/internal reconciliation service/CLI operation sufficient to test phase-1 recovery.
-
-It must require an explicit operator action to:
-
-- inspect an `outcome_unknown` request without content;
-- mark it reconciled as failed/cancelled/succeeded only when an operator supplies the disposition;
-- release the held reservation only as part of explicit reconciliation;
-- record the reconciliation action in durable scheduler metadata/audit-friendly fields.
-
-Do not build the full admin API/UI yet.
-
-Do not allow a generic "release all stuck slots" shortcut.
+No custom queue-status SSE events.
 
 ## Migrations
 
-Do not rewrite `0001`, `0002`, or `0003`.
+Do not rewrite `0001` through `0004`.
 
-Add `0004` (and additional revision only if truly needed) for:
+A new migration is required only if a persisted schema change is necessary for this task.
+Do not create a migration just to change Python behavior/contracts.
 
-- endpoint positive-concurrency CHECK;
-- any scheduler-control/admission state required for atomic queue caps;
-- reconciliation/audit metadata required by this task.
+If a migration is added, verify:
+- existing nomnom DB -> latest;
+- empty DB -> latest;
+- downgrade where practical.
 
-Upgrade from an existing `0003` nomnom database must succeed without data loss.
+## Real Nomnom Verification
 
-Also verify migration from empty database through latest head.
+Use the existing Docker/Podman workflow and dynamic API host port.
 
-## Real Nomnom Verification — Required
+Required real checks:
 
-Use the existing Docker/Podman workflow and dynamically allocated host port.
+1. official OpenAI SDK non-stream still succeeds;
+2. official OpenAI SDK stream still succeeds;
+3. six-request/two-slot invariant still succeeds;
+4. long-running request survives multiple healthy heartbeat periods;
+5. force an attempt-side ownership mismatch in a controlled DB test environment and prove no partial
+   heartbeat/settlement transition commits;
+6. run a request beyond a deliberately short total-lifetime deadline with the API waiter absent or
+   disconnected and prove scheduler/worker enforcement still occurs;
+7. confirm endpoint capacity can be represented/validated via the admin v1 DTO contract.
 
-Verify current backend/model rather than assuming it is unchanged.
-
-Run real tests that demonstrate:
-
-### Long-running lease heartbeat
-- configure a deliberately short lease suitable for testing;
-- run inference that lasts longer than at least two lease periods;
-- prove the request remains dispatched/streaming and succeeds;
-- prove it never transitions to `outcome_unknown` while worker heartbeat is healthy.
-
-### Worker death after dispatch
-- begin a long request;
-- prove durable dispatch intent exists;
-- terminate the owning worker hard enough that heartbeat stops;
-- prove another worker/recovery marks it `outcome_unknown`;
-- prove its reservation remains active;
-- prove it is not retried;
-- explicitly reconcile it and prove the slot is then released.
-
-Do not kill/reconfigure the external inference backend.
-
-### Cross-endpoint scheduling
-Create two independently configured endpoint records using the available backend if necessary:
-
-- endpoint A max_concurrency=1;
-- endpoint B max_concurrency=1;
-- hold A busy and queue another request for A;
-- enqueue an eligible request for B;
-- prove B dispatches without waiting for A's queued request;
-- prove FIFO remains correct within A.
-
-### Queue cap race
-Using concurrent API admissions against a small configured queue maximum:
-
-- prove committed queued count never exceeds the configured maximum;
-- excess clients receive the expected overload error.
-
-### Queue wait expiry
-- hold endpoint capacity busy;
-- enqueue a request with short queue-wait deadline;
-- prove it expires without an upstream attempt;
-- prove it never dispatches afterward.
-
-### Client disconnect
-At minimum verify a queued streaming request disconnected before dispatch becomes cancelled and never
-hits upstream.
-
-If practical, also verify cancellation during active streaming.
+Do not alter or restart the external inference backend except normal read-only/probe usage.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. healthy lease heartbeat across multiple lease periods;
-2. stale fence cannot renew lease;
-3. dead-worker post-dispatch expiry -> request + attempt outcome_unknown;
-4. outcome_unknown reservation remains held;
-5. explicit reconciliation releases exactly the intended reservation;
-6. concurrent recovery workers are idempotent/safe;
-7. per-endpoint FIFO;
-8. saturated endpoint does not block unrelated endpoint;
-9. concurrent queue-cap admission cannot exceed configured cap;
-10. queue_wait_until expiry before dispatch;
-11. API timeout/cancel does not leave later-dispatchable queued work;
-12. queued client disconnect cancellation;
-13. active-stream cancellation behavior;
-14. failed stream does not synthesize successful stop;
-15. max_concurrency=0/-1 rejected by DTO/domain/dev seed;
-16. database CHECK rejects invalid endpoint capacity;
-17. migration 0003 -> 0004;
-18. empty DB -> latest migration;
-19. graceful SIGTERM worker shutdown;
-20. original six-request/two-slot invariant still passes;
-21. scheduled official OpenAI SDK non-stream remains green;
-22. scheduled official OpenAI SDK streaming remains green.
+1. request+attempt heartbeat is atomic;
+2. worker_id mismatch rejects renewal;
+3. attempt mismatch rejects renewal with no partial request update;
+4. reserved->dispatched is atomic;
+5. terminal settlement is atomic;
+6. reservation not released after failed partial settlement;
+7. worker enforces total lifetime without API waiter;
+8. heartbeat stops extending expired executions;
+9. conservative outcome for ambiguous expiry;
+10. EndpointCreate max_concurrency validation;
+11. EndpointRead exposes max_concurrency;
+12. EndpointUpdate rejects zero/negative;
+13. reconciliation cannot create unreadable succeeded result;
+14. failed stream transport termination behavior;
+15. original AGV2-006 recovery tests remain green;
+16. six-request/two-slot tests remain green;
+17. official SDK scheduled non-stream/stream tests remain green.
 
-## Preserve Existing Scope Boundaries
+## Still Deferred
 
-Still deferred:
+Do not implement yet:
 
-- provider RPM/RPD windows;
-- provider/account TPM/token reservations;
-- shared quota groups beyond endpoint concurrency;
+- provider RPM/RPD;
+- TPM/token reservation;
+- shared account quota windows;
 - project budgets;
 - retry/cooldown orchestration;
-- fairness policies beyond FIFO per endpoint;
-- full API-key/OIDC auth;
 - `/v1/responses`;
 - embeddings;
-- admin CRUD API;
-- React/UI;
+- full auth/OIDC;
+- admin HTTP CRUD API;
+- web UI;
 - accounting settlement;
 - v1 SQLite migration.
 
-Do not add these in this task.
-
 ## Documentation
 
-Update:
+Update as needed:
 
 - `docs/architecture/scheduler.md`
+- `docs/contracts/admin-v1-foundation.md`
+- `docs/contracts/domain-model.md`
 - `docs/development/README.md`
-- `docs/contracts/domain-model.md` if schema concepts changed
 - `docs/development/agent-handoff.md`
 
-Correct any handoff starting-commit metadata from the prior task if necessary, but do not rewrite
-historical commits.
+Do not modify the dated architecture audit.
 
 ## Verification Before Commit
 
 - full test suite;
 - containerized tests;
-- migration 0003 -> latest;
-- empty DB -> latest;
+- migrations if changed;
 - ruff/lint;
 - `git diff --check`;
 - secret scan;
 - legacy `app/` and `frontend/src/` untouched;
 - dated audit unchanged;
-- all required nomnom failure/concurrency scenarios completed.
+- required nomnom verification complete.
 
 ## Handoff
 
 Update `docs/development/agent-handoff.md` with concise evidence for:
 
 - implementation commit(s);
-- lease heartbeat behavior;
-- dead-worker outcome_unknown test;
-- explicit reconciliation;
-- cross-endpoint no-HOL test;
-- atomic queue-cap race;
-- queue-wait expiry;
-- disconnect/cancellation behavior;
-- graceful worker stop;
-- latest migration;
-- test counts;
-- actual dynamic AetherGate test port;
-- current backend/model;
+- atomic heartbeat proof;
+- atomic dispatch/settlement proof;
+- independent total-lifetime enforcement;
+- admin DTO capacity contract;
+- reconciliation semantics;
+- stream termination decision;
+- test count;
+- dynamic AetherGate test port;
+- backend/model;
 - issues/risks;
 - exactly one recommended next step.
 
-Do not include prompts, completions, secrets, encryption keys, or large logs.
+No prompt/completion bodies, credentials, keys, or large logs.
 
 ## Commit and Push
 
@@ -387,7 +310,7 @@ Use conventional commits on branch `v2`.
 
 Suggested primary commit:
 
-`fix(scheduler): harden leases admission and cancellation`
+`fix(scheduler): close residual ownership and deadline invariants`
 
 A handoff-only follow-up commit is allowed.
 
@@ -395,6 +318,5 @@ A handoff-only follow-up commit is allowed.
 
 Never push directly to `main`.
 
-The task is complete only when the remote `origin/v2` contains the changes and updated handoff, and
-the required nomnom failure-mode tests pass or a genuine environmental blocker is documented with
-non-sensitive evidence.
+The task is complete only when `origin/v2` contains the changes and updated handoff and all required
+nomnom checks pass or a genuine blocker is documented with non-sensitive evidence.
