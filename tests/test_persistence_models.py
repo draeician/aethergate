@@ -71,3 +71,14 @@ def test_scheduler_content_columns_are_binary_not_text():
     for name, coltype in event_columns.items():
         if name == "event_encrypted":
             assert not isinstance(coltype, sa.Text), f"{name} must not be text"
+
+
+def test_endpoint_max_concurrency_check_constraint_present():
+    constraints = models.Endpoint.__table__.constraints
+    names = {c.name for c in constraints}
+    assert "ck_endpoints_max_concurrency_positive" in names
+
+
+def test_inference_request_reconciliation_columns_present():
+    columns = {c.name for c in models.InferenceRequest.__table__.columns}
+    assert {"reconciled_state", "reconciled_at", "reconciled_by"} <= columns

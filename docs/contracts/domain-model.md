@@ -21,6 +21,11 @@ through `outcome_unknown`:
 `validated -> queued -> reserved -> dispatched -> streaming -> succeeded/failed/cancelled/expired`
 plus `outcome_unknown`.
 
+`outcome_unknown` is resolved only by explicit operator reconciliation: an operator supplies a
+disposition (`failed`/`cancelled`/`succeeded`) for a request whose post-dispatch lease expired, and
+the reconciliation action is recorded durably (`reconciled_state`, `reconciled_at`, `reconciled_by`)
+as part of releasing the held reservation. There is no automatic replay or bulk slot release.
+
 ## Value objects
 
 `domain/value_objects.py` defines `Money` and `NonNegativeMoney` as fixed-point `Decimal`

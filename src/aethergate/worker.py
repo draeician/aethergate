@@ -3,12 +3,18 @@
 A separate process from the API. It repeatedly:
   1. runs conservative recovery (expire overdue queued work, reclaim safely
      pre-dispatch leases, surface ambiguous post-dispatch leases);
-  2. claims one eligible queued request (FIFO, ``FOR UPDATE SKIP LOCKED``);
+  2. claims one eligible queued request (FIFO per endpoint, ``FOR UPDATE SKIP
+     LOCKED``);
   3. reserves endpoint capacity transactionally and records dispatch intent;
-  4. performs inference outside any database transaction;
+  4. performs inference outside any database transaction, renewing its lease;
   5. publishes encrypted result/events and settles terminal state.
 
 Bounded PostgreSQL polling is the wake-up mechanism for this phase.
+
+Shutdown is cooperative: SIGINT/SIGTERM stop new claiming, but an in-flight
+execution is allowed to finish (bounded by the inference timeout). A hard stop
+that abandons dispatched work leaves the lease to expire, which recovery then
+surfaces conservatively as ``outcome_unknown``.
 """
 
 from __future__ import annotations
@@ -42,18 +48,27 @@ async def _run_once(worker_id: str, service) -> str:
     return "idle"
 
 
-async def run(worker_id: str, *, once: bool = False, poll_interval: float = 0.2) -> None:
+async def run(
+    worker_id: str,
+    *,
+    once: bool = False,
+    poll_interval: float = 0.2,
+    shutdown_event: asyncio.Event | None = None,
+) -> None:
     service = build_scheduling_service()
     while True:
+        if shutdown_event is not None and shutdown_event.is_set():
+            logger.info("worker %s received shutdown; no longer claiming", worker_id)
+            return
         try:
             result = await _run_once(worker_id, service)
             if once:
                 return
-            if result == "idle":
-                await asyncio.sleep(poll_interval)
-            elif result == "full":
+            if result in ("idle", "full"):
                 await asyncio.sleep(poll_interval)
             # "dispatched"/"processed" loop again immediately to drain the queue.
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001 - the worker must survive transient failures
             logger.exception("worker cycle failed")
             await asyncio.sleep(poll_interval)
@@ -84,12 +99,23 @@ def main() -> None:
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    shutdown_event = asyncio.Event()
+
+    def _request_shutdown() -> None:
+        logger.info("worker %s received termination signal", worker_id)
+        shutdown_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, loop.stop)
+        loop.add_signal_handler(sig, _request_shutdown)
 
     try:
         loop.run_until_complete(
-            run(worker_id, once=args.once, poll_interval=args.poll_interval)
+            run(
+                worker_id,
+                once=args.once,
+                poll_interval=args.poll_interval,
+                shutdown_event=shutdown_event,
+            )
         )
     finally:
         loop.close()

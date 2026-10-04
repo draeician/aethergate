@@ -15,6 +15,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -117,6 +118,9 @@ class ProviderAccount(Base, TimestampMixin):
 
 class Endpoint(Base, TimestampMixin):
     __tablename__ = "endpoints"
+    __table_args__ = (
+        CheckConstraint("max_concurrency >= 1", name="ck_endpoints_max_concurrency_positive"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
     provider_account_id: Mapped[str] = mapped_column(
@@ -224,6 +228,13 @@ class InferenceRequest(Base, TimestampMixin):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # Explicit operator reconciliation of ambiguous (outcome_unknown) executions.
+    reconciled_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reconciled_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Reservation(Base, TimestampMixin):

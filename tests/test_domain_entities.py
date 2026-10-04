@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from aethergate.domain.entities import (
+    Endpoint,
     ModelAlias,
     PriceSnapshot,
     QuotaGroup,
@@ -76,6 +77,26 @@ def test_resource_references_use_typed_ids_not_integer_database_ids():
         )
 
 
+def test_endpoint_max_concurrency_must_be_positive():
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            Endpoint(
+                id=EndpointId("ep-bad"),
+                provider_account_id=ProviderAccountId("pa-1"),
+                name="bad",
+                base_destination="http://example.com",
+                max_concurrency=bad,
+            )
+    ok = Endpoint(
+        id=EndpointId("ep-ok"),
+        provider_account_id=ProviderAccountId("pa-1"),
+        name="ok",
+        base_destination="http://example.com",
+        max_concurrency=1,
+    )
+    assert ok.max_concurrency == 1
+
+
 def test_price_fields_use_decimal_not_float():
     p = PriceSnapshot(
         id=PriceSnapshotId("ps-1"),
@@ -97,4 +118,3 @@ def test_price_fields_use_decimal_not_float():
             price_out=Decimal("0.000002"),
             effective_from=_ts(),
         )
-

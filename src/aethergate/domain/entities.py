@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from aethergate.domain.enums import (
     BillingUnit,
@@ -119,6 +119,13 @@ class Endpoint(Entity):
     base_destination: str
     max_concurrency: int = 1
     is_active: bool = True
+
+    @field_validator("max_concurrency")
+    @classmethod
+    def _positive_concurrency(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("max_concurrency must be >= 1")
+        return value
 
 
 class QuotaGroup(Entity):

@@ -12,6 +12,7 @@
 #   test      run the test suite inside the api container
 #   workers   scale the scheduler worker service to N replicas (default 2)
 #   inspect   print a scheduler queue-state summary (no content)
+#   reconcile list | resolve <id> --disposition <state> --by <operator>
 #   down      stop the stack (keeps the postgres volume)
 #   reset     stop the stack and DELETE the postgres volume (destructive)
 
@@ -139,6 +140,18 @@ cmd_inspect() {
         python -m aethergate.inspect_queue
 }
 
+cmd_reconcile() {
+    ensure_password
+    local db_host
+    db_host="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' aethergate-v2-postgres 2>/dev/null || true)"
+    if [[ -z "$db_host" ]]; then
+        die "postgres container not running (try: scripts/dev/v2 up)"
+    fi
+    shift || true
+    "${COMPOSE[@]}" run --rm --no-deps -e AETHERGATE_INSPECT_DB_HOST="$db_host" api \
+        python -m aethergate.reconcile "$@"
+}
+
 cmd_reset() {
     "${COMPOSE[@]}" down --volumes
 }
@@ -156,6 +169,7 @@ case "${1:-}" in
     test) cmd_test ;;
     workers) cmd_workers "${2:-2}" ;;
     inspect) cmd_inspect ;;
+    reconcile) cmd_reconcile "$@" ;;
     down) cmd_down ;;
     reset) cmd_reset ;;
     help|-h|--help) usage ;;

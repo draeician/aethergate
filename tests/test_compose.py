@@ -35,7 +35,9 @@ def test_compose_has_no_fixed_host_port():
 def test_compose_names_do_not_collide_with_legacy():
     compose = _compose()
     containers = {
-        svc["container_name"] for svc in compose["services"].values()
+        svc["container_name"]
+        for svc in compose["services"].values()
+        if "container_name" in svc
     }
     assert "aethergate-api" not in containers
     assert "aethergate-frontend" not in containers

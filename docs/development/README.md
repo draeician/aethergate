@@ -19,6 +19,8 @@ scripts/dev/v2 <command>
 | `test` | Run the full test suite inside the API container against a throwaway test DB. |
 | `workers [N]` | Scale the scheduler worker service to N replicas (default 2). |
 | `inspect` | Print a scheduler queue-state summary (state counts, endpoints, active reservations). |
+| `reconcile list` | List `outcome_unknown` requests (metadata only, never content). |
+| `reconcile resolve <id> --disposition <state> --by <op>` | Explicitly reconcile an `outcome_unknown` request to `failed`/`cancelled`/`succeeded` and release its held reservation. |
 | `down` | Stop the stack, keeping the PostgreSQL volume. |
 | `reset` | Stop the stack and **delete** the PostgreSQL volume (destructive). |
 
@@ -102,6 +104,7 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 ## Migrations
 
-The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0003`; `0003`
-adds scheduler tables, `endpoints.max_concurrency`, and a `BigInteger` fencing token). Schema is
-applied only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.
+The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0004`; `0003`
+adds scheduler tables, `endpoints.max_concurrency`, and a `BigInteger` fencing token; `0004` adds a
+positive-concurrency CHECK on `endpoints` and reconciliation metadata on `inference_requests`).
+Schema is applied only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

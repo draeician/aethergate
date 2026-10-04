@@ -72,6 +72,9 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
         if not value:
             raise SystemExit(f"missing required value: {required}")
 
+    if args.max_concurrency < 1:
+        raise SystemExit("--max-concurrency must be >= 1")
+
     kind: str = args.kind
     base_destination: str = args.base_destination
     settings = get_settings()

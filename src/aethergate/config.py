@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     worker_lease_seconds: float = Field(
         default=120.0, validation_alias="AETHERGATE_WORKER_LEASE_SECONDS"
     )
+    worker_heartbeat_seconds: float = Field(
+        default=30.0, validation_alias="AETHERGATE_WORKER_HEARTBEAT_SECONDS"
+    )
 
     @property
     def upstream_allowlist_hosts(self) -> set[str]:
@@ -83,6 +86,23 @@ class Settings(BaseSettings):
     def _require_queue_key_in_prod(self) -> Settings:
         if self.app_env == "prod" and self.queue_key is None:
             raise ValueError("queue_key (AETHERGATE_QUEUE_KEY) is required in production mode")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_scheduler_timing(self) -> Settings:
+        if self.worker_lease_seconds <= 0:
+            raise ValueError("worker_lease_seconds must be positive")
+        if self.worker_heartbeat_seconds <= 0:
+            raise ValueError("worker_heartbeat_seconds must be positive")
+        if self.worker_heartbeat_seconds >= self.worker_lease_seconds:
+            raise ValueError(
+                "worker_heartbeat_seconds must be less than worker_lease_seconds "
+                "so a healthy worker renews its lease before it expires"
+            )
+        if self.queue_max_wait_seconds <= 0:
+            raise ValueError("queue_max_wait_seconds must be positive")
+        if self.queue_total_lifetime_seconds <= 0:
+            raise ValueError("queue_total_lifetime_seconds must be positive")
         return self
 
     @model_validator(mode="after")

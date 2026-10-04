@@ -80,3 +80,51 @@ def test_migration_from_empty_database() -> None:
         assert "route_bindings" not in remaining
     finally:
         asyncio.run(drop_database(url))
+
+
+def _columns(url: str, table: str) -> set[str]:
+    engine = create_async_engine(url)
+    async def _names() -> set[str]:
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns(table)}
+            )
+    names = asyncio.run(_names())
+    asyncio.run(engine.dispose())
+    return names
+
+
+def _check_constraints(url: str, table: str) -> set[str]:
+    engine = create_async_engine(url)
+    async def _names() -> set[str]:
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: {
+                    c["name"] for c in inspect(sync_conn).get_check_constraints(table)
+                }
+            )
+    names = asyncio.run(_names())
+    asyncio.run(engine.dispose())
+    return names
+
+
+def test_migration_0003_to_0004() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig34")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0003", env=env)
+        assert "reconciled_state" not in _columns(url, "inference_requests")
+        assert "ck_endpoints_max_concurrency_positive" not in _check_constraints(url, "endpoints")
+
+        _run_alembic("upgrade", "head", env=env)
+        assert {"reconciled_state", "reconciled_at", "reconciled_by"} <= _columns(
+            url, "inference_requests"
+        )
+        assert "ck_endpoints_max_concurrency_positive" in _check_constraints(url, "endpoints")
+    finally:
+        asyncio.run(drop_database(url))

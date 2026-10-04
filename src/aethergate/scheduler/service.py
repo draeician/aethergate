@@ -59,6 +59,12 @@ TERMINAL_STATES = {
     RequestState.OUTCOME_UNKNOWN,
 }
 
+RECONCILABLE_STATES = {
+    RequestState.FAILED,
+    RequestState.CANCELLED,
+    RequestState.SUCCEEDED,
+}
+
 _MAX_ERROR_CODE_LENGTH = 64
 
 
@@ -165,6 +171,8 @@ class EnqueuedRequest:
     request_id: str
     endpoint_id: str | None
     alias_name: str
+    queue_wait_until: datetime
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -241,7 +249,7 @@ class SchedulingService:
         async with self._session_factory() as session:
             resolved = await resolve_model_alias(session, alias_name)
             self._inference.validate_destination(resolved)
-            request_id = await self._enqueue(
+            request_id, queue_wait_until, expires_at = await self._enqueue(
                 session,
                 resolved=resolved,
                 messages=messages,
@@ -256,14 +264,19 @@ class SchedulingService:
             request_id=request_id,
             endpoint_id=resolved.endpoint.id,
             alias_name=alias_name,
+            queue_wait_until=queue_wait_until,
+            expires_at=expires_at,
         )
 
     async def wait_for_terminal(
         self, request_id: str, deadline: datetime
     ) -> TerminalResult:
-        """Poll until the request reaches a terminal state or the deadline.
+        """Poll until the request reaches a terminal state or ``deadline``.
 
-        Returns a decrypted, ready-to-serve terminal result.
+        ``deadline`` is the persisted total-lifetime deadline, not a fresh timer,
+        so the API's wait cannot drift from the durable scheduler state. On
+        deadline, any still-queued/reserved work is durably cancelled so it can
+        never dispatch after the client has given up.
         """
         while utcnow() < deadline:
             async with self._session_factory() as session:
@@ -292,20 +305,39 @@ class SchedulingService:
                     row.error_code,
                 )
             await asyncio.sleep(self._settings.scheduler_poll_interval_seconds)
+        await self.request_cancellation(request_id)
         return TerminalResult(RequestState.EXPIRED, None, None, None, None, "timeout")
-
-    def terminal_deadline(self) -> datetime:
-        """Return the absolute deadline for a request to reach a terminal state."""
-        return utcnow() + timedelta(seconds=self._settings.queue_total_lifetime_seconds)
 
     @property
     def poll_interval(self) -> float:
         return self._settings.scheduler_poll_interval_seconds
 
     async def request_cancellation(self, request_id: str) -> None:
+        """Durably cancel a request, choosing the safe action for its state.
+
+        Queued and reserved (pre-dispatch) requests are terminally cancelled and
+        their capacity is released; dispatched/streaming requests are flagged so
+        the owning worker settles them cancelled (or outcome_unknown if the
+        upstream outcome cannot be established).
+        """
+        now = utcnow()
         async with self._session_factory() as session:
             async with session.begin():
-                await scheduler_repository.set_cancellation_requested(session, request_id)
+                row = await scheduler_repository.get_request_for_update(session, request_id)
+                if row is None or row.state in TERMINAL_STATES:
+                    return
+                if row.state == RequestState.QUEUED:
+                    row.state = RequestState.CANCELLED
+                    row.cancellation_requested = True
+                    row.finished_at = now
+                elif row.state == RequestState.RESERVED:
+                    row.state = RequestState.CANCELLED
+                    row.cancellation_requested = True
+                    row.finished_at = now
+                    await scheduler_repository.release_active_reservation(session, request_id, now)
+                    await scheduler_repository.abandon_reserved_attempts(session, request_id, now)
+                else:
+                    await scheduler_repository.set_cancellation_requested(session, request_id)
 
     async def is_cancelled(self, request_id: str) -> bool:
         async with self._session_factory() as session:
@@ -330,6 +362,42 @@ class SchedulingService:
             for r in rows
         ]
 
+    # --- reconciliation -----------------------------------------------------
+
+    async def list_outcome_unknown(self) -> list[dict]:
+        """Return metadata for outcome_unknown requests (never their content)."""
+        async with self._session_factory() as session:
+            rows = await scheduler_repository.list_outcome_unknown(session)
+        return [
+            {
+                "request_id": r.id,
+                "endpoint_id": r.endpoint_id,
+                "worker_id": r.worker_id,
+                "state": r.state,
+                "queued_at": r.queued_at,
+                "started_at": r.started_at,
+                "lease_expires_at": r.lease_expires_at,
+            }
+            for r in rows
+        ]
+
+    async def reconcile(self, request_id: str, disposition: str, operator: str) -> bool:
+        """Explicitly reconcile an outcome_unknown request to a terminal state."""
+        if disposition not in RECONCILABLE_STATES:
+            raise ValueError(
+                f"disposition must be one of {sorted(RECONCILABLE_STATES)}"
+            )
+        now = utcnow()
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await scheduler_repository.reconcile_request(
+                    session,
+                    request_id=request_id,
+                    disposition=disposition,
+                    operator=operator,
+                    now=now,
+                )
+
     # --- worker-side --------------------------------------------------------
 
     async def recover(self) -> None:
@@ -349,18 +417,48 @@ class SchedulingService:
             )
 
     async def claim_and_reserve(self, worker_id: str) -> ClaimedWork | str | None:
-        """Claim one eligible request, reserve capacity, and record dispatch intent.
+        """Claim one eligible request (FIFO per endpoint) and reserve capacity.
 
-        Returns a :class:`ClaimedWork`, the string ``"full"`` when capacity is
-        exhausted, or ``None`` when nothing is eligible.
+        Iterates over endpoints that hold eligible queued work, oldest first. A
+        saturated endpoint is skipped so it never blocks an unrelated endpoint
+        with available capacity. Returns :class:`ClaimedWork`, ``"full"`` when
+        every candidate endpoint is saturated, ``"processed"`` when a request
+        was resolved to a failure, or ``None`` when nothing is eligible.
         """
+        now = utcnow()
+        async with self._session_factory() as session:
+            endpoints = await scheduler_repository.list_queued_endpoints(session, now)
+
+        saw_full = False
+        saw_processed = False
+        for endpoint_id, _oldest in endpoints:
+            outcome = await self._claim_endpoint(worker_id, endpoint_id)
+            if isinstance(outcome, ClaimedWork):
+                return outcome
+            if outcome == "full":
+                saw_full = True
+            elif outcome == "processed":
+                saw_processed = True
+
+        if saw_processed:
+            return "processed"
+        if saw_full:
+            return "full"
+        return None
+
+    async def _claim_endpoint(
+        self, worker_id: str, endpoint_id: str | None
+    ) -> ClaimedWork | str | None:
+        """Claim and reserve the oldest eligible request for one endpoint."""
         now = utcnow()
         lease_expires = now + timedelta(seconds=self._settings.worker_lease_seconds)
         fencing_token = uuid.uuid4().int & ((1 << 53) - 1)
 
         async with self._session_factory() as session:
             async with session.begin():
-                request = await scheduler_repository.claim_next_queued(session, now)
+                request = await scheduler_repository.claim_next_queued_for_endpoint(
+                    session, now, endpoint_id
+                )
                 if request is None:
                     return None
                 request_id = request.id
@@ -380,8 +478,8 @@ class SchedulingService:
                     logger.info("request=%s failed revalidation: %s", request_id, _error_hint(exc))
                     return "processed"
 
-                endpoint_id = resolved.endpoint.id
-                endpoint = await scheduler_repository.lock_endpoint(session, endpoint_id)
+                resolved_endpoint_id = resolved.endpoint.id
+                endpoint = await scheduler_repository.lock_endpoint(session, resolved_endpoint_id)
                 if endpoint is None or not endpoint.is_active:
                     await scheduler_repository.fail_request_direct(
                         session,
@@ -393,7 +491,7 @@ class SchedulingService:
                     return "processed"
 
                 active = await scheduler_repository.count_active_reservations(
-                    session, endpoint_id
+                    session, resolved_endpoint_id
                 )
                 if active >= endpoint.max_concurrency:
                     return "full"
@@ -402,14 +500,14 @@ class SchedulingService:
                     session,
                     reservation_id=ReservationId(_new_id()),
                     request_id=request_id,
-                    endpoint_id=endpoint_id,
+                    endpoint_id=resolved_endpoint_id,
                     acquired_at=now,
                 )
                 attempt = await scheduler_repository.create_attempt(
                     session,
                     attempt_id=ExecutionAttemptId(_new_id()),
                     request_id=request_id,
-                    endpoint_id=endpoint_id,
+                    endpoint_id=resolved_endpoint_id,
                     reservation_id=reservation.id,
                     fencing_token=fencing_token,
                     worker_id=worker_id,
@@ -432,6 +530,8 @@ class SchedulingService:
                     session, request_id=request_id, fencing_token=fencing_token
                 )
                 if not dispatched:
+                    # Cancelled or otherwise transitioned after reservation; the
+                    # competing path already released the reservation.
                     return None
                 await scheduler_repository.mark_attempt_dispatched(
                     session, attempt_id=attempt_id, fencing_token=fencing_token
@@ -451,18 +551,22 @@ class SchedulingService:
             attempt_id=attempt_id,
             reservation_id=reservation_id,
             fencing_token=fencing_token,
-            endpoint_id=endpoint_id,
+            endpoint_id=resolved_endpoint_id,
             public_alias=public_alias,
             stream=stream,
             prepared=prepared,
         )
 
     async def run_complete(self, claim: ClaimedWork) -> None:
-        """Dispatch a non-streaming completion and settle."""
+        """Dispatch a non-streaming completion and settle, renewing its lease."""
+        heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
         try:
             result = await claim.prepared.adapter.complete(
                 claim.prepared.request, claim.prepared.secret
             )
+            if await self.is_cancelled(claim.request_id):
+                await self._settle(claim, state=RequestState.CANCELLED)
+                return
             result_encrypted = self._encryptor.encrypt(
                 serialize_result(
                     result.content,
@@ -481,11 +585,18 @@ class SchedulingService:
             await self._settle(
                 claim, state=RequestState.FAILED, error_code=_sanitize_error_code(_error_hint(exc))
             )
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
 
     async def run_stream(self, claim: ClaimedWork) -> None:
         """Dispatch a streaming completion, persisting encrypted events, then settle."""
         seq = 0
         terminal_state = RequestState.SUCCEEDED
+        heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
         try:
             async for chunk in claim.prepared.adapter.stream(
                 claim.prepared.request, claim.prepared.secret
@@ -505,6 +616,33 @@ class SchedulingService:
             await self._settle(
                 claim, state=RequestState.FAILED, error_code=_sanitize_error_code(_error_hint(exc))
             )
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+
+    async def _heartbeat_loop(self, claim: ClaimedWork) -> None:
+        """Renew ownership for in-flight work until execution terminates."""
+        interval = self._settings.worker_heartbeat_seconds
+        while True:
+            await asyncio.sleep(interval)
+            renewed = await self._renew_lease(claim)
+            if not renewed:
+                return
+
+    async def _renew_lease(self, claim: ClaimedWork) -> bool:
+        lease_expires = utcnow() + timedelta(seconds=self._settings.worker_lease_seconds)
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await scheduler_repository.renew_lease(
+                    session,
+                    request_id=claim.request_id,
+                    attempt_id=claim.attempt_id,
+                    fencing_token=claim.fencing_token,
+                    lease_expires_at=lease_expires,
+                )
 
     async def _append_event(self, request_id: str, seq: int, event: bytes) -> None:
         encrypted = self._encryptor.encrypt(event)
@@ -561,7 +699,10 @@ class SchedulingService:
         project_id: ProjectId,
         principal_id: PrincipalId,
         api_credential_id: ApiCredentialId,
-    ) -> str:
+    ) -> tuple[str, datetime, datetime]:
+        # Serialize count-then-insert so concurrent admissions cannot exceed the
+        # configured queue bound.
+        await scheduler_repository.acquire_admission_lock(session)
         queued = await scheduler_repository.count_queued(session)
         if queued >= self._settings.queue_max_requests:
             raise QueueFull("the inference queue is at capacity")
@@ -569,6 +710,8 @@ class SchedulingService:
         payload = self._encryptor.encrypt(serialize_chat_payload(messages, params))
         now = utcnow()
         request_id = RequestId(_new_id())
+        queue_wait_until = now + timedelta(seconds=self._settings.queue_max_wait_seconds)
+        expires_at = now + timedelta(seconds=self._settings.queue_total_lifetime_seconds)
         await scheduler_repository.create_request(
             session,
             request_id=request_id,
@@ -580,7 +723,7 @@ class SchedulingService:
             stream=stream,
             payload_encrypted=payload,
             queued_at=now,
-            queue_wait_until=now + timedelta(seconds=self._settings.queue_max_wait_seconds),
-            expires_at=now + timedelta(seconds=self._settings.queue_total_lifetime_seconds),
+            queue_wait_until=queue_wait_until,
+            expires_at=expires_at,
         )
-        return str(request_id)
+        return str(request_id), queue_wait_until, expires_at

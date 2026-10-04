@@ -100,3 +100,34 @@ def test_upstream_allowlist_parsing():
     )
     assert settings.upstream_allowlist_hosts == {"hosta", "hostb", "127.0.0.1"}
     assert Settings(database_url="postgresql://x").upstream_allowlist_hosts == set()
+
+
+def test_heartbeat_must_be_below_lease():
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql://x",
+            worker_lease_seconds=10.0,
+            worker_heartbeat_seconds=10.0,
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql://x",
+            worker_lease_seconds=10.0,
+            worker_heartbeat_seconds=20.0,
+        )
+
+
+def test_heartbeat_and_lease_must_be_positive():
+    for field, value in (
+        ("worker_lease_seconds", 0.0),
+        ("worker_heartbeat_seconds", 0.0),
+        ("queue_max_wait_seconds", 0.0),
+        ("queue_total_lifetime_seconds", 0.0),
+    ):
+        with pytest.raises(ValidationError):
+            Settings(database_url="postgresql://x", **{field: value})
+
+
+def test_default_scheduler_timing_is_valid():
+    settings = Settings(database_url="postgresql://x")
+    assert settings.worker_heartbeat_seconds < settings.worker_lease_seconds
