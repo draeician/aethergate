@@ -6,9 +6,11 @@ Callers must manage their own transaction boundaries via ``AsyncSession.begin``.
 
 from __future__ import annotations
 
-from datetime import datetime
+import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain.enums import RequestState
@@ -29,6 +31,22 @@ from aethergate.persistence import models
 # (count-then-insert) across concurrent API processes. It is a single global
 # scope: the queue bound is a global bound, not per-endpoint.
 ADMISSION_LOCK_KEY = 0x4147_5144  # "AGQD"
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def fixed_window_start(now: datetime, window_seconds: int) -> datetime:
+    """Return the start of the fixed UTC-epoch-anchored window containing ``now``.
+
+    Windows are ``[start, start + window_seconds)`` anchored at the UTC epoch, so
+    boundaries are deterministic across processes and workers. No sliding-window
+    semantics are claimed.
+    """
+    epoch = int(now.timestamp())
+    start = (epoch // window_seconds) * window_seconds
+    return datetime.fromtimestamp(start, tz=UTC)
 
 
 async def acquire_admission_lock(session: AsyncSession) -> None:
@@ -581,6 +599,9 @@ async def reclaim_expired_reserved(session: AsyncSession, now: datetime) -> list
             )
             .values(state="abandoned", finished_at=now)
         )
+        # Reclaim pre-dispatch quota reservation: the request never dispatched,
+        # so its reserved request/token units are returned to the window.
+        await release_quota_reservations(session, request_id=row.id, now=now)
     return freed
 
 
@@ -697,6 +718,10 @@ async def reconcile_request(
         .values(state=disposition, finished_at=now)
     )
     await release_active_reservation(session, request_id, now)
+    # Conservative: reconcile never invents capacity. Still-reserved token units
+    # are committed (reserved -> committed) rather than released, because the
+    # upstream outcome is unknowable and may already have consumed them.
+    await settle_token_quota(session, request_id=request_id, actual_tokens=None, now=now)
     return True
 
 
@@ -727,3 +752,216 @@ async def list_stream_events_after(
         .order_by(models.StreamEvent.seq.asc())
     )
     return list(result.scalars().all())
+
+
+async def _get_or_create_quota_window(
+    session: AsyncSession, *, quota_limit_id: str, window_start: datetime
+) -> models.QuotaWindow:
+    """Lock an existing quota window row, or idempotently create and lock one.
+
+    Creation is guarded by the unique ``(quota_limit_id, window_start)``
+    constraint so concurrent workers converge on a single row; the returned row
+    is always ``FOR UPDATE`` locked.
+    """
+    row = (
+        await session.execute(
+            select(models.QuotaWindow)
+            .where(
+                models.QuotaWindow.quota_limit_id == quota_limit_id,
+                models.QuotaWindow.window_start == window_start,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        return row
+    await session.execute(
+        pg_insert(models.QuotaWindow)
+        .values(id=_new_id(), quota_limit_id=quota_limit_id, window_start=window_start)
+        .on_conflict_do_nothing(index_elements=["quota_limit_id", "window_start"])
+    )
+    return (
+        await session.execute(
+            select(models.QuotaWindow)
+            .where(
+                models.QuotaWindow.quota_limit_id == quota_limit_id,
+                models.QuotaWindow.window_start == window_start,
+            )
+            .with_for_update()
+        )
+    ).scalar_one()
+
+
+async def list_quota_limits_for_group(
+    session: AsyncSession, *, group_id: str, enabled_only: bool = True
+) -> list[models.QuotaLimit]:
+    stmt = select(models.QuotaLimit).where(
+        models.QuotaLimit.quota_group_id == group_id
+    )
+    if enabled_only:
+        stmt = stmt.where(models.QuotaLimit.enabled.is_(True))
+    stmt = stmt.order_by(models.QuotaLimit.id.asc())
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_quota_group_for_update(
+    session: AsyncSession, *, group_id: str
+) -> models.QuotaGroup | None:
+    return (
+        await session.execute(
+            select(models.QuotaGroup)
+            .where(models.QuotaGroup.id == group_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+
+async def reserve_quota(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    limits: list[models.QuotaLimit],
+    requested_by_limit: dict[str, int],
+    now: datetime,
+) -> bool:
+    """Reserve quota across every limit, or reserve none (all-or-nothing).
+
+    Locks every window first (stable ID order), checks combined committed +
+    reserved + requested capacity, then increments reservations. Returns False
+    without reserving anything when any limit would be exceeded.
+    """
+    ordered = sorted(limits, key=lambda limit: limit.id)
+    windows: dict[str, models.QuotaWindow] = {}
+    for limit in ordered:
+        windows[limit.id] = await _get_or_create_quota_window(
+            session,
+            quota_limit_id=limit.id,
+            window_start=fixed_window_start(now, limit.window_seconds),
+        )
+    for limit in ordered:
+        units = requested_by_limit[limit.id]
+        window = windows[limit.id]
+        if window.committed_units + window.reserved_units + units > limit.limit_units:
+            return False
+    for limit in ordered:
+        units = requested_by_limit[limit.id]
+        window = windows[limit.id]
+        window.reserved_units += units
+        session.add(
+            models.QuotaReservation(
+                id=_new_id(),
+                request_id=request_id,
+                quota_limit_id=limit.id,
+                window_start=window.window_start,
+                metric=limit.metric,
+                reserved_units=units,
+                committed_units=0,
+                state="reserved",
+            )
+        )
+    return True
+
+
+async def commit_request_quota(
+    session: AsyncSession, *, request_id: str, now: datetime
+) -> None:
+    """Commit request-metric reservations at durable dispatch (reserved -> committed)."""
+    rows = (
+        await session.execute(
+            select(models.QuotaReservation)
+            .where(
+                models.QuotaReservation.request_id == request_id,
+                models.QuotaReservation.metric == "requests",
+                models.QuotaReservation.state == "reserved",
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    for reservation in rows:
+        window = await _get_or_create_quota_window(
+            session,
+            quota_limit_id=reservation.quota_limit_id,
+            window_start=reservation.window_start,
+        )
+        window.reserved_units -= reservation.reserved_units
+        window.committed_units += reservation.reserved_units
+        reservation.committed_units = reservation.reserved_units
+        reservation.reserved_units = 0
+        reservation.state = "committed"
+        reservation.committed_at = now
+
+
+async def settle_token_quota(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    actual_tokens: int | None,
+    now: datetime,
+) -> None:
+    """Commit token-metric reservations at settlement.
+
+    ``actual_tokens`` records real usage when it is trustworthy; when it is
+    None (failure/cancellation after dispatch) the reserved amount is committed
+    conservatively rather than released, so no capacity is invented.
+    """
+    rows = (
+        await session.execute(
+            select(models.QuotaReservation)
+            .where(
+                models.QuotaReservation.request_id == request_id,
+                models.QuotaReservation.metric == "tokens",
+                models.QuotaReservation.state == "reserved",
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    for reservation in rows:
+        commit = actual_tokens if actual_tokens is not None else reservation.reserved_units
+        window = await _get_or_create_quota_window(
+            session,
+            quota_limit_id=reservation.quota_limit_id,
+            window_start=reservation.window_start,
+        )
+        window.reserved_units -= reservation.reserved_units
+        window.committed_units += commit
+        reservation.committed_units = commit
+        reservation.reserved_units = 0
+        reservation.state = "committed"
+        reservation.committed_at = now
+
+
+async def release_quota_reservations(
+    session: AsyncSession, *, request_id: str, now: datetime
+) -> None:
+    """Release all still-reserved quota for a request (pre-dispatch reclaim)."""
+    rows = (
+        await session.execute(
+            select(models.QuotaReservation)
+            .where(
+                models.QuotaReservation.request_id == request_id,
+                models.QuotaReservation.state == "reserved",
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    for reservation in rows:
+        window = await _get_or_create_quota_window(
+            session,
+            quota_limit_id=reservation.quota_limit_id,
+            window_start=reservation.window_start,
+        )
+        window.reserved_units -= reservation.reserved_units
+        reservation.reserved_units = 0
+        reservation.state = "released"
+        reservation.released_at = now
+
+
+async def set_quota_group_cooldown(
+    session: AsyncSession, *, group_id: str, cooldown_until: datetime
+) -> None:
+    await session.execute(
+        update(models.QuotaGroup)
+        .where(models.QuotaGroup.id == group_id)
+        .values(cooldown_until=cooldown_until)
+    )

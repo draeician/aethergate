@@ -72,6 +72,33 @@ class InferenceService:
         """Enforce the egress destination policy for an already-resolved route."""
         self._policy.validate(resolved.endpoint.base_destination)
 
+    def _build_request(
+        self,
+        resolved: ResolvedRoute,
+        messages: list[Message],
+        params: GenerationParams | None,
+    ) -> ChatRequest:
+        return ChatRequest(
+            provider_kind=resolved.provider.kind,
+            base_destination=resolved.endpoint.base_destination,
+            upstream_model=resolved.upstream_model,
+            messages=tuple(messages),
+            params=params or GenerationParams(),
+            timeout_seconds=self._timeout,
+        )
+
+    def estimate_tokens(
+        self,
+        resolved: ResolvedRoute,
+        messages: list[Message],
+        params: GenerationParams | None = None,
+    ) -> int:
+        """Conservative input-token estimate, without contacting upstream."""
+        adapter = self._adapter_factory(resolved.provider.kind)
+        return adapter.estimate_input_tokens(
+            self._build_request(resolved, messages, params)
+        )
+
     async def _secret(self, session: AsyncSession, resolved: ResolvedRoute) -> str | None:
         ref_id = resolved.provider_account.secret_ref_id
         if ref_id is None:
@@ -103,14 +130,7 @@ class InferenceService:
         self._policy.validate(resolved.endpoint.base_destination)
         secret = await self._secret(session, resolved)
         adapter = self._adapter_factory(resolved.provider.kind)
-        request = ChatRequest(
-            provider_kind=resolved.provider.kind,
-            base_destination=resolved.endpoint.base_destination,
-            upstream_model=resolved.upstream_model,
-            messages=tuple(messages),
-            params=params or GenerationParams(),
-            timeout_seconds=self._timeout,
-        )
+        request = self._build_request(resolved, messages, params)
         return PreparedDispatch(
             adapter=adapter,
             request=request,

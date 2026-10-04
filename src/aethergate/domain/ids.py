@@ -82,6 +82,10 @@ class QuotaGroupId(ResourceId):
     __slots__ = ()
 
 
+class QuotaLimitId(ResourceId):
+    __slots__ = ()
+
+
 class ModelAliasId(ResourceId):
     __slots__ = ()
 
@@ -128,6 +132,7 @@ __all__ = [
     "SecretRefId",
     "EndpointId",
     "QuotaGroupId",
+    "QuotaLimitId",
     "ModelAliasId",
     "RouteBindingId",
     "RequestId",

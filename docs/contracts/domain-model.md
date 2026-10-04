@@ -15,8 +15,9 @@ not part of any contract.
 ## Enumerations
 
 `domain/enums.py` defines `Capability`, `BillingUnit`, `PrincipalKind`, `RequestState`,
-`ExecutionAttemptState`, and `LedgerEntryType`. `RequestState` includes the full lifecycle
-through `outcome_unknown`:
+`ExecutionAttemptState`, `LedgerEntryType`, `QuotaMetric` (`requests`|`tokens`), and
+`QuotaReservationState` (`reserved`|`committed`|`released`). `RequestState` includes the full
+lifecycle through `outcome_unknown`:
 
 `validated -> queued -> reserved -> dispatched -> streaming -> succeeded/failed/cancelled/expired`
 plus `outcome_unknown`.
@@ -38,7 +39,7 @@ values. Binary floating point (`float`) is rejected for money and pricing. There
 
 - Identity/access: `Project`, `Principal`, `ApiCredential` (material behind a `SecretRefId`).
 - Catalog/routing: `Provider`, `ProviderAccount`, `SecretRef`, `Endpoint`, `QuotaGroup`,
-  `ModelAlias`, `RouteBinding`.
+  `QuotaLimit`, `ModelAlias`, `RouteBinding`.
 - Scheduler/execution: `InferenceRequest`, `ExecutionAttempt`, `Reservation`.
 - Accounting/audit: `UsageRecord`, `PriceSnapshot`, `LedgerEntry`, `AuditEvent`.
 
@@ -65,13 +66,20 @@ universal authorization requirement.
 - `Endpoint` — deployment/base destination and physical capacity configuration. Since scheduler
   phase 1 it carries `max_concurrency`, the physical concurrency limit for that endpoint/deployment.
   Capacity belongs to the physical endpoint, never to a public alias.
-- `QuotaGroup` — shared allowance scope across routes/endpoints/models.
+- `QuotaGroup` — shared allowance scope across routes/endpoints/models. Since scheduler phase 2 it
+  belongs to exactly one `ProviderAccount` (`provider_account_id`, required) and is the scope on
+  which a provider `429` cooldown is applied.
+- `QuotaLimit` — a single configured limit inside a group: `metric` (`requests`|`tokens`), positive
+  `limit_units` and `window_seconds`, `enabled`, optional `name`. Typed `QuotaLimitId` added.
 - `ModelAlias` — stable public model identity (distinct from endpoint/provider identity).
 - `RouteBinding` — permitted route from alias to endpoint/account with policy metadata.
   Since the first inference milestone it also carries `upstream_model`, the provider-facing
   model/deployment identifier to invoke. `upstream_model` is provider-specific opaque
   configuration kept separate from the public `ModelAlias.name` and never derived implicitly
   from it. A route without a configured `upstream_model` is unresolved and cannot be dispatched.
+  Since scheduler phase 2 it also carries `quota_group_id` (association, not ownership) and
+  `default_output_tokens` (the default bounded output reservation used when a token-quota request
+  omits `max_tokens`).
 
 Creating an additional alias or route does not imply additional provider capacity, and
 referencing a quota group on a route does not imply quota ownership.

@@ -18,6 +18,7 @@ from aethergate.domain.enums import (
     Capability,
     LedgerEntryType,
     PrincipalKind,
+    QuotaMetric,
     RequestState,
 )
 from aethergate.domain.ids import (
@@ -33,6 +34,7 @@ from aethergate.domain.ids import (
     ProviderAccountId,
     ProviderId,
     QuotaGroupId,
+    QuotaLimitId,
     RequestId,
     ReservationId,
     RouteBindingId,
@@ -129,11 +131,54 @@ class Endpoint(Entity):
 
 
 class QuotaGroup(Entity):
-    """A shared allowance scope that may span multiple routes/endpoints/models."""
+    """A shared allowance scope that may span multiple routes/endpoints/models.
+
+    A quota group belongs to exactly one provider account; routes may reference
+    it only when their provider account matches.
+    """
 
     id: QuotaGroupId
+    provider_account_id: ProviderAccountId
     name: str
     description: str | None = None
+
+    @field_validator("provider_account_id")
+    @classmethod
+    def _non_empty_account(cls, value: ProviderAccountId) -> ProviderAccountId:
+        if not str(value).strip():
+            raise ValueError("provider_account_id must not be empty")
+        return value
+
+
+class QuotaLimit(Entity):
+    """A single configured limit within a quota group.
+
+    ``metric`` is ``requests`` or ``tokens``; ``limit_units`` and
+    ``window_seconds`` are positive integers; windows are fixed and anchored
+    deterministically to the UTC epoch.
+    """
+
+    id: QuotaLimitId
+    quota_group_id: QuotaGroupId
+    metric: QuotaMetric
+    limit_units: int
+    window_seconds: int
+    enabled: bool = True
+    name: str | None = None
+
+    @field_validator("limit_units")
+    @classmethod
+    def _positive_limit(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("limit_units must be >= 1")
+        return value
+
+    @field_validator("window_seconds")
+    @classmethod
+    def _positive_window(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("window_seconds must be >= 1")
+        return value
 
 
 class ModelAlias(Entity):
@@ -162,7 +207,15 @@ class RouteBinding(Entity):
     provider_account_id: ProviderAccountId
     upstream_model: str | None = None
     quota_group_id: QuotaGroupId | None = None
+    default_output_tokens: int | None = None
     is_active: bool = True
+
+    @field_validator("default_output_tokens")
+    @classmethod
+    def _positive_default_output(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("default_output_tokens must be >= 1 when set")
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +302,7 @@ __all__ = [
     "ProviderAccount",
     "Endpoint",
     "QuotaGroup",
+    "QuotaLimit",
     "ModelAlias",
     "RouteBinding",
     "InferenceRequest",

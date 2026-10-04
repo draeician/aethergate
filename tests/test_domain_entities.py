@@ -13,15 +13,17 @@ from aethergate.domain.entities import (
     ModelAlias,
     PriceSnapshot,
     QuotaGroup,
+    QuotaLimit,
     RouteBinding,
 )
-from aethergate.domain.enums import BillingUnit, RequestState
+from aethergate.domain.enums import BillingUnit, QuotaMetric, RequestState
 from aethergate.domain.ids import (
     EndpointId,
     ModelAliasId,
     PriceSnapshotId,
     ProviderAccountId,
     QuotaGroupId,
+    QuotaLimitId,
     RouteBindingId,
 )
 
@@ -118,3 +120,68 @@ def test_price_fields_use_decimal_not_float():
             price_out=Decimal("0.000002"),
             effective_from=_ts(),
         )
+
+
+def test_quota_group_requires_provider_account():
+    with pytest.raises(ValidationError):
+        QuotaGroup(id=QuotaGroupId("qg-1"), name="shared")  # missing account
+    ok = QuotaGroup(
+        id=QuotaGroupId("qg-3"),
+        provider_account_id=ProviderAccountId("pa-1"),
+        name="shared",
+    )
+    assert str(ok.provider_account_id) == "pa-1"
+
+
+def test_quota_limit_validation():
+    with pytest.raises(ValidationError):
+        QuotaLimit(
+            id=QuotaLimitId("ql-1"),
+            quota_group_id=QuotaGroupId("qg-1"),
+            metric=QuotaMetric.REQUESTS,
+            limit_units=0,
+            window_seconds=60,
+        )
+    with pytest.raises(ValidationError):
+        QuotaLimit(
+            id=QuotaLimitId("ql-2"),
+            quota_group_id=QuotaGroupId("qg-1"),
+            metric=QuotaMetric.TOKENS,
+            limit_units=10,
+            window_seconds=0,
+        )
+    with pytest.raises(ValidationError):
+        QuotaLimit(
+            id=QuotaLimitId("ql-3"),
+            quota_group_id=QuotaGroupId("qg-1"),
+            metric="bogus",  # type: ignore[arg-type]
+            limit_units=10,
+            window_seconds=60,
+        )
+    ok = QuotaLimit(
+        id=QuotaLimitId("ql-4"),
+        quota_group_id=QuotaGroupId("qg-1"),
+        metric=QuotaMetric.REQUESTS,
+        limit_units=30,
+        window_seconds=60,
+    )
+    assert ok.limit_units == 30
+
+
+def test_route_binding_default_output_tokens_validation():
+    with pytest.raises(ValidationError):
+        RouteBinding(
+            id=RouteBindingId("rb-x"),
+            model_alias_id=ModelAliasId("ma-1"),
+            endpoint_id=EndpointId("ep-1"),
+            provider_account_id=ProviderAccountId("pa-1"),
+            default_output_tokens=0,
+        )
+    rb = RouteBinding(
+        id=RouteBindingId("rb-y"),
+        model_alias_id=ModelAliasId("ma-1"),
+        endpoint_id=EndpointId("ep-1"),
+        provider_account_id=ProviderAccountId("pa-1"),
+        default_output_tokens=64,
+    )
+    assert rb.default_output_tokens == 64

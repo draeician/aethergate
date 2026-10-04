@@ -23,7 +23,7 @@ from aethergate.catalog.service import (
     resolve_model_alias_by_id,
 )
 from aethergate.config import Settings
-from aethergate.domain.enums import RequestState
+from aethergate.domain.enums import QuotaMetric, RequestState
 from aethergate.domain.ids import (
     ApiCredentialId,
     ExecutionAttemptId,
@@ -200,6 +200,7 @@ class ClaimedWork:
     public_alias: str
     stream: bool
     prepared: PreparedDispatch
+    quota_group_id: str | None = None
 
 
 def _error_hint(exc: BaseException) -> str:
@@ -341,6 +342,9 @@ class SchedulingService:
                     row.finished_at = now
                     await scheduler_repository.release_active_reservation(session, request_id, now)
                     await scheduler_repository.abandon_reserved_attempts(session, request_id, now)
+                    await scheduler_repository.release_quota_reservations(
+                        session, request_id=request_id, now=now
+                    )
                 else:
                     await scheduler_repository.set_cancellation_requested(session, request_id)
 
@@ -436,6 +440,7 @@ class SchedulingService:
 
         saw_full = False
         saw_processed = False
+        saw_quota = False
         for endpoint_id, _oldest in endpoints:
             outcome = await self._claim_endpoint(worker_id, endpoint_id)
             if isinstance(outcome, ClaimedWork):
@@ -444,9 +449,13 @@ class SchedulingService:
                 saw_full = True
             elif outcome == "processed":
                 saw_processed = True
+            elif outcome == "quota":
+                saw_quota = True
 
         if saw_processed:
             return "processed"
+        if saw_quota:
+            return "quota"
         if saw_full:
             return "full"
         return None
@@ -454,7 +463,13 @@ class SchedulingService:
     async def _claim_endpoint(
         self, worker_id: str, endpoint_id: str | None
     ) -> ClaimedWork | str | None:
-        """Claim and reserve the oldest eligible request for one endpoint."""
+        """Claim and reserve the oldest eligible request for one endpoint.
+
+        Reservation now includes shared quota capacity, reserved in the same
+        transaction as physical endpoint capacity. Quota is checked before the
+        endpoint slot is held, so a request never occupies a slot while merely
+        waiting on a future quota window.
+        """
         now = utcnow()
         lease_expires = now + timedelta(seconds=self._settings.worker_lease_seconds)
         fencing_token = uuid.uuid4().int & ((1 << 53) - 1)
@@ -484,6 +499,50 @@ class SchedulingService:
                     return "processed"
 
                 resolved_endpoint_id = resolved.endpoint.id
+                messages, params = deserialize_chat_payload(
+                    self._encryptor.decrypt(request.payload_encrypted)
+                )
+                quota_group_id = (
+                    str(resolved.route_binding.quota_group_id)
+                    if resolved.route_binding.quota_group_id is not None
+                    else None
+                )
+
+                if quota_group_id is not None:
+                    outcome = await self._reserve_quota_capacity(
+                        session,
+                        request_id=request_id,
+                        resolved=resolved,
+                        quota_group_id=quota_group_id,
+                        messages=messages,
+                        params=params,
+                        now=now,
+                    )
+                    if outcome == "too_large":
+                        await scheduler_repository.fail_request_direct(
+                            session,
+                            request_id=request_id,
+                            state=RequestState.FAILED,
+                            error_code="quota_request_too_large",
+                            finished_at=now,
+                        )
+                        return "processed"
+                    if outcome == "unbounded_output":
+                        await scheduler_repository.fail_request_direct(
+                            session,
+                            request_id=request_id,
+                            state=RequestState.FAILED,
+                            error_code="quota_unbounded_output",
+                            finished_at=now,
+                        )
+                        return "processed"
+                    if outcome == "exhausted":
+                        request.wait_reason = "quota_window_exhausted"
+                        return "quota"
+                    if outcome == "cooldown":
+                        request.wait_reason = "quota_group_cooldown"
+                        return "quota"
+
                 endpoint = await scheduler_repository.lock_endpoint(session, resolved_endpoint_id)
                 if endpoint is None or not endpoint.is_active:
                     await scheduler_repository.fail_request_direct(
@@ -539,21 +598,26 @@ class SchedulingService:
                     now=now,
                 )
                 if dispatch == "expired":
-                    # Reserved but past total lifetime: expired without dispatching.
                     await scheduler_repository.release_reservation(
                         session, reservation_id, now
                     )
+                    if quota_group_id is not None:
+                        await scheduler_repository.release_quota_reservations(
+                            session, request_id=request_id, now=now
+                        )
                     return None
                 if dispatch == "not_reserved":
-                    # Cancelled or otherwise transitioned after reservation; the
-                    # competing path already released the reservation.
+                    if quota_group_id is not None:
+                        await scheduler_repository.release_quota_reservations(
+                            session, request_id=request_id, now=now
+                        )
                     return None
+                if quota_group_id is not None:
+                    await scheduler_repository.commit_request_quota(
+                        session, request_id=request_id, now=now
+                    )
 
         async with self._session_factory() as session:
-            row = await scheduler_repository.get_request(session, request_id)
-            messages, params = deserialize_chat_payload(
-                self._encryptor.decrypt(row.payload_encrypted)
-            )
             prepared = await self._inference.prepare_from_resolved(
                 session, resolved, messages, params
             )
@@ -568,7 +632,79 @@ class SchedulingService:
             public_alias=public_alias,
             stream=stream,
             prepared=prepared,
+            quota_group_id=quota_group_id,
         )
+
+    async def _reserve_quota_capacity(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: str,
+        resolved: ResolvedRoute,
+        quota_group_id: str,
+        messages: list[Message],
+        params: GenerationParams,
+        now: datetime,
+    ) -> str:
+        """Reserve shared quota for a request, or report why it cannot proceed.
+
+        Returns ``"ok"``, ``"too_large"``, ``"unbounded_output"``,
+        ``"exhausted"``, or ``"cooldown"``.
+        """
+        group = await scheduler_repository.get_quota_group_for_update(
+            session, group_id=quota_group_id
+        )
+        if group is None:
+            return "too_large"
+        if group.cooldown_until is not None and group.cooldown_until > now:
+            return "cooldown"
+        limits = await scheduler_repository.list_quota_limits_for_group(
+            session, group_id=quota_group_id
+        )
+        if not limits:
+            return "ok"
+
+        has_token = any(limit.metric == QuotaMetric.TOKENS for limit in limits)
+        requested: dict[str, int] = {}
+        token_units = 0
+        if has_token:
+            input_estimate = self._inference.estimate_tokens(resolved, messages, params)
+            output_bound = params.max_tokens
+            if output_bound is None:
+                output_bound = resolved.route_binding.default_output_tokens
+            if output_bound is None:
+                return "unbounded_output"
+            token_units = input_estimate + output_bound
+        for limit in limits:
+            if limit.metric == QuotaMetric.REQUESTS:
+                requested[limit.id] = 1
+            elif limit.metric == QuotaMetric.TOKENS:
+                requested[limit.id] = token_units
+                if token_units > limit.limit_units:
+                    return "too_large"
+
+        reserved = await scheduler_repository.reserve_quota(
+            session,
+            request_id=request_id,
+            limits=limits,
+            requested_by_limit=requested,
+            now=now,
+        )
+        return "ok" if reserved else "exhausted"
+
+    async def _apply_cooldown(self, claim: ClaimedWork, exc: ProviderError) -> None:
+        """Apply a shared-quota-group cooldown from a provider 429 response."""
+        if claim.quota_group_id is None:
+            return
+        retry = exc.retry_after_seconds
+        if retry is None:
+            retry = self._settings.provider_429_cooldown_seconds
+        until = utcnow() + timedelta(seconds=retry)
+        async with self._session_factory() as session:
+            async with session.begin():
+                await scheduler_repository.set_quota_group_cooldown(
+                    session, group_id=claim.quota_group_id, cooldown_until=until
+                )
 
     async def run_complete(self, claim: ClaimedWork) -> None:
         """Dispatch a non-streaming completion and settle, renewing its lease."""
@@ -588,13 +724,21 @@ class SchedulingService:
                     result.upstream_request_id,
                 )
             )
+            usage_total = (
+                result.usage.total_tokens
+                if result.usage is not None and result.usage.total_tokens > 0
+                else None
+            )
             await self._settle(
                 claim,
                 state=RequestState.SUCCEEDED,
                 result_encrypted=result_encrypted,
                 upstream_request_id=result.upstream_request_id,
+                usage_total=usage_total,
             )
         except (ProviderError, UnsupportedProvider, SecretResolutionError) as exc:
+            if isinstance(exc, ProviderError):
+                await self._apply_cooldown(claim, exc)
             await self._settle(
                 claim, state=RequestState.FAILED, error_code=_sanitize_error_code(_error_hint(exc))
             )
@@ -609,6 +753,7 @@ class SchedulingService:
         """Dispatch a streaming completion, persisting encrypted events, then settle."""
         seq = 0
         terminal_state = RequestState.SUCCEEDED
+        usage_total: int | None = None
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
         try:
             async for chunk in claim.prepared.adapter.stream(
@@ -617,6 +762,8 @@ class SchedulingService:
                 if await self.is_cancelled(claim.request_id):
                     terminal_state = RequestState.CANCELLED
                     break
+                if chunk.usage is not None and chunk.usage.total_tokens > 0:
+                    usage_total = chunk.usage.total_tokens
                 seq += 1
                 event = serialize_event(chunk.content, chunk.finish_reason, chunk.usage)
                 await self._append_event(claim.request_id, seq, event)
@@ -624,8 +771,12 @@ class SchedulingService:
                 claim.request_id
             ):
                 terminal_state = RequestState.CANCELLED
-            await self._settle(claim, state=terminal_state, result_encrypted=None)
+            await self._settle(
+                claim, state=terminal_state, result_encrypted=None, usage_total=usage_total
+            )
         except (ProviderError, UnsupportedProvider, SecretResolutionError) as exc:
+            if isinstance(exc, ProviderError):
+                await self._apply_cooldown(claim, exc)
             await self._settle(
                 claim, state=RequestState.FAILED, error_code=_sanitize_error_code(_error_hint(exc))
             )
@@ -683,6 +834,7 @@ class SchedulingService:
         result_encrypted: bytes | None = None,
         error_code: str | None = None,
         upstream_request_id: str | None = None,
+        usage_total: int | None = None,
     ) -> None:
         """Settle to a terminal state, overriding to ``expired`` past lifetime.
 
@@ -700,7 +852,8 @@ class SchedulingService:
                     result_encrypted = None
                     upstream_request_id = None
                     error_code = "lifetime_exceeded"
-                await scheduler_repository.settle(
+                    usage_total = None
+                settled = await scheduler_repository.settle(
                     session,
                     request_id=claim.request_id,
                     attempt_id=claim.attempt_id,
@@ -712,6 +865,13 @@ class SchedulingService:
                     error_code=error_code,
                     upstream_request_id=upstream_request_id,
                 )
+                if settled and claim.quota_group_id is not None:
+                    await scheduler_repository.settle_token_quota(
+                        session,
+                        request_id=claim.request_id,
+                        actual_tokens=usage_total,
+                        now=now,
+                    )
 
     async def _enqueue(
         self,

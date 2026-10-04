@@ -58,6 +58,21 @@ class LedgerEntryType(StrEnum):
     ADJUSTMENT = "adjustment"
 
 
+class QuotaMetric(StrEnum):
+    """The unit of a shared quota limit."""
+
+    REQUESTS = "requests"
+    TOKENS = "tokens"
+
+
+class QuotaReservationState(StrEnum):
+    """Lifecycle of a single per-request quota reservation."""
+
+    RESERVED = "reserved"
+    COMMITTED = "committed"
+    RELEASED = "released"
+
+
 __all__ = [
     "Capability",
     "BillingUnit",
@@ -65,4 +80,6 @@ __all__ = [
     "RequestState",
     "ExecutionAttemptState",
     "LedgerEntryType",
+    "QuotaMetric",
+    "QuotaReservationState",
 ]

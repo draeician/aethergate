@@ -24,12 +24,14 @@ import uuid
 from aethergate.config import get_settings
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import Capability
+from aethergate.domain.enums import Capability, QuotaMetric
 from aethergate.domain.ids import (
     EndpointId,
     ModelAliasId,
     ProviderAccountId,
     ProviderId,
+    QuotaGroupId,
+    QuotaLimitId,
     RouteBindingId,
     SecretRefId,
 )
@@ -46,6 +48,57 @@ def _env(name: str) -> str | None:
     return os.environ.get(name)
 
 
+def _parse_limit(value: str, kind: str) -> tuple[int, int]:
+    """Parse ``limit_units/window_seconds`` into ``(limit_units, window_seconds)``."""
+    parts = value.split("/")
+    if len(parts) != 2:
+        raise SystemExit(f"invalid --{kind} {value!r}: expected limit_units/window_seconds")
+    try:
+        limit_units = int(parts[0])
+        window_seconds = int(parts[1])
+    except ValueError:
+        raise SystemExit(f"invalid --{kind} {value!r}: units/window must be integers") from None
+    if limit_units < 1 or window_seconds < 1:
+        raise SystemExit(f"invalid --{kind} {value!r}: values must be >= 1")
+    return limit_units, window_seconds
+
+
+async def _ensure_quota_limits(
+    session,
+    *,
+    group_id: QuotaGroupId,
+    request_limits: list[tuple[int, int]],
+    token_limits: list[tuple[int, int]],
+) -> None:
+    """Idempotently ensure the requested quota limits exist on the group."""
+    existing = await repository.list_quota_limits_for_group(session, group_id)
+
+    def _present(metric: QuotaMetric, limit_units: int, window_seconds: int) -> bool:
+        return any(
+            item.metric == metric
+            and item.limit_units == limit_units
+            and item.window_seconds == window_seconds
+            for item in existing
+        )
+
+    for metric, limits in (
+        (QuotaMetric.REQUESTS, request_limits),
+        (QuotaMetric.TOKENS, token_limits),
+    ):
+        for limit_units, window_seconds in limits:
+            if not _present(metric, limit_units, window_seconds):
+                await repository.create_quota_limit(
+                    session,
+                    domain.QuotaLimit(
+                        id=QuotaLimitId(_new_id()),
+                        quota_group_id=group_id,
+                        metric=metric,
+                        limit_units=limit_units,
+                        window_seconds=window_seconds,
+                    ),
+                )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kind", default=_env("AETHERGATE_SEED_PROVIDER_KIND"))
@@ -58,6 +111,31 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=int(_env("AETHERGATE_SEED_MAX_CONCURRENCY") or "1"),
         help="endpoint physical concurrency limit",
+    )
+    parser.add_argument(
+        "--quota-group",
+        default=_env("AETHERGATE_SEED_QUOTA_GROUP"),
+        help="shared quota group name (creates one if set)",
+    )
+    parser.add_argument(
+        "--request-limit",
+        action="append",
+        default=[],
+        metavar="LIMIT/WINDOW_SECONDS",
+        help="request quota limit (repeatable)",
+    )
+    parser.add_argument(
+        "--token-limit",
+        action="append",
+        default=[],
+        metavar="LIMIT/WINDOW_SECONDS",
+        help="token quota limit (repeatable)",
+    )
+    parser.add_argument(
+        "--default-output-tokens",
+        type=int,
+        default=None,
+        help="default output-token reservation for the route",
     )
     return parser.parse_args()
 
@@ -151,6 +229,33 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                     ),
                 )
 
+            quota_group_id: QuotaGroupId | None = None
+            if args.quota_group:
+                group = await repository.get_quota_group_by_name(session, args.quota_group)
+                if group is None:
+                    group = await repository.create_quota_group(
+                        session,
+                        domain.QuotaGroup(
+                            id=QuotaGroupId(_new_id()),
+                            provider_account_id=account.id,
+                            name=args.quota_group,
+                        ),
+                    )
+                elif group.provider_account_id != account.id:
+                    raise SystemExit(
+                        f"quota group {args.quota_group!r} belongs to a different account"
+                    )
+                quota_group_id = group.id
+                await _ensure_quota_limits(
+                    session,
+                    group_id=group.id,
+                    request_limits=[_parse_limit(v, "request-limit") for v in args.request_limit],
+                    token_limits=[_parse_limit(v, "token-limit") for v in args.token_limit],
+                )
+
+            if args.default_output_tokens is not None and args.default_output_tokens < 1:
+                raise SystemExit("--default-output-tokens must be >= 1")
+
             existing = await repository.list_route_bindings(session, alias.id)
             bound = any(
                 b.endpoint_id == endpoint.id
@@ -167,6 +272,8 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                         endpoint_id=endpoint.id,
                         provider_account_id=account.id,
                         upstream_model=args.upstream_model,
+                        quota_group_id=quota_group_id,
+                        default_output_tokens=args.default_output_tokens,
                     ),
                 )
 
@@ -180,6 +287,9 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
         "endpoint_max_concurrency": endpoint.max_concurrency,
         "alias": alias.name,
         "alias_id": str(alias.id),
+        "quota_group": args.quota_group,
+        "quota_group_id": str(quota_group_id) if quota_group_id else None,
+        "default_output_tokens": args.default_output_tokens,
         "upstream_model": args.upstream_model,
         "base_destination": base_destination,
     }

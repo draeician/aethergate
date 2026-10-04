@@ -18,7 +18,7 @@ scripts/dev/v2 <command>
 | `migrate` | Run the Alembic migrations (`upgrade head`) inside the API container. |
 | `test` | Run the full test suite inside the API container against a throwaway test DB. |
 | `workers [N]` | Scale the scheduler worker service to N replicas (default 2). |
-| `inspect` | Print a scheduler queue-state summary (state counts, endpoints, active reservations). |
+| `inspect` | Print a scheduler queue-state summary (state counts, endpoints, active reservations, quota windows, queued requests' limiting reasons). |
 | `reconcile list` | List `outcome_unknown` requests (metadata only, never content). |
 | `reconcile resolve <id> --disposition <state> --by <op>` | Explicitly reconcile an `outcome_unknown` request to `failed`/`cancelled`/`succeeded` and release its held reservation. |
 | `down` | Stop the stack, keeping the PostgreSQL volume. |
@@ -61,12 +61,13 @@ scripts/dev/v2 <command>
 - `POST /v1/chat/completions` — Chat Completions (non-streaming + SSE `stream=true`).
 
 Inference is a **durable queue** path: the API enqueues an encrypted request and the worker claims
-and dispatches it. Physical endpoint concurrency is enforced by `endpoint.max_concurrency`; queued
-work persists in PostgreSQL and is recovered when workers restart. It does **not** yet reserve
-provider RPM/TPM, token allowances, or shared-account/project budgets. Inference is unauthenticated
-only under `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` (development only, and rejected in `prod`
-mode). Upstream hosts must be explicitly allowlisted via `AETHERGATE_UPSTREAM_ALLOWLIST`
-(comma-separated); empty means deny all.
+and dispatches it. Physical endpoint concurrency is enforced by `endpoint.max_concurrency`, and
+shared provider-account request/token quotas are reserved transactionally with endpoint capacity
+(migration `0005`). Queued work persists in PostgreSQL and is recovered when workers restart. It
+does **not** yet enforce project monetary budgets. Inference is unauthenticated only under
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` (development only, and rejected in `prod` mode).
+Upstream hosts must be explicitly allowlisted via `AETHERGATE_UPSTREAM_ALLOWLIST` (comma-separated);
+empty means deny all.
 
 ## Seeding a development backend
 
@@ -80,14 +81,21 @@ docker compose --project-directory deploy/v2 --file deploy/v2/compose.yaml \
   --upstream-model 'qwen3.8-2b-distill:Q6_K' \
   --alias gpt-4 \
   --base-destination http://<host>:11434 \
-  --max-concurrency 2
+  --max-concurrency 2 \
+  --quota-group shared \
+  --request-limit 30/60 \
+  --token-limit 60000/60 \
+  --default-output-tokens 64
 ```
 
 Values may also be provided via `AETHERGATE_SEED_PROVIDER_KIND`, `AETHERGATE_SEED_UPSTREAM_MODEL`,
 `AETHERGATE_SEED_PUBLIC_ALIAS`, `AETHERGATE_SEED_BASE_DESTINATION`,
 `AETHERGATE_SEED_SECRET_REF_NAME`, and `AETHERGATE_SEED_MAX_CONCURRENCY`. The destination host must
 already be present in the upstream allowlist. `--max-concurrency` sets (or updates) the endpoint's
-physical concurrency limit.
+physical concurrency limit. `--quota-group` creates (or reuses) a shared quota group on the same
+account; `--request-limit LIMIT/WINDOW_SECONDS` and `--token-limit LIMIT/WINDOW_SECONDS` are
+repeatable and idempotent; `--default-output-tokens` sets the route's default bounded output
+reservation.
 
 ## Tests
 
@@ -104,7 +112,10 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 ## Migrations
 
-The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0004`; `0003`
+The v2 schema baseline lives under `src/aethergate/migrations/` (revisions `0001`–`0005`; `0003`
 adds scheduler tables, `endpoints.max_concurrency`, and a `BigInteger` fencing token; `0004` adds a
-positive-concurrency CHECK on `endpoints` and reconciliation metadata on `inference_requests`).
-Schema is applied only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.
+positive-concurrency CHECK on `endpoints` and reconciliation metadata on `inference_requests`;
+`0005` adds shared provider-account request/token quotas — `quota_limits`, `quota_windows`,
+`quota_reservations`, `quota_groups.provider_account_id`/`cooldown_until`,
+`route_bindings.default_output_tokens`, `inference_requests.wait_reason`). Schema is applied only
+via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

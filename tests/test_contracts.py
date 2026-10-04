@@ -9,11 +9,18 @@ from aethergate.contracts.admin_v1 import (
     ProjectCreate,
     ProjectRead,
     ProviderAccountRead,
+    QuotaGroupCreate,
+    QuotaLimitCreate,
+    RouteBindingCreate,
 )
+from aethergate.domain.enums import QuotaMetric
 from aethergate.domain.ids import (
+    EndpointId,
+    ModelAliasId,
     ProjectId,
     ProviderAccountId,
     ProviderId,
+    QuotaGroupId,
     SecretRefId,
 )
 
@@ -59,3 +66,49 @@ def test_dto_accepts_valid_values_and_uses_typed_ids():
     dto = ProjectRead(id=ProjectId("proj-1"), name="x", is_active=True)
     assert isinstance(dto.id, ProjectId)
     assert dto.model_dump(mode="json")["id"] == "proj-1"
+
+
+def test_quota_group_create_requires_provider_account():
+    with pytest.raises(ValidationError):
+        QuotaGroupCreate(name="shared")  # missing provider_account_id
+
+
+def test_quota_limit_dto_validation():
+    with pytest.raises(ValidationError):
+        QuotaLimitCreate(
+            quota_group_id=QuotaGroupId("qg-1"),
+            metric=QuotaMetric.REQUESTS,
+            limit_units=0,
+            window_seconds=60,
+        )
+    with pytest.raises(ValidationError):
+        QuotaLimitCreate(
+            quota_group_id=QuotaGroupId("qg-1"),
+            metric=QuotaMetric.TOKENS,
+            limit_units=100,
+            window_seconds=0,
+        )
+    with pytest.raises(ValidationError):
+        QuotaLimitCreate(
+            quota_group_id=QuotaGroupId("qg-1"),
+            metric="bogus",  # type: ignore[arg-type]
+            limit_units=100,
+            window_seconds=60,
+        )
+
+
+def test_route_binding_default_output_tokens_ge_1():
+    with pytest.raises(ValidationError):
+        RouteBindingCreate(
+            model_alias_id=ModelAliasId("ma-1"),
+            endpoint_id=EndpointId("ep-1"),
+            provider_account_id=ProviderAccountId("pa-1"),
+            default_output_tokens=0,
+        )
+    ok = RouteBindingCreate(
+        model_alias_id=ModelAliasId("ma-1"),
+        endpoint_id=EndpointId("ep-1"),
+        provider_account_id=ProviderAccountId("pa-1"),
+        default_output_tokens=64,
+    )
+    assert ok.default_output_tokens == 64

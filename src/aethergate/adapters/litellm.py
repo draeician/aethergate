@@ -31,6 +31,17 @@ def _safe_error_message(exc: BaseException) -> str:
     return "upstream provider request failed"
 
 
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Extract safe Retry-After feedback from a provider exception, if present.
+
+    Never exposes raw headers or URLs; returns seconds only.
+    """
+    raw = getattr(exc, "retry_after", None)
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    return None
+
+
 class LiteLLMChatAdapter:
     """Dispatch chat completions through LiteLLM."""
 
@@ -42,6 +53,27 @@ class LiteLLMChatAdapter:
 
     def _messages(self, request: ChatRequest) -> list[dict[str, str]]:
         return [{"role": m.role, "content": m.content} for m in request.messages]
+
+    def _messages_text(self, request: ChatRequest) -> str:
+        return "\n".join(m.content for m in request.messages)
+
+    def estimate_input_tokens(self, request: ChatRequest) -> int:
+        """Conservative input-token estimate; never contacts upstream.
+
+        Uses LiteLLM's model token counter when available and applies an upward
+        safety margin; falls back to a documented conservative character bound
+        when the model has no registered tokenizer. The result is a conservative
+        upper bound, not an authoritative provider token count.
+        """
+        model = self._litellm_model(request)
+        text = self._messages_text(request)
+        try:
+            count = litellm.token_counter(model=model, text=text)
+        except Exception:  # noqa: BLE001 - estimation is best-effort and conservative
+            count = 0
+        if isinstance(count, int) and count > 0:
+            return count + max(1, count // 4)  # +25% conservative margin
+        return max(1, len(text) // 3)  # documented conservative fallback
 
     def _kwargs(
         self, request: ChatRequest, secret: str | None
@@ -95,7 +127,11 @@ class LiteLLMChatAdapter:
                 **kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - boundary sanitizes all upstream failures
-            raise ProviderError(_safe_error_message(exc)) from exc
+            raise ProviderError(
+                _safe_error_message(exc),
+                status_code=getattr(exc, "status_code", None),
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc
 
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""
@@ -119,7 +155,11 @@ class LiteLLMChatAdapter:
                 **kwargs,
             )
         except Exception as exc:  # noqa: BLE001
-            raise ProviderError(_safe_error_message(exc)) from exc
+            raise ProviderError(
+                _safe_error_message(exc),
+                status_code=getattr(exc, "status_code", None),
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc
 
         try:
             async for chunk in response:
@@ -136,4 +176,8 @@ class LiteLLMChatAdapter:
                     usage=usage,
                 )
         except Exception as exc:  # noqa: BLE001
-            raise ProviderError(_safe_error_message(exc)) from exc
+            raise ProviderError(
+                _safe_error_message(exc),
+                status_code=getattr(exc, "status_code", None),
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc

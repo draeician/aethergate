@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: float = Field(
         default=30.0, validation_alias="AETHERGATE_WORKER_HEARTBEAT_SECONDS"
     )
+    # Default shared-quota-group cooldown when a provider returns 429 without an
+    # explicit Retry-After value. Applied only when the route carries a group.
+    provider_429_cooldown_seconds: float = Field(
+        default=60.0, validation_alias="AETHERGATE_PROVIDER_429_COOLDOWN_SECONDS"
+    )
 
     @property
     def upstream_allowlist_hosts(self) -> set[str]:

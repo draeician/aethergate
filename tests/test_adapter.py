@@ -132,7 +132,7 @@ async def test_adapter_maps_provider_error_safely(monkeypatch):
         await LiteLLMChatAdapter().complete(_request(), "sk-super-secret")
     assert "secret" not in str(excinfo.value.message)
     assert "http" not in str(excinfo.value.message)
-    assert excinfo.value.status_code is None
+    assert excinfo.value.status_code == 429
 
 
 def _make_capture_acompletion(captured: dict, response):

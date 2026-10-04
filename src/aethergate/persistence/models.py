@@ -22,6 +22,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -138,8 +139,90 @@ class QuotaGroup(Base, TimestampMixin):
     __tablename__ = "quota_groups"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    provider_account_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_accounts.id"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provider 429 cooldown for this shared scope; null means no active cooldown.
+    cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class QuotaLimit(Base, TimestampMixin):
+    """A single configured request/token limit within a quota group."""
+
+    __tablename__ = "quota_limits"
+    __table_args__ = (
+        CheckConstraint("limit_units >= 1", name="ck_quota_limits_units_positive"),
+        CheckConstraint("window_seconds >= 1", name="ck_quota_limits_window_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    quota_group_id: Mapped[str] = mapped_column(
+        ForeignKey("quota_groups.id"), nullable=False, index=True
+    )
+    metric: Mapped[str] = mapped_column(String(32), nullable=False)  # requests | tokens
+    limit_units: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class QuotaWindow(Base, TimestampMixin):
+    """Aggregated committed/reserved units for one limit's fixed window.
+
+    Fixed windows are anchored to the UTC epoch. ``committed_units`` records
+    actual consumption (may exceed the limit when usage was over-reserved);
+    ``reserved_units`` records pre-dispatch reservation not yet committed.
+    """
+
+    __tablename__ = "quota_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "quota_limit_id", "window_start", name="uq_quota_windows_limit_start"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    quota_limit_id: Mapped[str] = mapped_column(
+        ForeignKey("quota_limits.id"), nullable=False, index=True
+    )
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    committed_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class QuotaReservation(Base, TimestampMixin):
+    """A per-request reservation/commitment against one quota limit's window."""
+
+    __tablename__ = "quota_reservations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("inference_requests.id"), nullable=False, index=True
+    )
+    quota_limit_id: Mapped[str] = mapped_column(
+        ForeignKey("quota_limits.id"), nullable=False, index=True
+    )
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    metric: Mapped[str] = mapped_column(String(32), nullable=False)
+    reserved_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    committed_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="reserved"
+    )  # reserved | committed | released
+    committed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ModelAlias(Base, TimestampMixin):
@@ -168,6 +251,7 @@ class RouteBinding(Base, TimestampMixin):
     quota_group_id: Mapped[str | None] = mapped_column(
         ForeignKey("quota_groups.id"), nullable=True, index=True
     )
+    default_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
@@ -235,6 +319,10 @@ class InferenceRequest(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     reconciled_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Non-content scheduler explanation for a queued request (e.g. a blocking
+    # quota window); plaintext and carries no prompt/completion content.
+    wait_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class Reservation(Base, TimestampMixin):
@@ -304,6 +392,9 @@ __all__ = [
     "ProviderAccount",
     "Endpoint",
     "QuotaGroup",
+    "QuotaLimit",
+    "QuotaWindow",
+    "QuotaReservation",
     "ModelAlias",
     "RouteBinding",
     "InferenceRequest",

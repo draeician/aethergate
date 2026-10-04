@@ -15,7 +15,7 @@ Living document. Derived from the audit. Distinguish **settled** / **direction**
 | Endpoint / deployment | A physical serving location for an account | Multiple endpoints/credentials can share one provider org/project quota. |
 | Public model alias | The name clients use (`gpt-4o`) | Must not mint independent provider capacity. |
 | Route binding | Maps alias + capabilities to an endpoint/deployment | Explicit; no implicit data destination. |
-| Shared quota group | Shared limit across aliases/endpoints | Two endpoint records sharing one account quota must share the same bucket. |
+| Shared quota group | Shared limit across aliases/endpoints | Belongs to exactly one provider account (`provider_account_id`); two endpoint records sharing one account quota must share the same bucket. (Settled) |
 
 ## Invariants
 
@@ -70,11 +70,17 @@ scheduler and queueing described in `scheduler.md` are out of scope for this mil
   identically. (Direction)
 - `Retry-After` and documented reset windows are honored; cooldown applies to the actual shared
   quota scope. (Settled)
+- The adapter boundary now carries a narrow token-estimation contract
+  (`ChatAdapter.estimate_input_tokens`) that never contacts upstream; provider/model-specific
+  tokenizer behavior stays behind the adapter, and the scheduler consumes only a numeric
+  conservative reservation value. (Implemented)
+- The adapter error boundary preserves safe structured rate-limit feedback (`status_code`,
+  `retry_after_seconds`) with no raw credential/header or URL leakage; a provider `429` applies
+  cooldown to the route's shared quota group and never triggers an automatic retry. (Implemented)
 
 ## Deferred
 
 - Exact schema for the provider capability/limit profile (fields, granularity).
-- Whether shared quota groups are modeled as their own entities or as account-level attributes.
 - The operating/commercial model (internal access, project budgets, showback/chargeback, prepaid
   balances, reseller access, or combinations). This is deferred, not settled: do not assume prepaid
   billing is superseded — see `project_spec.md` §Accounting, pricing, and commercial model.

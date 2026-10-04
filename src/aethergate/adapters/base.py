@@ -75,3 +75,12 @@ class ChatAdapter(Protocol):
     def stream(
         self, request: ChatRequest, secret: str | None
     ) -> AsyncIterator[StreamChunk]: ...
+
+    def estimate_input_tokens(self, request: ChatRequest) -> int:
+        """Return a conservative upper bound on input tokens, without upstream contact.
+
+        Provider/model-specific tokenizer behavior stays behind the adapter; the
+        scheduler consumes only the returned numeric reservation. The value is a
+        conservative estimate, never an authoritative provider token count.
+        """
+        ...

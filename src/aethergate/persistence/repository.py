@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import Capability, PrincipalKind
+from aethergate.domain.enums import Capability, PrincipalKind, QuotaMetric
 from aethergate.domain.ids import (
     ApiCredentialId,
     EndpointId,
@@ -20,6 +20,7 @@ from aethergate.domain.ids import (
     ProviderAccountId,
     ProviderId,
     QuotaGroupId,
+    QuotaLimitId,
     RouteBindingId,
     SecretRefId,
 )
@@ -207,6 +208,79 @@ async def get_endpoint_by_name(session: AsyncSession, name: str) -> domain.Endpo
     return _endpoint_to_domain(row) if row else None
 
 
+def _quota_group_to_domain(row: models.QuotaGroup) -> domain.QuotaGroup:
+    return domain.QuotaGroup(
+        id=QuotaGroupId(row.id),
+        provider_account_id=ProviderAccountId(row.provider_account_id),
+        name=row.name,
+        description=row.description,
+    )
+
+
+async def create_quota_group(
+    session: AsyncSession, entity: domain.QuotaGroup
+) -> domain.QuotaGroup:
+    row = models.QuotaGroup(
+        id=str(entity.id),
+        provider_account_id=str(entity.provider_account_id),
+        name=entity.name,
+        description=entity.description,
+    )
+    session.add(row)
+    await session.flush()
+    return _quota_group_to_domain(row)
+
+
+async def get_quota_group_by_name(
+    session: AsyncSession, name: str
+) -> domain.QuotaGroup | None:
+    result = await session.execute(
+        select(models.QuotaGroup).where(models.QuotaGroup.name == name)
+    )
+    row = result.scalar_one_or_none()
+    return _quota_group_to_domain(row) if row else None
+
+
+def _quota_limit_to_domain(row: models.QuotaLimit) -> domain.QuotaLimit:
+    return domain.QuotaLimit(
+        id=QuotaLimitId(row.id),
+        quota_group_id=QuotaGroupId(row.quota_group_id),
+        metric=QuotaMetric(row.metric),
+        limit_units=row.limit_units,
+        window_seconds=row.window_seconds,
+        enabled=row.enabled,
+        name=row.name,
+    )
+
+
+async def create_quota_limit(
+    session: AsyncSession, entity: domain.QuotaLimit
+) -> domain.QuotaLimit:
+    row = models.QuotaLimit(
+        id=str(entity.id),
+        quota_group_id=str(entity.quota_group_id),
+        metric=entity.metric.value,
+        limit_units=entity.limit_units,
+        window_seconds=entity.window_seconds,
+        enabled=entity.enabled,
+        name=entity.name,
+    )
+    session.add(row)
+    await session.flush()
+    return _quota_limit_to_domain(row)
+
+
+async def list_quota_limits_for_group(
+    session: AsyncSession, group_id: QuotaGroupId
+) -> list[domain.QuotaLimit]:
+    result = await session.execute(
+        select(models.QuotaLimit)
+        .where(models.QuotaLimit.quota_group_id == str(group_id))
+        .order_by(models.QuotaLimit.id)
+    )
+    return [_quota_limit_to_domain(r) for r in result.scalars().all()]
+
+
 async def update_endpoint_max_concurrency(
     session: AsyncSession, endpoint_id: EndpointId, max_concurrency: int
 ) -> domain.Endpoint:
@@ -276,6 +350,7 @@ def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
         provider_account_id=ProviderAccountId(row.provider_account_id),
         upstream_model=row.upstream_model,
         quota_group_id=QuotaGroupId(row.quota_group_id) if row.quota_group_id else None,
+        default_output_tokens=row.default_output_tokens,
         is_active=row.is_active,
     )
 
@@ -283,6 +358,14 @@ def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
 async def create_route_binding(
     session: AsyncSession, entity: domain.RouteBinding
 ) -> domain.RouteBinding:
+    if entity.quota_group_id is not None:
+        group = await session.get(models.QuotaGroup, str(entity.quota_group_id))
+        if group is None:
+            raise ValueError(f"quota group {entity.quota_group_id!s} not found")
+        if group.provider_account_id != str(entity.provider_account_id):
+            raise ValueError(
+                "route quota group must belong to the route's provider account"
+            )
     row = models.RouteBinding(
         id=str(entity.id),
         model_alias_id=str(entity.model_alias_id),
@@ -290,6 +373,7 @@ async def create_route_binding(
         provider_account_id=str(entity.provider_account_id),
         upstream_model=entity.upstream_model,
         quota_group_id=str(entity.quota_group_id) if entity.quota_group_id else None,
+        default_output_tokens=entity.default_output_tokens,
         is_active=entity.is_active,
     )
     session.add(row)

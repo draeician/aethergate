@@ -70,13 +70,21 @@ class ProviderError(DomainError):
     """An upstream provider failure, safe for client-visible mapping.
 
     ``message`` is a sanitized description; it must never contain credentials,
-    upstream URLs, or secret material.
+    upstream URLs, or secret material. ``retry_after_seconds`` carries safe
+    structured rate-limit feedback when the provider reliably supplies it.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 class AuthenticationRequired(DomainError):

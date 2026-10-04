@@ -96,6 +96,82 @@ AGV2-006 hardened phase-1 correctness before quota expansion:
 Schema: migration `0004` adds `endpoints` positive-concurrency CHECK and `inference_requests`
 reconciliation metadata (`reconciled_state`, `reconciled_at`, `reconciled_by`).
 
+## Phase 3 — shared provider-account request/token quotas (implemented)
+
+AGV2-008 reserves shared quota capacity transactionally with endpoint physical capacity. It does
+**not** add monetary project budgets (those need the accounting/pricing foundation and are still
+deferred).
+
+Quota model:
+
+- A `QuotaGroup` belongs to exactly one `ProviderAccount` (`provider_account_id`, NOT NULL). A route
+  may reference a group only when the route's provider account matches the group's; multiple
+  aliases/endpoints/routes may share one group. No quota is inferred from URL or provider name. A
+  route without a group is governed only by endpoint concurrency.
+- A group holds one or more `QuotaLimit`s: `metric` (`requests`|`tokens`), positive `limit_units`,
+  positive `window_seconds`, `enabled`, optional `name`. Multiple simultaneous request and token
+  windows are supported without special-casing minute/day.
+- Windows are **fixed and anchored deterministically to the UTC epoch**:
+  `window_start = (epoch_seconds // window_seconds) * window_seconds`, range
+  `[window_start, window_start + window_seconds)`. No sliding-window semantics are claimed.
+- `QuotaWindow` is the authority row: `committed_units` + `reserved_units`, unique
+  `(quota_limit_id, window_start)`. Admission evaluates
+  `committed_units + reserved_units + requested_units <= limit_units` under row locks.
+- `QuotaReservation` records each per-request reservation (`reserved`|`committed`|`released`),
+  denormalized `metric`, and `reserved_units`/`committed_units`.
+
+Request-quota semantics:
+
+- A request unit is consumed when durable dispatch intent is committed (immediately before upstream
+  contact). Queued/pre-dispatch-cancelled work consumes no request quota; once dispatch intent is
+  durable, the unit stays consumed even if upstream later fails. One execution attempt == one
+  request-unit commitment (retries still out of scope).
+
+Token-quota semantics:
+
+- Pre-dispatch, the adapter produces a conservative input estimate (`estimate_input_tokens`, no
+  upstream contact) plus a bounded output reservation (`max_tokens` if the client supplies it, else
+  the route's `default_output_tokens`). A token-quota request with no way to bound output is
+  rejected explicitly rather than dispatched without a safe reservation.
+- On success with trustworthy usage, reserved tokens settle to actual reported total usage (releasing
+  unused units within the window). If actual usage exceeds the reservation, the overage is recorded
+  honestly (committed may exceed the limit; nothing is truncated or hidden).
+- On a post-dispatch failure/cancellation with unknown usage, the reserved amount is committed
+  conservatively (never released, never invented). `outcome_unknown` keeps its token reservation
+  until explicit reconciliation or window expiry; reconciliation commits (never creates) capacity.
+  Pre-dispatch cancellation/reclaim releases token reservations (upstream never contacted).
+
+Atomic admission and lock order (deterministic, tested):
+
+1. quota group (FOR UPDATE), then quota limits in stable ID order;
+2. current quota-window rows (get-or-create under the unique constraint, then FOR UPDATE);
+3. endpoint row / physical concurrency;
+4. request/attempt/reservation state.
+
+If any required quota lacks capacity, none of the request's capacity is acquired; no DB transaction
+remains open while waiting for a reset; multiple workers cannot oversubscribe a window. A request
+that cannot fit even an empty token window is failed explicitly.
+
+Provider feedback:
+
+- The adapter boundary preserves safe structured feedback (`status_code`, `retry_after_seconds`); no
+  raw headers or URLs leak. On provider 429 the group enters a cooldown (`cooldown_until`) so future
+  work for that scope stays queued; the failed attempt remains a consumed request unit. If no
+  reliable Retry-After is present, a small configurable conservative cooldown
+  (`provider_429_cooldown_seconds`) is applied. No automatic retry occurs.
+
+Eligibility/queue behavior:
+
+- When a free physical slot exists but a quota window is exhausted, the request stays queued with a
+  non-content `wait_reason` (e.g. `quota_window_exhausted`), no execution attempt is created, and the
+  worker does not spin hot. An unrelated endpoint/group with capacity still dispatches. FIFO within
+  the same endpoint + quota scope is preserved.
+
+Schema: migration `0005` adds `quota_groups.provider_account_id` (+ NOT NULL) and
+`quota_groups.cooldown_until`; creates `quota_limits`, `quota_windows` (unique
+`(quota_limit_id, window_start)`), and `quota_reservations`; adds
+`route_bindings.default_output_tokens` and `inference_requests.wait_reason`.
+
 ## Conservative lease / recovery (phase 1 rules)
 
 - A request whose lease expires while still `reserved` (dispatch intent not yet durable) is safe to
@@ -159,7 +235,7 @@ enforcement more predictable. (Settled)
 - Fairness/reordering mode *within* a single endpoint (beyond per-endpoint FIFO) — must be explicit
   if introduced. Cross-endpoint head-of-line blocking is already prevented (see the contract above).
 - Caching/wake-up mechanism for empty-queue -> arrival signaling (added only after measurement).
-- Provider RPM/TPM windows; TPM/token reservation; shared provider-account quota windows; project
-  budgets; retries/cooldown orchestration — later phases, to be reserved together with endpoint
-  capacity.
+- Project monetary budgets and pricing/accounting settlement — later phase, to participate in the
+  same atomic admission transaction once price snapshots/reservations exist.
+- Retries (bounded, jittered) for eligible failures — later phase.
 - Key rotation for the queue-content encryption key (deferred unless safely straightforward).

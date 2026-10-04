@@ -41,6 +41,37 @@ async def _run() -> None:
                 .order_by(models.Endpoint.name)
             )
         ).all()
+        quota_windows = (
+            await session.execute(
+                select(
+                    models.QuotaLimit.metric,
+                    models.QuotaLimit.limit_units,
+                    models.QuotaLimit.window_seconds,
+                    models.QuotaWindow.window_start,
+                    models.QuotaWindow.committed_units,
+                    models.QuotaWindow.reserved_units,
+                    models.QuotaGroup.name,
+                    models.QuotaGroup.cooldown_until,
+                )
+                .join(models.QuotaLimit, models.QuotaWindow.quota_limit_id == models.QuotaLimit.id)
+                .join(models.QuotaGroup, models.QuotaLimit.quota_group_id == models.QuotaGroup.id)
+                .order_by(models.QuotaGroup.name, models.QuotaLimit.metric)
+            )
+        ).all()
+        waiting = (
+            await session.execute(
+                select(
+                    models.InferenceRequest.id,
+                    models.InferenceRequest.state,
+                    models.InferenceRequest.wait_reason,
+                )
+                .where(
+                    models.InferenceRequest.state == "queued",
+                    models.InferenceRequest.wait_reason.is_not(None),
+                )
+                .order_by(models.InferenceRequest.queued_at)
+            )
+        ).all()
 
     print("inference request states:")
     if not counts:
@@ -53,6 +84,23 @@ async def _run() -> None:
         print(f"  {name}: {max_concurrency}")
 
     print(f"\nactive reservations: {active_reservations}")
+
+    print("\nquota windows (group / metric / used / limit / start / cooldown):")
+    if not quota_windows:
+        print("  (none)")
+    for metric, limit, _window, start, committed, reserved, group, cooldown in quota_windows:
+        cd = cooldown.isoformat() if cooldown is not None else "-"
+        print(
+            f"  {group} {metric} {committed + reserved}/{limit} "
+            f"start={start.isoformat()} committed={committed} "
+            f"reserved={reserved} cooldown_until={cd}"
+        )
+
+    print("\nqueued requests with a limiting reason:")
+    if not waiting:
+        print("  (none)")
+    for request_id, _state, reason in waiting:
+        print(f"  {request_id}: {reason}")
 
 
 def main() -> None:

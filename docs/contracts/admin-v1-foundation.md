@@ -8,11 +8,22 @@ decisions. FastAPI routes, paths, and filters are **not** finalized yet.
 ## Established DTO shapes
 
 Read/create/update foundations exist for: providers, provider accounts, endpoints, quota
-groups, model aliases, route bindings, projects, principals, and API credential metadata.
+groups, quota limits, model aliases, route bindings, projects, principals, and API credential
+metadata.
 
 - Create shapes carry required fields plus defaults.
 - Read shapes carry stable opaque IDs and no secret material.
 - Update shapes use explicit optionality (all fields optional) for PATCH semantics.
+
+Quota DTOs (scheduler phase 2):
+
+- `QuotaGroupCreate` requires `provider_account_id`; `QuotaGroupRead` exposes it.
+- `QuotaLimitCreate` validates a positive `limit_units`, positive `window_seconds`, and a valid
+  `metric` enum (`requests`|`tokens`); `QuotaLimitRead`/`QuotaLimitUpdate` mirror it.
+- `RouteBindingCreate`/`Read`/`Update` carry `default_output_tokens` (positive) and
+  `quota_group_id`, for the default bounded output-token reservation.
+
+No admin HTTP CRUD routes yet; these are the persistence/transport-independent foundations.
 
 ## Requirements honored
 

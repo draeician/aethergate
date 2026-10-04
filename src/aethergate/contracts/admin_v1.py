@@ -15,7 +15,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from aethergate.contracts.common import ContractModel
-from aethergate.domain.enums import Capability, PrincipalKind
+from aethergate.domain.enums import Capability, PrincipalKind, QuotaMetric
 from aethergate.domain.ids import (
     ApiCredentialId,
     EndpointId,
@@ -25,6 +25,7 @@ from aethergate.domain.ids import (
     ProviderAccountId,
     ProviderId,
     QuotaGroupId,
+    QuotaLimitId,
     RouteBindingId,
     SecretRefId,
 )
@@ -175,12 +176,14 @@ class EndpointUpdate(ContractModel):
 
 
 class QuotaGroupCreate(ContractModel):
+    provider_account_id: ProviderAccountId
     name: str = Field(min_length=1)
     description: str | None = None
 
 
 class QuotaGroupRead(ContractModel):
     id: QuotaGroupId
+    provider_account_id: ProviderAccountId
     name: str
     description: str | None = None
 
@@ -188,6 +191,35 @@ class QuotaGroupRead(ContractModel):
 class QuotaGroupUpdate(ContractModel):
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
+
+
+# --- Quota limits ------------------------------------------------------------
+
+
+class QuotaLimitCreate(ContractModel):
+    quota_group_id: QuotaGroupId
+    metric: QuotaMetric
+    limit_units: int = Field(ge=1)
+    window_seconds: int = Field(ge=1)
+    enabled: bool = True
+    name: str | None = None
+
+
+class QuotaLimitRead(ContractModel):
+    id: QuotaLimitId
+    quota_group_id: QuotaGroupId
+    metric: QuotaMetric
+    limit_units: int
+    window_seconds: int
+    enabled: bool
+    name: str | None = None
+
+
+class QuotaLimitUpdate(ContractModel):
+    limit_units: int | None = Field(default=None, ge=1)
+    window_seconds: int | None = Field(default=None, ge=1)
+    enabled: bool | None = None
+    name: str | None = None
 
 
 # --- Model aliases ----------------------------------------------------------
@@ -221,6 +253,7 @@ class RouteBindingCreate(ContractModel):
     provider_account_id: ProviderAccountId
     upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
+    default_output_tokens: int | None = Field(default=None, ge=1)
 
 
 class RouteBindingRead(ContractModel):
@@ -230,12 +263,14 @@ class RouteBindingRead(ContractModel):
     provider_account_id: ProviderAccountId
     upstream_model: str | None = None
     quota_group_id: QuotaGroupId | None = None
+    default_output_tokens: int | None = None
     is_active: bool
 
 
 class RouteBindingUpdate(ContractModel):
     upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
+    default_output_tokens: int | None = Field(default=None, ge=1)
     is_active: bool | None = None
 
 
@@ -261,6 +296,9 @@ __all__ = [
     "QuotaGroupCreate",
     "QuotaGroupRead",
     "QuotaGroupUpdate",
+    "QuotaLimitCreate",
+    "QuotaLimitRead",
+    "QuotaLimitUpdate",
     "ModelAliasCreate",
     "ModelAliasRead",
     "ModelAliasUpdate",
