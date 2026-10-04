@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
+from aethergate.domain.ids import ModelAliasId
 from aethergate.errors import (
     AmbiguousRoute,
     ModelAliasNotFound,
@@ -40,15 +41,31 @@ async def resolve_model_alias(session: AsyncSession, alias_name: str) -> Resolve
     alias = await repository.get_model_alias_by_name(session, alias_name)
     if alias is None:
         raise ModelAliasNotFound(alias_name)
+    return await _resolve_alias(session, alias)
+
+
+async def resolve_model_alias_by_id(
+    session: AsyncSession, alias_id: ModelAliasId
+) -> ResolvedRoute:
+    """Resolve an alias by its typed ID to its single active route."""
+    alias = await repository.get_model_alias(session, alias_id)
+    if alias is None:
+        raise ModelAliasNotFound(str(alias_id))
+    return await _resolve_alias(session, alias)
+
+
+async def _resolve_alias(
+    session: AsyncSession, alias: domain.ModelAlias
+) -> ResolvedRoute:
     if not alias.is_active:
-        raise ResourceInactive("model alias", alias_name)
+        raise ResourceInactive("model alias", alias.name)
 
     bindings = await repository.list_route_bindings(session, alias.id)
     active_bindings = [b for b in bindings if b.is_active]
     if not active_bindings:
         raise ResourceInactive("route", str(alias.id))
     if len(active_bindings) > 1:
-        raise AmbiguousRoute(alias_name, [str(b.id) for b in active_bindings])
+        raise AmbiguousRoute(alias.name, [str(b.id) for b in active_bindings])
 
     binding = active_bindings[0]
     if not binding.upstream_model or not binding.upstream_model.strip():

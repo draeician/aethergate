@@ -1,21 +1,28 @@
-"""OpenAI-compatible API surface tests (DB-gated, mock upstream adapter)."""
+"""OpenAI-compatible API surface tests (DB-gated, scheduler + mock adapter).
+
+These exercise the full scheduler-admitted path: the API enqueues a durable
+request and a background worker dispatches it through a mock adapter.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from aethergate.adapters import registry as registry_module
 from aethergate.adapters.base import (
     ChatRequest,
     CompletionResult,
     StreamChunk,
     Usage,
 )
+from aethergate.api import deps as api_deps
 from aethergate.config import Settings
+from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import Capability
 from aethergate.domain.ids import (
@@ -25,17 +32,23 @@ from aethergate.domain.ids import (
     ProviderId,
     RouteBindingId,
 )
+from aethergate.egress import DestinationPolicy
+from aethergate.encryption import QueueEncryptor
+from aethergate.inference.service import InferenceService
 from aethergate.main import app
-from aethergate.persistence import db as db_module
 from aethergate.persistence import repository
+from aethergate.scheduler.service import ClaimedWork, SchedulingService
+from aethergate.secrets import EnvSecretResolver
+from db_helpers import TEST_DATABASE_URL, reset_schema
+
+pytestmark = pytest.mark.skipif(
+    TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set"
+)
 
 
 class MockAdapter:
-    """In-memory upstream adapter for deterministic endpoint tests."""
-
-    def __init__(self, *, content: str = "Hello from mock", closed: bool = False) -> None:
+    def __init__(self, *, content: str = "Hello from mock") -> None:
         self._content = content
-        self.closed = closed
 
     async def complete(self, request: ChatRequest, secret: str | None) -> CompletionResult:
         return CompletionResult(
@@ -45,16 +58,15 @@ class MockAdapter:
             upstream_request_id="upstream-mock-1",
         )
 
-    async def stream(self, request: ChatRequest, secret: str | None) -> AsyncIterator[StreamChunk]:
-        try:
-            yield StreamChunk(content="Hello", finish_reason=None, usage=None)
-            yield StreamChunk(
-                content=" from mock",
-                finish_reason="stop",
-                usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
-            )
-        finally:
-            self.closed = True
+    async def stream(
+        self, request: ChatRequest, secret: str | None
+    ) -> AsyncIterator[StreamChunk]:
+        yield StreamChunk(content="Hello", finish_reason=None, usage=None)
+        yield StreamChunk(
+            content=" from mock",
+            finish_reason="stop",
+            usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
 
 
 async def _seed(session) -> None:
@@ -80,6 +92,7 @@ async def _seed(session) -> None:
             provider_account_id=ProviderAccountId("acct-ollama"),
             name="ollama-endpoint",
             base_destination="http://192.168.22.50:11434",
+            max_concurrency=2,
         ),
     )
     await repository.create_model_alias(
@@ -106,28 +119,62 @@ async def _seed(session) -> None:
     )
 
 
+async def _drain(service: SchedulingService, worker_id: str) -> None:
+    while True:
+        outcome = await service.claim_and_reserve(worker_id)
+        if isinstance(outcome, ClaimedWork):
+            if outcome.stream:
+                await service.run_stream(outcome)
+            else:
+                await service.run_complete(outcome)
+        else:
+            await asyncio.sleep(service.poll_interval)
+
+
 @pytest.fixture
-async def api_client(session, monkeypatch):
-    await _seed(session)
+async def api_client(sched_engine, monkeypatch):
+    await reset_schema(sched_engine)
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed(session)
+            context = await ensure_dev_identity(session)
 
     mock = MockAdapter()
-    monkeypatch.setitem(registry_module._ADAPTERS, "ollama", mock)
-
-    fake_settings = Settings(
+    encryptor = QueueEncryptor(QueueEncryptor.generate_key())
+    settings = Settings(
         database_url="postgresql+asyncpg://u:p@h/db",
         allow_inference_auth_bypass=True,
         upstream_allowlist="192.168.22.50",
     )
-    monkeypatch.setattr("aethergate.api.deps.get_settings", lambda: fake_settings)
+    factory = async_sessionmaker(sched_engine, expire_on_commit=False)
+    inference = InferenceService(
+        EnvSecretResolver(),
+        DestinationPolicy(settings.upstream_allowlist_hosts),
+        adapter_factory=lambda kind: mock,
+    )
+    service = SchedulingService(
+        encryptor=encryptor,
+        inference_service=inference,
+        session_factory=factory,
+        settings=settings,
+    )
 
-    async def _override_session():
-        yield session
+    monkeypatch.setattr("aethergate.api.deps.get_settings", lambda: settings)
+    app.dependency_overrides[api_deps.scheduler_service] = lambda: service
+    app.dependency_overrides[api_deps.dev_request_context] = lambda: context
 
-    app.dependency_overrides[db_module.get_session] = _override_session
+    worker = asyncio.create_task(_drain(service, "w-test"))
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, mock
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
     app.dependency_overrides.clear()
+    await reset_schema(sched_engine)
 
 
 async def test_models_list_public_active_aliases(api_client):
@@ -216,7 +263,7 @@ async def test_transport_override_fields_rejected(api_client):
 
 
 async def test_unknown_model_returns_404_and_does_not_dispatch(api_client):
-    client, mock = api_client
+    client, _ = api_client
     resp = await client.post(
         "/v1/chat/completions",
         json={"model": "nope", "messages": [{"role": "user", "content": "hi"}]},

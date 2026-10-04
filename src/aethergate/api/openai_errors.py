@@ -17,6 +17,8 @@ from aethergate.errors import (
     DomainError,
     ModelAliasNotFound,
     ProviderError,
+    QueueFull,
+    QueueTimeout,
     ResourceInactive,
     RouteUnresolved,
     SecretResolutionError,
@@ -114,6 +116,22 @@ def to_openai_error(exc: DomainError, request_id: str | None) -> JSONResponse:
             "Authentication is required to use inference.",
             "invalid_request_error",
             code="not_authenticated",
+            request_id=request_id,
+        )
+    if isinstance(exc, QueueFull):
+        return _error(
+            503,
+            "The inference queue is at capacity; please retry later.",
+            "server_error",
+            code="queue_full",
+            request_id=request_id,
+        )
+    if isinstance(exc, QueueTimeout):
+        return _error(
+            504,
+            "The request timed out waiting in the inference queue.",
+            "server_error",
+            code="queue_timeout",
             request_id=request_id,
         )
     return _error(

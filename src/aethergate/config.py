@@ -43,6 +43,25 @@ class Settings(BaseSettings):
         default=120.0, validation_alias="AETHERGATE_INFERENCE_TIMEOUT_SECONDS"
     )
 
+    # Scheduler queue encryption key (Fernet). Outside PostgreSQL, never committed.
+    queue_key: SecretStr | None = Field(default=None, validation_alias="AETHERGATE_QUEUE_KEY")
+    # Scheduler bounds / timing.
+    queue_max_requests: int = Field(
+        default=10000, validation_alias="AETHERGATE_QUEUE_MAX_REQUESTS"
+    )
+    queue_max_wait_seconds: float = Field(
+        default=300.0, validation_alias="AETHERGATE_QUEUE_MAX_WAIT_SECONDS"
+    )
+    queue_total_lifetime_seconds: float = Field(
+        default=600.0, validation_alias="AETHERGATE_QUEUE_TOTAL_LIFETIME_SECONDS"
+    )
+    scheduler_poll_interval_seconds: float = Field(
+        default=0.2, validation_alias="AETHERGATE_SCHEDULER_POLL_INTERVAL_SECONDS"
+    )
+    worker_lease_seconds: float = Field(
+        default=120.0, validation_alias="AETHERGATE_WORKER_LEASE_SECONDS"
+    )
+
     @property
     def upstream_allowlist_hosts(self) -> set[str]:
         """Parsed, normalized set of allowlisted upstream hostnames."""
@@ -58,6 +77,12 @@ class Settings(BaseSettings):
             raise ValueError(
                 "allow_inference_auth_bypass cannot be enabled in production mode"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_queue_key_in_prod(self) -> Settings:
+        if self.app_env == "prod" and self.queue_key is None:
+            raise ValueError("queue_key (AETHERGATE_QUEUE_KEY) is required in production mode")
         return self
 
     @model_validator(mode="after")

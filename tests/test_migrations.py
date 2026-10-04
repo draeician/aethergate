@@ -37,6 +37,10 @@ EXPECTED_TABLES = {
     "quota_groups",
     "model_aliases",
     "route_bindings",
+    "inference_requests",
+    "reservations",
+    "execution_attempts",
+    "stream_events",
 }
 
 

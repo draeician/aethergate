@@ -57,7 +57,9 @@ universal authorization requirement.
 - `ProviderAccount` — credential/account boundary and provider-side account/project identity
   (never inferred from URL).
 - `SecretRef` — reference to secret material; never the material itself.
-- `Endpoint` — deployment/base destination and physical capacity configuration.
+- `Endpoint` — deployment/base destination and physical capacity configuration. Since scheduler
+  phase 1 it carries `max_concurrency`, the physical concurrency limit for that endpoint/deployment.
+  Capacity belongs to the physical endpoint, never to a public alias.
 - `QuotaGroup` — shared allowance scope across routes/endpoints/models.
 - `ModelAlias` — stable public model identity (distinct from endpoint/provider identity).
 - `RouteBinding` — permitted route from alias to endpoint/account with policy metadata.

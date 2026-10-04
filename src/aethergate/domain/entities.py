@@ -117,6 +117,7 @@ class Endpoint(Entity):
     provider_account_id: ProviderAccountId
     name: str
     base_destination: str
+    max_concurrency: int = 1
     is_active: bool = True
 
 

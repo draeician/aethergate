@@ -16,9 +16,10 @@ deadlines when provider capacity is temporarily unavailable.
 
 - **Modular monolith** with separate API and execution-worker entrypoints from one codebase.
   (Settled — not a fleet of microservices.)
-- **API entrypoint**: authentication, request validation, enqueue, and thin protocol/status routers.
-- **Worker entrypoint**: claims queued work, dispatches to providers, streams responses, settles
-  accounting.
+- **API entrypoint** (`aethergate.main`): authentication, request validation, enqueue, and thin
+  protocol/status routers.
+- **Worker entrypoint** (`aethergate.worker`): claims queued work, dispatches to providers, streams
+  responses, settles terminal state. (Scheduler phase 1 enforces physical endpoint concurrency only.)
 - **PostgreSQL** is the authoritative store for identities, configuration, durable queued work,
   quota reservations, accounting, and audit. (Direction)
 
@@ -54,7 +55,9 @@ administrative audit event.
 ## Execution lifecycle (see scheduler.md)
 
 `validated -> queued -> reserved -> dispatched -> streaming -> succeeded/failed/cancelled/expired`,
-plus `outcome_unknown` for ambiguous failures.
+plus `outcome_unknown` for ambiguous failures. Scheduler phase 1 enforces physical endpoint
+concurrency only; provider RPM/TPM, token reservation, shared-account quotas, project budgets, and
+retry orchestration remain deferred.
 
 ## Security (see security.md)
 

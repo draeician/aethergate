@@ -22,6 +22,7 @@ import os
 import uuid
 
 from aethergate.config import get_settings
+from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import Capability
 from aethergate.domain.ids import (
@@ -52,6 +53,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--alias", default=_env("AETHERGATE_SEED_PUBLIC_ALIAS"))
     parser.add_argument("--base-destination", default=_env("AETHERGATE_SEED_BASE_DESTINATION"))
     parser.add_argument("--secret-ref-name", default=_env("AETHERGATE_SEED_SECRET_REF_NAME"))
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=int(_env("AETHERGATE_SEED_MAX_CONCURRENCY") or "1"),
+        help="endpoint physical concurrency limit",
+    )
     return parser.parse_args()
 
 
@@ -117,12 +124,18 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                         provider_account_id=account.id,
                         name=endpoint_name,
                         base_destination=base_destination,
+                        max_concurrency=args.max_concurrency,
                     ),
                 )
-            elif endpoint.base_destination != base_destination:
-                raise SystemExit(
-                    f"endpoint {endpoint_name!r} already exists with a different destination"
-                )
+            else:
+                if endpoint.base_destination != base_destination:
+                    raise SystemExit(
+                        f"endpoint {endpoint_name!r} already exists with a different destination"
+                    )
+                if endpoint.max_concurrency != args.max_concurrency:
+                    endpoint = await repository.update_endpoint_max_concurrency(
+                        session, endpoint.id, args.max_concurrency
+                    )
 
             alias = await repository.get_model_alias_by_name(session, args.alias)
             if alias is None:
@@ -154,11 +167,14 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
                     ),
                 )
 
+            await ensure_dev_identity(session)
+
     return {
         "provider_kind": kind,
         "provider_id": str(provider.id),
         "account_id": str(account.id),
         "endpoint_id": str(endpoint.id),
+        "endpoint_max_concurrency": endpoint.max_concurrency,
         "alias": alias.name,
         "alias_id": str(alias.id),
         "upstream_model": args.upstream_model,

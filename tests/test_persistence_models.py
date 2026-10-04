@@ -54,4 +54,20 @@ def test_expected_tables_registered():
         "quota_groups",
         "model_aliases",
         "route_bindings",
+        "inference_requests",
+        "reservations",
+        "execution_attempts",
+        "stream_events",
     } <= names
+
+
+def test_scheduler_content_columns_are_binary_not_text():
+    """Prompt/completion content must not be a plaintext text column."""
+    request_columns = {c.name: c.type for c in models.InferenceRequest.__table__.columns}
+    event_columns = {c.name: c.type for c in models.StreamEvent.__table__.columns}
+    for name, coltype in request_columns.items():
+        if name in ("payload_encrypted", "result_encrypted"):
+            assert not isinstance(coltype, sa.Text), f"{name} must not be text"
+    for name, coltype in event_columns.items():
+        if name == "event_encrypted":
+            assert not isinstance(coltype, sa.Text), f"{name} must not be text"

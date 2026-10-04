@@ -65,8 +65,12 @@ class InferenceService:
     async def resolve(self, session: AsyncSession, alias: str) -> ResolvedRoute:
         """Resolve ``alias`` and enforce the destination policy."""
         resolved = await resolve_model_alias(session, alias)
-        self._policy.validate(resolved.endpoint.base_destination)
+        self.validate_destination(resolved)
         return resolved
+
+    def validate_destination(self, resolved: ResolvedRoute) -> None:
+        """Enforce the egress destination policy for an already-resolved route."""
+        self._policy.validate(resolved.endpoint.base_destination)
 
     async def _secret(self, session: AsyncSession, resolved: ResolvedRoute) -> str | None:
         ref_id = resolved.provider_account.secret_ref_id
@@ -86,6 +90,17 @@ class InferenceService:
     ) -> PreparedDispatch:
         """Resolve, guard, and prepare a dispatch without contacting upstream."""
         resolved = await self.resolve(session, alias)
+        return await self.prepare_from_resolved(session, resolved, messages, params)
+
+    async def prepare_from_resolved(
+        self,
+        session: AsyncSession,
+        resolved: ResolvedRoute,
+        messages: list[Message],
+        params: GenerationParams | None = None,
+    ) -> PreparedDispatch:
+        """Build a dispatch from an already-resolved, guarded route."""
+        self._policy.validate(resolved.endpoint.base_destination)
         secret = await self._secret(session, resolved)
         adapter = self._adapter_factory(resolved.provider.kind)
         request = ChatRequest(

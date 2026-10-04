@@ -81,3 +81,15 @@ class ProviderError(DomainError):
 
 class AuthenticationRequired(DomainError):
     """Inference authentication is not configured/allowed for this request."""
+
+
+class QueueKeyError(DomainError):
+    """The scheduler queue encryption key is absent or invalid."""
+
+
+class QueueFull(DomainError):
+    """The scheduler queue has reached its configured capacity."""
+
+
+class QueueTimeout(DomainError):
+    """A queued request expired before it could be dispatched or completed."""

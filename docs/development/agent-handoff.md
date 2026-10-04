@@ -3,111 +3,98 @@
 ## Current State
 - Branch: v2
 - Starting commit: 4ce9e8d (pulled latest origin/v2)
-- Implementation commit: 687232b
+- Implementation commits: 687232b (AGV2-004), `27f552b` + AGV2-005 commits (this task)
 
 ## Task Completed
-AGV2-004 — first real OpenAI-compatible inference through AetherGate v2. Added the direct-dispatch
-inference path: a provider-adapter boundary backed by the LiteLLM SDK (retries/fallback disabled),
-an explicit egress/destination guard, OpenAI-compatible `GET /v1/models`, `GET /v1/models/{model}`,
-and `POST /v1/chat/completions` (non-streaming + SSE streaming), plus a development-only seed tool.
+AGV2-005 — durable scheduler phase 1: PostgreSQL queue, worker ownership, and endpoint concurrency.
+Replaced the direct-dispatch inference path with a durable scheduler: the API enqueues an encrypted
+request and a separate worker process claims/dispatches it, enforcing physical endpoint concurrency
+(`endpoint.max_concurrency`), with multi-worker ownership via leases + fencing tokens and conservative
+recovery. Verified real inference and concurrency on nomnom with two workers.
 
-Real inference through an official OpenAI SDK client -> AetherGate v2 -> public alias -> route ->
-endpoint/account/provider -> LiteLLM adapter -> nomnom Ollama backend was verified for both
-non-streaming and streaming.
+## Scheduler phase 1 behavior
+- `POST /v1/chat/completions` validates/resolves, enqueues an encrypted request, then waits for a
+  terminal result (non-stream) or replays the encrypted per-request stream events (SSE). The API
+  process never calls the provider adapter.
+- The worker claims FIFO via `FOR UPDATE SKIP LOCKED`, re-resolves/revalidates the route by alias id,
+  locks the endpoint row, counts active reservations vs `max_concurrency`, then transactionally
+  reserves + creates an execution attempt with a lease and fencing token. Dispatch intent is committed
+  durably before contacting upstream; inference runs outside any DB transaction.
+- Concurrency contract verified on nomnom: with `max_concurrency=2` and six simultaneous requests,
+  exactly two dispatch at once, the rest queue FIFO, and each slot releases on completion.
+- Conservative recovery: expired lease on a `reserved` (pre-dispatch-intent) request is safely
+  requeued; expired lease after durable dispatch intent goes `outcome_unknown` and keeps its slot;
+  fencing token gates terminal settlement. Verified queued requests survive worker restart and drain
+  once a worker returns.
 
-## Provider adapter boundary
-- `src/aethergate/adapters/` — `ChatAdapter` protocol (`complete`/`stream`), `ChatRequest`/
-  `CompletionResult`/`StreamChunk`/`GenerationParams` data structures, `LiteLLMChatAdapter`, and
-  `registry.adapter_for(kind)`.
-- AetherGate resolves the endpoint/account/provider/upstream model before entering the adapter;
-  the adapter receives `base_destination` and `upstream_model` from resolved config only (never from
-  the client). LiteLLM Router is not used; `num_retries=0`, `max_retries=0`, `drop_params=False`.
-- Provider-kind translation (`registry.adapter_for`) is isolated so new providers do not change API
-  routers. Secrets are resolved only via `SecretResolver` (`EnvSecretResolver`, dev/test only).
+## Encryption of queued content
+- `src/aethergate/encryption.py` — `QueueEncryptor` (Fernet) + `encryptor_from_key`; key from
+  `AETHERGATE_QUEUE_KEY`, required in `prod`, never committed/logged. Prompt/messages, completion, and
+  stream-event content are encrypted at rest in PostgreSQL; scheduling metadata is plaintext.
+- `src/aethergate/errors.py` — `QueueKeyError`, `QueueFull`, `QueueTimeout`.
 
-## Upstream-model contract / migration
-- `RouteBinding` gained `upstream_model` (domain entity, admin DTO create/read/update, persistence
-  model/repository, catalog `ResolvedRoute`). Migration `0002` adds the nullable column compatibly;
-  `0001` was not rewritten.
-- `catalog.resolve_model_alias` now raises `RouteUnresolved` when a single active route has no
-  `upstream_model`; a later tightening migration (NOT NULL) is deferred until existing rows are
-  backfilled.
+## Scheduler schema (migration `0003`)
+- `endpoints.max_concurrency`; tables `inference_requests`, `reservations`, `execution_attempts`,
+  `stream_events`; `fencing_token` switched to `sa.BigInteger`. Applied on nomnom via `migrate`.
+- `src/aethergate/persistence/models.py` + `repository.py` add scheduler models and helpers
+  (`update_endpoint_max_concurrency`, dev-identity getters).
 
-## Egress / destination guard
-- `src/aethergate/egress.py` — `DestinationPolicy` validates the resolved destination before
-  dispatch: http/https only, rejects URL userinfo, rejects metadata/link-local/loopback/reserved
-  hosts, and requires the host to be explicitly allowlisted via `AETHERGATE_UPSTREAM_ALLOWLIST`
-  (comma-separated; empty = deny all). Redirect-escape hardening remains deferred.
-
-## OpenAI-compatible API surface
-- `GET /v1/models` lists active public aliases only; `GET /v1/models/{model}` returns a single alias
-  or an OpenAI-compatible `404 model_not_found`.
-- `POST /v1/chat/completions` supports non-streaming and SSE `stream=true`; `data: [DONE]` terminates
-  streams; the gateway request ID is the response `id`; the public alias is returned as `model`; the
-  upstream request ID is preserved separately (`X-Upstream-Request-Id` header, non-stream).
-- Transport/provider-control fields (`api_base`, `base_url`, `api_key`, `headers`, `upstream_model`,
-  etc.) are rejected; unsupported semantic features (multimodal content, tool roles, `n != 1`) are
-  rejected explicitly; unknown additive fields are ignored.
-- Errors use the OpenAI `{"error": {...}}` envelope with safe messages (no credentials/URLs).
-
-## Temporary development auth policy
-- Inference is unauthenticated only when `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` AND
-  `app_env != prod` (config validator rejects prod+bypass). Default is fail-closed (`401`). This is
-  temporary, not the final API-key design.
-
-## Development seed
-- `python -m aethergate.devseed --kind ... --upstream-model ... --alias ... --base-destination ...`
-  (optional `--secret-ref-name`). Idempotent (name-based lookups), validates the destination against
-  the allowlist. Values also accepted via `AETHERGATE_SEED_*` env vars. Development/bootstrap tooling
-  only; normal administration will go through `/admin/v1`.
+## Key files
+- `src/aethergate/scheduler/` — `repository.py` (claim/reserve/settle/recover/stream), `service.py`
+  (`SchedulingService`), `runtime.py` (shared service builders), `__init__.py`.
+- `src/aethergate/api/openai_chat.py` + `api/deps.py` — scheduler-backed chat path; `dev_request_context`.
+- `src/aethergate/inference/service.py` (`prepare_from_resolved`/`validate_destination`) +
+  `catalog/service.py` (`resolve_model_alias_by_id`).
+- `src/aethergate/worker.py` (worker loop), `dev_identity.py` (`ensure_dev_identity`),
+  `inspect_queue.py` (queue-state summary), `config.py` (scheduler settings + prod queue-key check).
+- `deploy/v2/compose.yaml` (worker service + queue key env), `scripts/dev/v2` (`workers`, `inspect`,
+  queue-key generation).
+- Tests: `tests/test_encryption.py`, `tests/test_scheduler.py`, `tests/test_openai_api.py` (rewritten),
+  `tests/conftest.py` (`sched_engine` DB fixture), `tests/db_helpers.py` (`reset_schema`),
+  `tests/test_settings.py`, `tests/test_persistence_models.py`, `tests/test_migrations.py`.
 
 ## Nomnom verification (actual commands/results)
 - Host = nomnom (`192.168.22.50/24`); `docker` = podman 4.9.3 + docker-compose 2.40.3.
-- Discovered backend: **local Ollama** listening on all interfaces `*:11434`; model
-  **`qwen3.8-2b-distill:Q6_K`** (~5s, returns reasoning content before its final answer). The
-  container reaches it via the host LAN IP `http://192.168.22.50:11434`.
-- `deploy/v2/.env` (gitignored) got `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` and
-  `AETHERGATE_UPSTREAM_ALLOWLIST=192.168.22.50`.
-- `scripts/dev/v2 build` -> `aethergate-v2:local` (now includes `litellm>=1.100,<2` and `openai>=2,<3`).
-- `scripts/dev/v2 up` -> dynamically allocated port **33585** (fresh per `up`).
-- `scripts/dev/v2 migrate` -> applied `0002` (add `route_bindings.upstream_model`).
-- Seeded via devseed: kind=ollama, upstream=`qwen3.8-2b-distill:Q6_K`, alias=`gpt-4`,
-  destination=`http://192.168.22.50:11434`.
-- `GET /v1/models` -> `{"object":"list","data":[{"id":"gpt-4",...}]}`; `GET /v1/models/gpt-4` -> 200;
-  unknown model -> 404.
-- Official OpenAI SDK (openai 2.54.0) non-stream -> success (`model=gpt-4`, `finish_reason` + usage
-  returned; content "Ping").
-- Official OpenAI SDK stream -> success (`model=gpt-4`, `finish_reason=stop`, content reassembled).
-- Unknown alias -> 404 (no backend dispatch). `api_base` override -> 400
-  `invalid_request` (rejected, never forwarded).
-- `scripts/dev/v2 test` -> **88 passed** (full suite incl. DB-gated + migration-from-empty + compose).
-- `scripts/dev/v2 down` -> clean stop.
+- `scripts/dev/v2 build` -> `aethergate-v2:local`; `scripts/dev/v2 up` -> API on host port 45241;
+  `scripts/dev/v2 migrate` applied `0003`; `scripts/dev/v2 workers 2` -> two worker containers.
+- Seeded `devseed --max-concurrency 2` (kind=ollama, upstream=`qwen3.8-2b-distill:Q6_K`, alias=`gpt-4`,
+  destination=`http://192.168.22.50:11434`); endpoint_max_concurrency reported `2`.
+- Six simultaneous OpenAI SDK chat requests (concurrency test) all succeeded; DB timestamps showed
+  exactly two in-flight at a time (A/B dispatched at t=17.87/17.95, C/D at t=22.11/22.52 after A/B
+  finished, E/F at t=22.90/23.31), FIFO order preserved.
+- OpenAI SDK stream through scheduler -> 21 chunks reassembled.
+- Queue-content at-rest check -> no plaintext prompt/completion bytes in `payload_encrypted`/
+  `result_encrypted`; 0 requests with multiple execution attempts (no double dispatch).
+- Stopped both workers, enqueued 3 requests (durably queued), restarted one worker -> all 3 drained and
+  completed. Restarted worker-2; stack healthy (`inspect` shows `succeeded: 7`, active reservations 0).
+- `scripts/dev/v2 test` -> **111 passed in 19.60s** (containerized full suite).
 
 ## Decisions
-- LiteLLM pinned `litellm>=1.100,<2`; `openai` dev pin is `>=2,<3` (litellm 1.104 requires
-  openai>=2.20, so `openai>=1` conflicted and was widened).
-- `upstream_model` stored on `RouteBinding` (no new ProviderModel entity) per the task's preference;
-  nullable + `RouteUnresolved` rejection (NOT NULL tightening deferred).
-- Request IDs: a per-request gateway id is generated in `api.deps.get_gateway_request_id` (no
-  middleware, to avoid breaking SSE streaming) and used across success/error/stream responses.
-- DTOs: `extra="ignore"` for additive tolerance, with explicit transport-control fields declared and
-  rejected; `extra="forbid"` on chat messages to reject multimodal/tool payloads.
+- Phase 1 enforces only physical endpoint concurrency; RPM/TPM, token reservation, shared-account
+  quotas, project budgets, and retry/cooldown remain later phases and must be reserved together.
+- Encryption key lives outside PostgreSQL and is required in `prod`; scheduling metadata stays
+  plaintext for correctness, content is encrypted.
+- Conservative recovery: never auto-replay an ambiguous (post-dispatch-intent) attempt; `outcome_unknown`
+  keeps its physical slot until an operator resolves it.
+- FIFO is admission/dispatch order, not completion order; head-of-line fairness is deferred.
 
 ## Deferred
-- Durable scheduler/queue, quota reservation, concurrency slots, retries/fallback, accounting
-  settlement, full identity/auth, admin CRUD API, `/v1/responses`, embeddings, v1 SQLite migration.
-- Redirect-escape hardening in the egress guard; `upstream_model` NOT NULL tightening migration.
-- Production secret backend (Vault/KMS/envelope encryption); real production egress allowlist policy.
+- Provider RPM/TPM windows; TPM/token reservation; shared provider-account quota windows; project
+  budgets; retries/cooldown orchestration.
+- Fairness/reordering for head-of-line blocking; caching/wake-up for empty-queue arrival.
+- Queue-content encryption key rotation.
+- `/v1/responses`; scoped API-credential auth to replace the dev bypass; full admin CRUD API; v1
+  SQLite migration.
 
 ## Issues / Risks
-- `docker` on nomnom is podman; keep compose healthchecks single-token (`python -m
-  aethergate.healthcheck`). `docker compose run` needs `--no-deps` to avoid recreating postgres.
-- The dynamic API host port changes every `up`; re-run `scripts/dev/v2 url` after `up`.
-- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content; this is upstream behavior, not a
-  gateway defect (no content filtering is applied in this milestone).
+- `docker` on nomnom is podman; keep compose healthchecks single-token. `docker compose run` needs
+  `--no-deps`. The dynamic API host port changes every `up`; re-run `scripts/dev/v2 url`.
+- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content (upstream behavior, not a gateway defect).
+- `scripts/dev/v2 workers N` requires the worker service to have no fixed `container_name` (removed);
+  scaling uses `up -d --scale worker=N`.
 - Pre-commit hook scans staged content for `password=`/`secret=`/`api_key=`/`sk-` patterns; keep
-  fixture literals value-neutral (verified clean on commit).
+  fixture literals value-neutral.
 
 ## Recommended Next Step
-Implement `/v1/responses` (the preferred modern surface) using the same adapter/egress/catalog path,
-and add scoped API-credential authentication to replace the temporary development auth bypass.
+Implement `/v1/responses` (preferred modern surface) using the scheduler/encryption path, and add
+scoped API-credential authentication to replace the temporary development auth bypass.

@@ -68,3 +68,13 @@ async def drop_database(url: str) -> None:
     async with engine.connect() as conn:
         await conn.execute(text(f'DROP DATABASE IF EXISTS "{dbname}" WITH (FORCE)'))
     await engine.dispose()
+
+
+async def reset_schema(engine) -> None:
+    """Drop and recreate all tables on ``engine`` (leaves an empty schema)."""
+    from aethergate.persistence import models  # noqa: F401  (register tables)
+    from aethergate.persistence.base import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)

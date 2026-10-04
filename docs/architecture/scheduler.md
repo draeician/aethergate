@@ -22,6 +22,43 @@ validated -> queued -> reserved -> dispatched -> streaming -> succeeded/failed/c
 
 Also represent `outcome_unknown` for ambiguous failures. (Direction)
 
+## Phase 1 — implemented (durable endpoint concurrency)
+
+Scheduler phase 1 (AGV2-005) enforces **physical endpoint concurrency only**. It establishes durable
+queueing, multi-worker ownership, and encrypted queued content. It deliberately does **not** enforce
+provider RPM/TPM, token reservations, shared-account quota windows, project budgets, or retry/cooldown;
+those are later phases and must eventually be reserved together with endpoint capacity.
+
+Implemented behavior:
+
+- `POST /v1/chat/completions` validates/resolves, enqueues an **encrypted** request durably, then the
+  API waits for a terminal result (non-stream) or streams the encrypted event sequence (SSE). The API
+  process never calls the provider adapter directly.
+- A separate worker process (`python -m aethergate.worker`) claims the oldest eligible queued request
+  (FIFO, `FOR UPDATE SKIP LOCKED`), re-resolves/revalidates the route immediately before reservation,
+  locks the endpoint row, counts active reservations against `endpoint.max_concurrency`, then
+  transactionally creates a reservation + execution attempt with a lease and fencing token. Dispatch
+  intent is recorded durably (a separate commit) **before** contacting upstream.
+- Inference runs outside any database transaction; the worker publishes an encrypted result or
+  encrypted per-request stream events, then settles terminal state and releases capacity only when the
+  outcome is known.
+- FIFO is admission/dispatch order for requests competing for the same endpoint. Head-of-line
+  implications are documented, not silently reordered.
+
+Schema: migration `0003` adds `endpoints.max_concurrency` and tables `inference_requests`,
+`reservations`, `execution_attempts`, and `stream_events`. Prompt/message, completion, and stream-event
+content is encrypted (Fernet, key outside PostgreSQL); scheduling metadata is plaintext and carries no
+content.
+
+## Conservative lease / recovery (phase 1 rules)
+
+- A request whose lease expires while still `reserved` (dispatch intent not yet durable) is safe to
+  requeue; its reservation is released and its attempt abandoned.
+- A request whose lease expires after durable dispatch intent (`dispatched`/`streaming`) transitions to
+  `outcome_unknown` and **keeps** its physical slot; it is never auto-retried or auto-released.
+- A fencing token gates terminal settlement; a stale worker cannot commit terminal state after
+  ownership changed.
+
 ## Admission (settled)
 
 Reserve together, in a consistent lock order:
@@ -73,6 +110,9 @@ enforcement more predictable. (Settled)
 
 ## Deferred
 
-- Exact PostgreSQL `SKIP LOCKED` claim loop implementation (the primitive is not a complete scheduler).
 - Fairness/reordering mode for head-of-line blocking — must be explicit if introduced.
 - Caching/wake-up mechanism for empty-queue -> arrival signaling (added only after measurement).
+- Provider RPM/TPM windows; TPM/token reservation; shared provider-account quota windows; project
+  budgets; retries/cooldown orchestration — later phases, to be reserved together with endpoint
+  capacity.
+- Key rotation for the queue-content encryption key (deferred unless safely straightforward).

@@ -20,6 +20,7 @@ def _clear_db_env(monkeypatch):
         "AETHERGATE_ENV",
         "AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS",
         "AETHERGATE_UPSTREAM_ALLOWLIST",
+        "AETHERGATE_QUEUE_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -54,8 +55,24 @@ def test_secret_masked_in_repr():
 
 
 def test_explicit_environment_mode():
-    assert Settings(app_env="prod", database_url="postgresql://x").app_env == "prod"
+    assert (
+        Settings(
+            app_env="prod",
+            database_url="postgresql://x",
+            queue_key="x" * 32,
+        ).app_env
+        == "prod"
+    )
     assert Settings(database_url="postgresql://x").app_env == "dev"
+
+
+def test_queue_key_required_in_prod():
+    with pytest.raises(ValidationError):
+        Settings(app_env="prod", database_url="postgresql://x")
+
+
+def test_queue_key_optional_in_dev():
+    assert Settings(app_env="dev", database_url="postgresql://x").queue_key is None
 
 
 def test_inference_auth_bypass_forbidden_in_prod():

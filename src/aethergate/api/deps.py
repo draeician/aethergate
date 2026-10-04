@@ -5,12 +5,17 @@ from __future__ import annotations
 import uuid
 
 from fastapi import Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.config import get_settings
-from aethergate.egress import DestinationPolicy
+from aethergate.dev_identity import ensure_dev_identity
+from aethergate.domain.ids import ApiCredentialId, PrincipalId, ProjectId
 from aethergate.errors import AuthenticationRequired
-from aethergate.inference.service import InferenceService
-from aethergate.secrets import EnvSecretResolver
+from aethergate.persistence.db import get_session_factory
+from aethergate.scheduler.runtime import build_scheduling_service
+from aethergate.scheduler.service import SchedulingService
+
+RequestContext = tuple[ProjectId, PrincipalId, ApiCredentialId]
 
 
 def get_gateway_request_id(request: Request) -> str:
@@ -22,19 +27,9 @@ def get_gateway_request_id(request: Request) -> str:
     return request_id
 
 
-def build_inference_service() -> InferenceService:
-    """Build the inference service from current runtime settings.
-
-    Uses ``EnvSecretResolver``, which is development/test only. Production will
-    replace it with the enterprise secret backend.
-    """
-    settings = get_settings()
-    policy = DestinationPolicy(settings.upstream_allowlist_hosts)
-    return InferenceService(
-        EnvSecretResolver(),
-        policy,
-        timeout_seconds=settings.inference_timeout_seconds,
-    )
+def build_scheduler() -> SchedulingService:
+    """Build the scheduler service from current runtime settings."""
+    return build_scheduling_service()
 
 
 def require_inference_access() -> None:
@@ -45,3 +40,30 @@ def require_inference_access() -> None:
     """
     if not get_settings().allow_inference_auth_bypass:
         raise AuthenticationRequired()
+
+
+async def dev_request_context() -> RequestContext:
+    """Return the stable development identity context for bypassed requests.
+
+    Only reachable while the development auth bypass is enabled; production
+    mode fails closed in the config layer before this dependency runs.
+    """
+    async with get_session_factory()() as session:
+        async with session.begin():
+            return await ensure_dev_identity(session)
+
+
+def scheduler_service() -> SchedulingService:
+    """FastAPI dependency yielding a scheduler service instance."""
+    return build_scheduling_service()
+
+
+__all__ = [
+    "AsyncSession",
+    "RequestContext",
+    "build_scheduler",
+    "dev_request_context",
+    "get_gateway_request_id",
+    "require_inference_access",
+    "scheduler_service",
+]

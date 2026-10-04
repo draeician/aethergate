@@ -53,6 +53,14 @@ async def get_project(session: AsyncSession, project_id: ProjectId) -> domain.Pr
     return _project_to_domain(row) if row else None
 
 
+async def get_project_by_name(session: AsyncSession, name: str) -> domain.Project | None:
+    result = await session.execute(
+        select(models.Project).where(models.Project.name == name)
+    )
+    row = result.scalar_one_or_none()
+    return _project_to_domain(row) if row else None
+
+
 def _secret_ref_to_domain(row: models.SecretRef) -> domain.SecretRef:
     return domain.SecretRef(
         id=SecretRefId(row.id), name=row.name, created_at=row.created_at
@@ -167,6 +175,7 @@ def _endpoint_to_domain(row: models.Endpoint) -> domain.Endpoint:
         provider_account_id=ProviderAccountId(row.provider_account_id),
         name=row.name,
         base_destination=row.base_destination,
+        max_concurrency=row.max_concurrency,
         is_active=row.is_active,
     )
 
@@ -177,6 +186,7 @@ async def create_endpoint(session: AsyncSession, entity: domain.Endpoint) -> dom
         provider_account_id=str(entity.provider_account_id),
         name=entity.name,
         base_destination=entity.base_destination,
+        max_concurrency=entity.max_concurrency,
         is_active=entity.is_active,
     )
     session.add(row)
@@ -195,6 +205,17 @@ async def get_endpoint_by_name(session: AsyncSession, name: str) -> domain.Endpo
     )
     row = result.scalar_one_or_none()
     return _endpoint_to_domain(row) if row else None
+
+
+async def update_endpoint_max_concurrency(
+    session: AsyncSession, endpoint_id: EndpointId, max_concurrency: int
+) -> domain.Endpoint:
+    row = await session.get(models.Endpoint, str(endpoint_id))
+    if row is None:
+        raise ValueError(f"endpoint {endpoint_id!s} not found")
+    row.max_concurrency = max_concurrency
+    await session.flush()
+    return _endpoint_to_domain(row)
 
 
 def _model_alias_to_domain(row: models.ModelAlias) -> domain.ModelAlias:
@@ -227,6 +248,13 @@ async def get_model_alias_by_name(
         select(models.ModelAlias).where(models.ModelAlias.name == name)
     )
     row = result.scalar_one_or_none()
+    return _model_alias_to_domain(row) if row else None
+
+
+async def get_model_alias(
+    session: AsyncSession, alias_id: ModelAliasId
+) -> domain.ModelAlias | None:
+    row = await session.get(models.ModelAlias, str(alias_id))
     return _model_alias_to_domain(row) if row else None
 
 
@@ -310,6 +338,19 @@ async def get_principal(
     return _principal_to_domain(row) if row else None
 
 
+async def get_principal_by_name(
+    session: AsyncSession, project_id: ProjectId, name: str
+) -> domain.Principal | None:
+    result = await session.execute(
+        select(models.Principal).where(
+            models.Principal.project_id == str(project_id),
+            models.Principal.name == name,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _principal_to_domain(row) if row else None
+
+
 def _api_credential_to_domain(row: models.ApiCredential) -> domain.ApiCredential:
     return domain.ApiCredential(
         id=ApiCredentialId(row.id),
@@ -335,3 +376,16 @@ async def create_api_credential(
     session.add(row)
     await session.flush()
     return _api_credential_to_domain(row)
+
+
+async def get_api_credential_by_name(
+    session: AsyncSession, project_id: ProjectId, name: str
+) -> domain.ApiCredential | None:
+    result = await session.execute(
+        select(models.ApiCredential).where(
+            models.ApiCredential.project_id == str(project_id),
+            models.ApiCredential.name == name,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _api_credential_to_domain(row) if row else None

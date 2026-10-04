@@ -1,21 +1,28 @@
-"""OpenAI-compatible Chat Completions endpoint (non-streaming + SSE streaming)."""
+"""OpenAI-compatible Chat Completions endpoint (scheduler-admitted).
+
+The API no longer dispatches to the provider adapter directly. It validates and
+enqueues a durable, encrypted request, then waits for a terminal result
+(non-streaming) or streams the encrypted event sequence (SSE) produced by the
+worker process.
+"""
 
 from __future__ import annotations
 
-import logging
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from aethergate.adapters.base import GenerationParams, Message
+from aethergate.adapters.base import GenerationParams, Message, Usage
 from aethergate.api.deps import (
-    build_inference_service,
+    RequestContext,
+    dev_request_context,
     get_gateway_request_id,
     require_inference_access,
+    scheduler_service,
 )
 from aethergate.contracts.openai import (
     ChatCompletion,
@@ -27,16 +34,14 @@ from aethergate.contracts.openai import (
     ChatCompletionUsage,
     ChatMessageResponse,
 )
-from aethergate.errors import ProviderError
-from aethergate.inference.service import PreparedDispatch
-from aethergate.persistence.db import get_session
-
-logger = logging.getLogger(__name__)
+from aethergate.errors import ProviderError, QueueTimeout
+from aethergate.scheduler.service import SchedulingService
 
 router = APIRouter(tags=["chat"])
 
 AuthDep = Annotated[None, Depends(require_inference_access)]
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+ContextDep = Annotated[RequestContext, Depends(dev_request_context)]
+ServiceDep = Annotated[SchedulingService, Depends(scheduler_service)]
 
 
 def _usage(prompt: int, completion: int, total: int) -> ChatCompletionUsage:
@@ -48,11 +53,8 @@ def _usage(prompt: int, completion: int, total: int) -> ChatCompletionUsage:
 
 
 def _completion_response(
-    gateway_id: str, alias: str, content: str, finish_reason: str | None, usage: object
+    gateway_id: str, alias: str, content: str, finish_reason: str | None, usage: Usage
 ) -> ChatCompletion:
-    prompt = getattr(usage, "prompt_tokens", 0) or 0
-    completion = getattr(usage, "completion_tokens", 0) or 0
-    total = getattr(usage, "total_tokens", 0) or 0
     return ChatCompletion(
         id=gateway_id,
         model=alias,
@@ -63,7 +65,7 @@ def _completion_response(
                 finish_reason=finish_reason,
             )
         ],
-        usage=_usage(prompt, completion, total),
+        usage=_usage(usage.prompt_tokens, usage.completion_tokens, usage.total_tokens),
     )
 
 
@@ -75,16 +77,12 @@ def _chunk_json(
     role: str | None = None,
     content: str | None = None,
     finish_reason: str | None = None,
-    usage: object | None = None,
+    usage: Usage | None = None,
 ) -> str:
     delta = ChatCompletionChunkDelta(role=role, content=content)
     chunk_usage = None
     if usage is not None:
-        chunk_usage = _usage(
-            getattr(usage, "prompt_tokens", 0) or 0,
-            getattr(usage, "completion_tokens", 0) or 0,
-            getattr(usage, "total_tokens", 0) or 0,
-        )
+        chunk_usage = _usage(usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
     chunk = ChatCompletionChunk(
         id=gateway_id,
         created=created,
@@ -95,21 +93,33 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-async def _stream_events(
-    prepared: PreparedDispatch, gateway_id: str
+async def _stream_worker_events(
+    service: SchedulingService,
+    request_id: str,
+    gateway_id: str,
+    alias: str,
 ) -> AsyncIterator[str]:
+    """Stream scheduler-produced encrypted events as standard OpenAI SSE."""
     created = int(time.time())
     role_sent = False
     finish_seen = False
-    try:
-        async for chunk in prepared.adapter.stream(prepared.request, prepared.secret):
+    seq = 0
+    poll = service.poll_interval
+
+    while True:
+        events = await service.stream_events_after(request_id, seq)
+        for event in events:
+            seq = event["seq"]
+            content = event.get("content")
+            finish = event.get("finish_reason")
+            usage = event.get("usage")
+            if usage is not None:
+                usage = Usage(**usage)
             is_first = not role_sent
             if is_first:
                 role_sent = True
-            content = chunk.content
-            if is_first and content is None:
-                content = ""
-            finish = chunk.finish_reason
+                if content is None:
+                    content = ""
             if finish is not None:
                 finish_seen = True
             yield (
@@ -117,27 +127,24 @@ async def _stream_events(
                 + _chunk_json(
                     gateway_id,
                     created,
-                    prepared.public_alias,
+                    alias,
                     role="assistant" if is_first else None,
                     content=content,
                     finish_reason=finish,
-                    usage=chunk.usage,
+                    usage=usage,
                 )
                 + "\n\n"
             )
-    except ProviderError as exc:
-        logger.error("upstream stream failed mid-flight: %s", exc.message)
-        return
+
+        state = await service.get_state(request_id)
+        if state in ("succeeded", "failed", "cancelled", "expired", "outcome_unknown"):
+            break
+        await asyncio.sleep(poll)
 
     if not finish_seen:
         yield (
             "data: "
-            + _chunk_json(
-                gateway_id,
-                created,
-                prepared.public_alias,
-                finish_reason="stop",
-            )
+            + _chunk_json(gateway_id, created, alias, finish_reason="stop")
             + "\n\n"
         )
     yield "data: [DONE]\n\n"
@@ -149,10 +156,10 @@ async def chat_completions(
     request: Request,
     response: Response,
     _: AuthDep,
-    session: SessionDep,
+    context: ContextDep,
+    service: ServiceDep,
 ) -> ChatCompletion | StreamingResponse:
     gateway_id = get_gateway_request_id(request)
-    service = build_inference_service()
 
     messages = [Message(role=m.role, content=m.content) for m in body.messages]
     params = GenerationParams(
@@ -165,11 +172,17 @@ async def chat_completions(
         seed=body.seed,
     )
 
-    prepared = await service.prepare(session, body.model, messages, params)
+    enqueued = await service.admit_and_enqueue(
+        alias_name=body.model,
+        messages=messages,
+        params=params,
+        stream=body.stream,
+        context=context,
+    )
 
     if body.stream:
         return StreamingResponse(
-            _stream_events(prepared, gateway_id),
+            _stream_worker_events(service, enqueued.request_id, gateway_id, body.model),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -178,13 +191,23 @@ async def chat_completions(
             },
         )
 
-    result = await prepared.adapter.complete(prepared.request, prepared.secret)
-    if result.upstream_request_id:
-        response.headers["X-Upstream-Request-Id"] = result.upstream_request_id
-    return _completion_response(
-        gateway_id,
-        prepared.public_alias,
-        result.content,
-        result.finish_reason,
-        result.usage,
-    )
+    result = await service.wait_for_terminal(enqueued.request_id, service.terminal_deadline())
+
+    if result.state == "succeeded" and result.content is not None and result.usage is not None:
+        if result.upstream_request_id:
+            response.headers["X-Upstream-Request-Id"] = result.upstream_request_id
+        return _completion_response(
+            gateway_id,
+            body.model,
+            result.content,
+            result.finish_reason,
+            result.usage,
+        )
+
+    if result.state == "expired":
+        raise QueueTimeout()
+    if result.state == "failed":
+        raise ProviderError(result.error_code or "upstream_error")
+    if result.state in ("cancelled", "outcome_unknown"):
+        raise ProviderError(result.error_code or "upstream_error")
+    raise QueueTimeout()
