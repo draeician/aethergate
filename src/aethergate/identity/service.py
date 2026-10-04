@@ -19,7 +19,7 @@ from aethergate.domain import entities as domain
 from aethergate.domain.entities import RequestContext
 from aethergate.domain.enums import CredentialAudience, CredentialScope
 from aethergate.domain.ids import ApiCredentialId, PrincipalId, ProjectId
-from aethergate.errors import AuthenticationRequired
+from aethergate.errors import AuthenticationRequired, CredentialLifecycleError
 from aethergate.identity.keys import generate_api_key, hash_raw_key
 from aethergate.persistence import repository
 
@@ -30,6 +30,59 @@ def utcnow() -> datetime:
 
 def _new_id() -> str:
     return uuid.uuid4().hex
+
+
+def _scope_defaults(audience: CredentialAudience) -> tuple[CredentialScope, ...]:
+    """Default scopes derived from the audience for supported audience types.
+
+    ``inference`` defaults to ``inference:invoke``. ``admin`` has no default
+    scopes until admin resource scopes are explicitly introduced, so an admin
+    credential never silently inherits the inference permission.
+    """
+    if audience is CredentialAudience.INFERENCE:
+        return (CredentialScope.INFERENCE_INVOKE,)
+    return ()
+
+
+def _validate_scope_coherence(
+    audience: CredentialAudience, scopes: tuple[CredentialScope, ...]
+) -> None:
+    """Reject audience/scope combinations that are semantically incoherent.
+
+    For phase 1 the only incompatible combination is an ``admin`` credential
+    carrying the inference ``inference:invoke`` scope; accepting it would make a
+    future admin credential valid for inference merely because it exists.
+    """
+    if audience is CredentialAudience.ADMIN and CredentialScope.INFERENCE_INVOKE in scopes:
+        raise CredentialLifecycleError(
+            f"audience {audience.value!r} may not carry scope "
+            f"{CredentialScope.INFERENCE_INVOKE.value!r}"
+        )
+
+
+async def _require_valid_identity(
+    session: AsyncSession, project_id: ProjectId, principal_id: PrincipalId
+) -> None:
+    """Validate that a credential's project and principal are valid and matched.
+
+    A credential may only be created against an existing, active project and an
+    existing, active principal that belongs to that project. Failing here means
+    no raw key is generated and no credential row is written.
+    """
+    project = await repository.get_project(session, project_id)
+    if project is None:
+        raise CredentialLifecycleError(f"project {project_id!s} does not exist")
+    if not project.is_active:
+        raise CredentialLifecycleError(f"project {project_id!s} is inactive")
+    principal = await repository.get_principal(session, principal_id)
+    if principal is None:
+        raise CredentialLifecycleError(f"principal {principal_id!s} does not exist")
+    if not principal.is_active:
+        raise CredentialLifecycleError(f"principal {principal_id!s} is inactive")
+    if principal.project_id != project_id:
+        raise CredentialLifecycleError(
+            f"principal {principal_id!s} does not belong to project {project_id!s}"
+        )
 
 
 def parse_bearer_token(auth_values: list[str]) -> str:
@@ -147,14 +200,19 @@ async def create_credential(
     principal_id: PrincipalId,
     name: str,
     audience: CredentialAudience = CredentialAudience.INFERENCE,
-    scopes: tuple[CredentialScope, ...] = (CredentialScope.INFERENCE_INVOKE,),
+    scopes: tuple[CredentialScope, ...] | None = None,
     expires_at: datetime | None = None,
 ) -> tuple[domain.ApiCredential, str]:
     """Create a credential and return ``(metadata, raw_key)`` once.
 
-    Only the verifier/hash and safe prefix are persisted; the raw key is never
-    stored.
+    Validation (project/principal validity and audience/scope coherence) happens
+    before any key material is generated, so a rejected creation never generates
+    or returns a raw key. Only the verifier/hash and safe prefix are persisted;
+    the raw key is never stored.
     """
+    resolved_scopes = _scope_defaults(audience) if scopes is None else scopes
+    _validate_scope_coherence(audience, resolved_scopes)
+    await _require_valid_identity(session, project_id, principal_id)
     raw, prefix = generate_api_key()
     entity = domain.ApiCredential(
         id=ApiCredentialId(_new_id()),
@@ -164,7 +222,7 @@ async def create_credential(
         key_prefix=prefix,
         key_hash=hash_raw_key(raw),
         audience=audience,
-        scopes=scopes,
+        scopes=resolved_scopes,
         expires_at=expires_at,
     )
     created = await repository.create_api_credential(session, entity)
@@ -192,15 +250,29 @@ async def rotate_credential(
     name: str | None = None,
     expires_at: datetime | None = None,
 ) -> tuple[domain.ApiCredential, str]:
-    """Rotate a credential: create a new key and atomically revoke the old one.
+    """Rotate an active credential: create a new key and atomically revoke the old one.
 
-    Project/principal/audience/scope metadata is preserved unless explicitly
-    changed. The old credential's metadata is retained (revoked) for
-    auditability.
+    Rotation is only valid for an existing, active, non-revoked, non-expired
+    credential whose project and principal are still valid/active/matching.
+    Failing any precondition raises ``CredentialLifecycleError`` before a
+    replacement is created. The old credential's metadata is retained (revoked)
+    for auditability.
     """
     old = await repository.get_api_credential(session, credential_id)
     if old is None:
-        raise ValueError(f"api credential {credential_id!s} not found")
+        raise CredentialLifecycleError(f"api credential {credential_id!s} does not exist")
+    if old.revoked_at is not None:
+        raise CredentialLifecycleError(f"api credential {credential_id!s} is revoked")
+    if not old.is_active:
+        raise CredentialLifecycleError(f"api credential {credential_id!s} is inactive")
+    if old.expires_at is not None and old.expires_at <= utcnow():
+        raise CredentialLifecycleError(f"api credential {credential_id!s} is expired")
+    if old.principal_id is None:
+        raise CredentialLifecycleError(
+            f"api credential {credential_id!s} has no principal to rotate against"
+        )
+    await _require_valid_identity(session, old.project_id, old.principal_id)
+    _validate_scope_coherence(old.audience, old.scopes)
     raw, prefix = generate_api_key()
     entity = domain.ApiCredential(
         id=ApiCredentialId(_new_id()),

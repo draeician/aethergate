@@ -74,13 +74,16 @@ async def _create(args) -> None:
             expires_at = None
             if args.expires_in is not None:
                 expires_at = datetime.now(UTC) + timedelta(seconds=args.expires_in)
+            scopes = (
+                tuple(CredentialScope(s) for s in args.scopes) if args.scopes else None
+            )
             credential, raw_key = await identity_service.create_credential(
                 session,
                 project_id=project.id,
                 principal_id=principal_id,
                 name=args.name,
                 audience=CredentialAudience(args.audience),
-                scopes=tuple(CredentialScope(s) for s in args.scopes),
+                scopes=scopes,
                 expires_at=expires_at,
             )
     print("created credential:")
@@ -129,7 +132,7 @@ def main() -> None:
     create.add_argument("--principal", default="svc-test")
     create.add_argument("--name", required=True)
     create.add_argument("--audience", default="inference", choices=["inference", "admin"])
-    create.add_argument("--scopes", nargs="+", default=["inference:invoke"])
+    create.add_argument("--scopes", nargs="+", default=None)
     create.add_argument("--expires-in", type=int, default=None, help="seconds until expiry")
     create.set_defaults(func=_create)
 

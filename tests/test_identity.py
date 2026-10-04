@@ -32,6 +32,7 @@ from aethergate.domain.enums import (
     PrincipalKind,
 )
 from aethergate.domain.ids import (
+    ApiCredentialId,
     EndpointId,
     ModelAliasId,
     PrincipalId,
@@ -40,7 +41,7 @@ from aethergate.domain.ids import (
     ProviderId,
     RouteBindingId,
 )
-from aethergate.errors import AuthenticationRequired
+from aethergate.errors import AuthenticationRequired, CredentialLifecycleError
 from aethergate.identity import keys as identity_keys
 from aethergate.identity import service as identity_service
 from aethergate.persistence import models, repository
@@ -147,7 +148,7 @@ async def _create_identity(
     session,
     *,
     audience=CredentialAudience.INFERENCE,
-    scopes=(CredentialScope.INFERENCE_INVOKE,),
+    scopes=None,
 ):
     project = await repository.create_project(
         session, domain.Project(id=ProjectId("proj-id"), name="project-id")
@@ -300,6 +301,199 @@ async def test_list_credentials_has_no_secret(session):
     assert len(creds) == 1
     assert creds[0].key_hash is not None
     # the entity carries the hash (internal), but never the raw key
+
+
+# --- DB-gated: lifecycle hardening (AGV2-012V) -------------------------------
+
+
+async def test_create_rejects_missing_project(session):
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-real"), name="proj-real")
+    )
+    principal = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId("prin-real"), project_id=project.id,
+            kind=PrincipalKind.SERVICE_ACCOUNT, name="svc-real",
+        ),
+    )
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.create_credential(
+            session, project_id=ProjectId("proj-missing"),
+            principal_id=principal.id, name="nope",
+        )
+
+
+async def test_create_rejects_missing_principal(session):
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-noprin"), name="proj-noprin")
+    )
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.create_credential(
+            session, project_id=project.id, principal_id=PrincipalId("prin-missing"),
+            name="nope",
+        )
+
+
+async def test_create_rejects_cross_project_principal(session):
+    project_a = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-a"), name="proj-a")
+    )
+    project_b = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-b"), name="proj-b")
+    )
+    principal_b = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId("prin-b"), project_id=project_b.id,
+            kind=PrincipalKind.SERVICE_ACCOUNT, name="svc-b",
+        ),
+    )
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.create_credential(
+            session, project_id=project_a.id, principal_id=principal_b.id, name="nope",
+        )
+
+
+async def test_create_rejects_inactive_project(session):
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-off"), name="proj-off")
+    )
+    principal = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId("prin-off"), project_id=project.id,
+            kind=PrincipalKind.SERVICE_ACCOUNT, name="svc-off",
+        ),
+    )
+    await repository.set_project_active(session, project.id, False)
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.create_credential(
+            session, project_id=project.id, principal_id=principal.id, name="nope",
+        )
+
+
+async def test_create_rejects_inactive_principal(session):
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-poff"), name="proj-poff")
+    )
+    principal = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId("prin-poff"), project_id=project.id,
+            kind=PrincipalKind.SERVICE_ACCOUNT, name="svc-poff",
+        ),
+    )
+    await repository.set_principal_active(session, principal.id, False)
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.create_credential(
+            session, project_id=project.id, principal_id=principal.id, name="nope",
+        )
+
+
+async def test_create_no_raw_key_on_rejection(session):
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-rj"), name="proj-rj")
+    )
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.create_credential(
+            session, project_id=project.id, principal_id=PrincipalId("prin-missing"),
+            name="nope",
+        )
+    # nothing was persisted for the rejected request
+    creds = await identity_service.list_credentials(session, project.id)
+    assert creds == []
+
+
+async def test_rotate_rejects_missing_credential(session):
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, ApiCredentialId("cred-missing"))
+
+
+async def test_rotate_rejects_revoked_credential(session):
+    _, _, credential, _ = await _create_identity(session)
+    await identity_service.revoke_credential(session, credential.id)
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, credential.id)
+
+
+async def test_rotate_rejects_inactive_credential(session):
+    _, _, credential, _ = await _create_identity(session)
+    row = await session.get(models.ApiCredential, str(credential.id))
+    row.is_active = False
+    await session.flush()
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, credential.id)
+
+
+async def test_rotate_rejects_expired_credential(session):
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId("proj-exp"), name="proj-exp")
+    )
+    principal = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId("prin-exp"), project_id=project.id,
+            kind=PrincipalKind.SERVICE_ACCOUNT, name="svc-exp",
+        ),
+    )
+    credential, _ = await identity_service.create_credential(
+        session, project_id=project.id, principal_id=principal.id, name="exp",
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, credential.id)
+
+
+async def test_rotate_rejects_inactive_project(session):
+    project, _, credential, _ = await _create_identity(session)
+    await repository.set_project_active(session, project.id, False)
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, credential.id)
+
+
+async def test_rotate_rejects_inactive_principal(session):
+    _, principal, credential, _ = await _create_identity(session)
+    await repository.set_principal_active(session, principal.id, False)
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, credential.id)
+
+
+async def test_failed_rotation_creates_no_replacement(session):
+    _, _, credential, _ = await _create_identity(session)
+    await identity_service.revoke_credential(session, credential.id)
+    with pytest.raises(CredentialLifecycleError):
+        await identity_service.rotate_credential(session, credential.id)
+    creds = await identity_service.list_credentials(session, ProjectId("proj-id"))
+    assert len(creds) == 1
+
+
+async def test_repeated_revoke_preserves_timestamp(session):
+    _, _, credential, _ = await _create_identity(session)
+    first = await identity_service.revoke_credential(session, credential.id)
+    second = await identity_service.revoke_credential(session, credential.id)
+    assert first is not None and first.revoked_at is not None
+    assert second is not None and second.revoked_at is not None
+    assert second.revoked_at == first.revoked_at
+    assert second.is_active is False
+
+
+async def test_admin_audience_has_no_inference_scope(session):
+    _, _, credential, _ = await _create_identity(session, audience=CredentialAudience.ADMIN)
+    assert credential.scopes == ()
+
+
+async def test_incompatible_audience_scope_rejected(session):
+    with pytest.raises(CredentialLifecycleError):
+        await _create_identity(
+            session, audience=CredentialAudience.ADMIN,
+            scopes=(CredentialScope.INFERENCE_INVOKE,),
+        )
+
+
+async def test_inference_default_scope_is_invoke(session):
+    _, _, credential, _ = await _create_identity(session)
+    assert credential.scopes == (CredentialScope.INFERENCE_INVOKE,)
 
 
 # --- DB-gated: queued revocation blocks dispatch -----------------------------

@@ -557,8 +557,11 @@ async def revoke_api_credential(
     row = await session.get(models.ApiCredential, str(credential_id))
     if row is None:
         return None
+    # Idempotent: only the first revoke stamps the event; repeated revokes
+    # preserve the original timestamp and never move it forward.
+    if row.revoked_at is None:
+        row.revoked_at = revoked_at
     row.is_active = False
-    row.revoked_at = revoked_at
     await session.flush()
     return _api_credential_to_domain(row)
 

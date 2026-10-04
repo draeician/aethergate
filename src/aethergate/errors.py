@@ -91,6 +91,17 @@ class AuthenticationRequired(DomainError):
     """Inference authentication is not configured/allowed for this request."""
 
 
+class CredentialLifecycleError(DomainError):
+    """A credential create/rotate request violates a lifecycle invariant.
+
+    Raised by the identity service before any raw key is generated/persisted for
+    an invalid transition: missing/inactive/mismatched project or principal,
+    rotating a revoked/expired/inactive credential, or an incompatible
+    audience/scope combination. It is a clear domain validation error, distinct
+    from ``AuthenticationRequired`` (which is about a presented key).
+    """
+
+
 class QueueKeyError(DomainError):
     """The scheduler queue encryption key is absent or invalid."""
 

@@ -197,6 +197,20 @@ async def test_invalid_key_returns_401(auth_client):
     assert bogus not in resp.text
 
 
+async def test_auth_failure_produces_no_enqueue(auth_client, sched_engine):
+    client, *_ = auth_client
+    for headers in (None, {"Authorization": "Bearer agk_deadbeef_bogus"}):
+        resp = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 401
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        requests = (await session.execute(select(models.InferenceRequest))).scalars().all()
+        assert len(requests) == 0
+
+
 async def test_wrong_scheme_and_malformed_401(auth_client):
     client, *_ = auth_client
     for header in (
