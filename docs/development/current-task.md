@@ -1,30 +1,29 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-012
+AGV2-012V
 
 ## Title
-Identity phase 1 — scoped inference API credentials and durable authorization context
+Complete inference-identity live verification and harden credential lifecycle invariants
 
 ## Ownership
 Primary: identity/auth  
-Coordinating: contracts, scheduler/queueing, admin API foundation, platform/testing
+Coordinating: scheduler/queueing, contracts, platform/testing
 
 ## Why This Task Exists
 
-The inference, scheduler, quota, and accounting core is now live-verified and hardened.
+AGV2-012 implemented scoped inference API credentials and pushed the real auth path successfully.
 
-The OpenAI data plane still relies on an explicit development-only authentication bypass. Replace that
-with the first production-capable identity boundary before exposing the administrative API.
+The code review found two categories of unfinished work:
 
-This task implements machine/service authentication for the inference surface only.
+1. several scenarios explicitly required as live nomnom verification were only covered by deterministic tests;
+2. the credential lifecycle service still permits invalid or security-surprising state transitions.
 
-Human OIDC login, browser sessions, OAuth device flow, and full admin RBAC are the next identity/admin
-phase and remain out of scope here.
+Close these gaps before moving into admin HTTP APIs or human OIDC/session work.
 
 ## Compaction Recovery
 
-If context is compacted, summarized, restarted, or you become uncertain what remains:
+If context is compacted, summarized, restarted, or you become uncertain:
 
 1. re-read `AGENTS.md`;
 2. re-read `project_spec.md`;
@@ -33,491 +32,268 @@ If context is compacted, summarized, restarted, or you become uncertain what rem
 5. inspect `git status` and recent history;
 6. continue from repository state.
 
-Do not ask the user whether to commit, push, continue, or stop when this task already specifies the
-required behavior.
+`docs/development/current-task.md` is the active assignment. The handoff describes the previous completed state.
+
+Do not ask the user whether to commit, push, continue, or stop when this task already specifies those actions.
 
 ## Before You Start
 
 1. Work on branch `v2`.
-2. Run `git pull --ff-only origin v2`.
+2. Pull latest `origin/v2`.
 3. Read:
    - `AGENTS.md`
    - `project_spec.md`
-   - `docs/development/agent-handoff.md`
    - `docs/development/current-task.md`
+   - `docs/development/agent-handoff.md`
    - `docs/architecture/security.md`
-   - `docs/architecture/admin-api.md`
-   - `docs/contracts/admin-v1-foundation.md`
-   - `src/aethergate/api/deps.py`
-   - current Project / Principal / ApiCredential domain + persistence code
-4. Preserve all scheduler/quota/accounting invariants through AGV2-011.
+   - `src/aethergate/identity/service.py`
+   - `src/aethergate/identity/keys.py`
+   - identity persistence/repository code
+   - identity/auth tests
+4. Preserve all AGV2-012 real Bearer-auth behavior.
 5. Do not modify/delete legacy v1 `app/` or `frontend/src/`.
 6. Do not commit unrelated local/untracked files.
 
-## Goal
+## Required Lifecycle Hardening
 
-A normal OpenAI client should authenticate to AetherGate using an AetherGate-issued Bearer API key:
+### 1. Validate project/principal relationship at credential creation
 
-```text
-Authorization: Bearer agk_...
-```
+Current `create_credential` accepts arbitrary existing IDs and relies on authentication later to reject
+a mismatch.
 
-A successful credential lookup must yield the durable request context:
+That allows invalid credential records to be created.
 
-- project ID;
-- principal ID;
-- API credential ID;
-- inference audience/scope.
+Before generating/persisting a credential:
 
-That context is then persisted on the queued request exactly as the scheduler/accounting stack already
-expects.
+- project must exist;
+- project must be active;
+- principal must exist;
+- principal must be active;
+- principal.project_id must equal the requested project_id.
 
-The raw API key must never be stored in PostgreSQL and must never be recoverable from normal reads,
-logs, backups, or admin DTOs.
+If any condition fails, reject creation with an explicit identity/domain error.
 
-## Credential Model
+Do not generate/return a raw key for a creation request that will be rejected.
 
-Refine `ApiCredential` into a one-way-verifiable client credential.
+Add tests for:
+- nonexistent project;
+- nonexistent principal;
+- principal from another project;
+- inactive project;
+- inactive principal.
 
-The current `secret_ref_id` concept is appropriate for retrievable upstream provider secrets, but
-not for high-entropy client API keys whose plaintext never needs to be recovered.
+### 2. Harden rotation semantics
 
-Use a model with at least:
+Rotation is for an active credential.
 
-- stable opaque ApiCredential ID;
-- project ID;
-- principal ID;
-- name;
-- key prefix / display prefix;
-- cryptographic verifier/hash;
-- audience;
-- scopes/permissions;
-- created_at;
-- expires_at;
-- revoked_at;
-- is_active;
-- optional last_used_at if it can be updated safely without creating a hot write bottleneck.
+Current code can rotate a revoked credential into a fresh valid credential, which can bypass the
+meaning of revocation.
 
-### Raw key format
+Required:
 
-Generate AetherGate API keys using a recognizable non-secret prefix such as:
+- old credential must exist;
+- old credential must be active;
+- old credential must not be revoked;
+- old credential must not already be expired at rotation time;
+- its project and principal must still be valid/active/matching;
+- rotation creates the replacement and revokes the old credential atomically;
+- rotating an already revoked/expired/inactive credential fails without creating a new credential;
+- raw replacement key is returned only after the transaction can succeed.
 
-`agk_<public-prefix>_<secret-material>`
+Preserve audience/scopes/project/principal unless an explicitly supported rotation field says otherwise.
 
-Requirements:
+### 3. Make revocation truly idempotent
 
-- at least 256 bits of CSPRNG secret entropy;
-- generated with Python's `secrets` module or equivalent;
-- public/display prefix contains no meaningful secret entropy;
-- raw key returned exactly once at create/rotate boundary;
-- only the one-way verifier/hash and safe prefix are persisted.
+Repeated revocation must preserve the original revocation event.
 
-### Hashing
+Required:
 
-Because generated credentials are high-entropy random tokens, a one-way SHA-256 verifier is acceptable
-for this credential type.
+- first revoke sets `revoked_at` and disables credential;
+- subsequent revoke is a no-op for state/timestamp;
+- original `revoked_at` must not move forward;
+- no reactivation path through revoke/rotate helpers.
 
-Requirements:
+Add deterministic tests.
 
-- hash the full raw key using SHA-256;
-- never log the raw key;
-- never return the hash in API/admin read DTOs;
-- exact lookup by hash is acceptable;
-- use constant-time comparison anywhere direct comparison is still performed;
-- do not reuse password-hashing assumptions for these generated random keys.
+### 4. Credential creation audience/scope coherence
 
-Document why this is safe only for high-entropy generated tokens, not user passwords.
+For this phase:
 
-## Audience and Scope Separation
+- inference audience credentials may carry `inference:invoke`;
+- admin audience exists only as a future contract value and must not silently receive the inference
+  default scope.
 
-Administrative and inference audiences are separate.
+Avoid creating nonsensical `audience=admin, scopes=(inference:invoke,)` by default.
 
-For this phase implement at least:
+Choose one safe contract:
 
-- audience: `inference`;
-- scope: `inference:invoke`.
+Preferred:
+- default scopes are derived from audience only for supported audience types;
+- inference defaults to `inference:invoke`;
+- admin has no default scopes until admin scopes are explicitly introduced.
 
-Design enums/contracts so future scopes can include resource/admin permissions without replacing the
-credential model.
+Explicit incompatible scopes should be rejected rather than silently accepted.
 
-Requirements:
+Document the rule.
 
-- inference endpoint rejects credential with wrong audience;
-- inference endpoint rejects credential without `inference:invoke`;
-- future admin credentials must not become valid for inference merely because they exist;
-- do not create a shared master key.
+### 5. Optional last-used behavior
 
-## Project / Principal Semantics
+`last_used_at` is optional in the architecture. Do not add a write on every inference request if it
+would create a hot-row bottleneck.
 
-A credential must resolve to an active project and active principal.
+Either:
 
-Requirements:
+- leave it intentionally unset and document that it is deferred; or
+- update it with a throttled/best-effort strategy.
 
-- principal belongs to the credential's project;
-- service-account principal is the normal machine-auth principal for this task;
-- user principal support may exist in the data model but do not invent human login flows here;
-- inactive project => deny;
-- inactive principal => deny;
-- inactive credential => deny;
-- expired credential => deny;
-- revoked credential => deny;
-- missing/unknown credential => deny.
+Do not perform an unconditional credential-row update for every authenticated request.
 
-Never silently fall back to the development identity when a Bearer credential is invalid.
-
-## Bearer Parsing
-
-Implement strict standards-aware Bearer parsing.
-
-Requirements:
-
-- missing header => 401;
-- wrong scheme => 401;
-- malformed Bearer value => 401;
-- multiple/ambiguous credential values => reject;
-- leading/trailing junk => reject;
-- safe OpenAI-compatible structured error response;
-- `WWW-Authenticate: Bearer` where appropriate;
-- no raw token echoed in error/log output.
-
-Do not accept API keys from query strings.
-
-For compatibility, `Authorization: Bearer <key>` is the canonical inference mechanism.
-
-## Request Context
-
-Replace the development-only dependency chain with a real authenticated request-context resolver.
-
-Use a typed object instead of a bare tuple if practical, e.g.:
-
-- project_id;
-- principal_id;
-- api_credential_id;
-- audience;
-- scopes.
-
-Requirements:
-
-- scheduler/admission receives the authenticated context;
-- usage/accounting attribution remains correct;
-- context cannot be client-overridden in the JSON body;
-- context is safe to log only by opaque IDs, never raw token;
-- development bypass may still create the same typed RequestContext in dev mode.
-
-## Development Auth Bypass
-
-Keep the bypass only as a deliberate development/test escape hatch.
-
-Requirements:
-
-- `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=true` remains impossible in production;
-- when bypass is enabled and no Authorization header is supplied, use the seeded stable development
-  identity;
-- when an Authorization header is supplied, authenticate it normally even in development;
-- an invalid supplied key must fail; it must never fall through to bypass;
-- document bypass as development-only.
-
-The real nomnom smoke test must run with bypass **disabled**.
-
-## Credential Lifecycle Service
-
-Implement identity service/repository operations for at least:
-
-### Create
-- create service-account credential;
-- generate raw secret;
-- persist verifier/hash + safe prefix only;
-- return raw key once.
-
-### Read/list
-- metadata only;
-- no secret/hash.
-
-### Revoke
-- sets durable revocation state;
-- immediately prevents new requests.
-
-### Rotate
-Preferred semantics:
-- create a new credential/key;
-- revoke the old credential atomically;
-- return new raw key once;
-- preserve project/principal/scope metadata unless explicit approved changes are supplied.
-
-Do not delete old credential metadata on rotation; retain auditability.
-
-No HTTP admin routes required yet. These are service/repository/contract foundations for the next
-/admin/v1 phase.
-
-## Revocation and Queued Work
-
-Security requirement: revocation applies to queued work.
-
-This means credential authorization must be revalidated immediately before scheduler reservation /
-dispatch, not only at API enqueue time.
-
-Required behavior:
-
-- credential active when enqueued;
-- credential revoked while queued;
-- worker reaches request later;
-- request must not contact upstream;
-- request transitions to an explicit safe terminal authorization failure;
-- no quota, endpoint, or budget reservation survives;
-- no price snapshot/usage/ledger entry is created as dispatched work;
-- already-dispatched work is not retroactively duplicated/retried.
-
-Also revalidate:
-
-- project active state;
-- principal active state;
-- credential expiry;
-- required inference audience/scope.
-
-Avoid copying authorization policy into the router and worker separately; use one identity/auth service.
-
-## Key Enumeration / Timing Safety
-
-Credential verification should not leak whether a safe prefix exists more than necessary.
-
-Requirements:
-
-- primary lookup should be based on the full credential hash or an equivalent fixed-cost indexed
-  verifier;
-- safe prefix is display/debug metadata, not the authentication selector;
-- invalid keys return indistinguishable authentication errors;
-- no response reveals project/principal existence.
-
-## Migration
-
-Do not rewrite migrations `0001` through `0008`.
-
-Add migration `0009`.
-
-Migrate the v2 identity schema to support the new credential model.
-
-At minimum:
-
-- credential verifier/hash;
-- safe prefix;
-- audience;
-- scopes;
-- expires_at;
-- revoked_at;
-- timestamps as needed;
-- appropriate indexes/uniqueness.
-
-The current development credential rows created by earlier tasks must be handled explicitly.
-
-Do not invent recoverable raw keys for existing rows.
-
-Acceptable direction:
-
-- mark/replace old dev-only credentials through the dev-seed workflow;
-- migrate old schema metadata safely;
-- require newly generated credentials for real auth.
-
-Remove `secret_ref_id` from the client-credential contract if no longer semantically correct, or make
-a clearly documented transitional schema change. Do not leave two competing credential-secret models
-without explanation.
-
-Migration requirements:
-
-- existing nomnom `0008 -> 0009` succeeds;
-- empty DB -> latest succeeds;
-- no raw key is created/stored by migration;
-- no secret material appears in migration logs.
-
-## Admin Contract Foundations
-
-Update admin-v1 DTO foundations for credential lifecycle.
-
-At minimum:
-
-- ApiCredentialCreate;
-- ApiCredentialCreateResult (metadata + one-time raw key);
-- ApiCredentialRead;
-- ApiCredentialRotateResult;
-- ApiCredentialRevoke request/result if needed.
-
-Normal read/list DTOs must never contain:
-
-- raw key;
-- key hash/verifier.
-
-Expose safe metadata:
-
-- prefix;
-- audience;
-- scopes;
-- expires_at;
-- revoked_at/is_active.
-
-Do not implement the HTTP admin router yet.
-
-## Real Nomnom Verification — Required
-
-Use the normal dynamic-port Docker/Podman workflow.
-
-Verify the current backend/model first; do not assume ports.
+## Required Live Nomnom Verification
 
 Run with:
 
 `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`
 
-### A. Real API-key inference
+Use the real dynamic-port Docker/Podman workflow and current backend/model.
 
-1. create/seed an active project;
-2. create a service-account principal;
-3. generate an inference credential through the identity service/dev-safe credential tool;
-4. capture raw key only in the test process/environment;
-5. call AetherGate with the official OpenAI Python SDK using that API key;
-6. non-stream completion succeeds;
-7. streaming completion succeeds;
-8. persisted request/usage attribution matches the credential's project/principal/credential IDs.
+The following AGV2-012 scenarios were required live but were previously only deterministic. Complete them now.
 
-Do not write the raw key into the handoff.
+### A. Expired credential — live
 
-### B. Missing/invalid key
+Create a real expired test credential.
 
 Prove:
 
-- missing key => 401;
-- random invalid key => 401;
-- malformed/wrong Bearer scheme => 401;
-- no upstream call is made;
-- no scheduler request is enqueued.
+- API returns 401;
+- no request is enqueued;
+- no upstream call occurs.
 
-### C. Expiry
+### B. Revocation while queued — live
 
-Create a short-lived/expired test credential.
+Create a valid credential and force its request to remain durably queued using controlled endpoint,
+quota, or budget capacity.
 
-Prove an expired credential cannot enqueue/dispatch work.
+Then revoke the credential before capacity becomes available.
 
-### D. Revocation before request
+Prove from durable state:
 
-Revoke credential, then call inference.
+- worker pre-dispatch authorization revalidation rejects it;
+- request terminates with `authorization_failed`;
+- upstream is never contacted for that request;
+- no execution attempt;
+- no endpoint reservation;
+- no live quota reservation;
+- no live budget reservation;
+- no price snapshot;
+- no usage record;
+- no ledger debit.
 
-Prove immediate rejection.
+This must be a live containerized multi-process test, not only an in-process unit/integration test.
 
-### E. Revocation while queued
+### C. Inactive project — live
 
-Create a request that remains queued due to controlled endpoint/quota/budget capacity.
+With an otherwise valid key:
 
-Revoke its credential before dispatch.
+- deactivate project after key creation;
+- API returns 401 for a new request;
+- reactivate only as needed for test cleanup.
+
+### D. Inactive principal — live
+
+Independently:
+
+- deactivate principal;
+- API returns 401.
+
+### E. Audience separation — live
+
+Create an admin-audience credential without inference permission.
+
+Prove it cannot invoke `/v1/chat/completions` or `/v1/models`.
+
+### F. Missing inference scope — live
+
+Create an inference-audience credential lacking `inference:invoke`.
+
+Prove both model and completion endpoints reject it.
+
+### G. Dev-bypass behavior — containerized
+
+In a dev/test container configuration:
+
+- bypass true + no Authorization => seeded dev identity may work;
+- bypass true + invalid Authorization => 401, never falls through;
+- prod config + bypass true => startup/config validation fails.
+
+### H. Rotation lifecycle — live
+
+Run live rotation again after hardening.
 
 Prove:
 
-- worker revalidation catches revocation;
-- request never contacts upstream;
-- it terminates with authorization failure;
-- no live quota/budget/endpoint reservation remains;
-- no usage/ledger entry created.
+- active old key rotates successfully;
+- old key fails;
+- new key succeeds;
+- attempting to rotate the now-revoked old credential fails and creates no third credential;
+- original revocation timestamp is preserved on repeated revoke.
 
-### F. Inactive project/principal
-
-Independently deactivate:
-
-- project;
-- principal.
-
-Prove both block inference safely.
-
-### G. Audience/scope separation
-
-Create credentials with:
-
-- wrong audience;
-- missing `inference:invoke` scope.
-
-Prove both fail even when otherwise active.
-
-### H. Rotation
-
-Rotate an active credential.
-
-Prove:
-
-- old raw key stops working;
-- new raw key works;
-- old metadata remains as revoked history;
-- new secret revealed once;
-- no raw key/hash appears in normal reads.
-
-### I. Dev bypass regression
-
-In dev/test mode only:
-
-- bypass enabled + no Authorization => seeded dev identity works;
-- bypass enabled + invalid Authorization => 401, no fallback;
-- production config + bypass enabled => startup/config validation fails.
-
-### J. Regression
+### I. Regression
 
 Re-run:
 
+- real SDK non-stream;
+- real SDK stream;
 - full scheduler/quota/accounting suite;
-- official SDK real non-stream/stream;
 - six-request/two-slot;
-- budget and shared-quota regressions.
+- queued authorization regression;
+- migration head checks.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. key generation entropy/format;
-2. raw key hashes to persisted verifier;
-3. raw key never persisted;
-4. normal DTO never exposes hash/raw key;
-5. valid inference credential resolves typed RequestContext;
-6. missing Authorization;
-7. malformed Bearer;
-8. wrong scheme;
-9. invalid key;
-10. inactive credential;
-11. revoked credential;
-12. expired credential;
-13. inactive project;
-14. inactive principal;
-15. principal/project mismatch rejected;
-16. wrong audience rejected;
-17. missing inference scope rejected;
-18. dev bypass absent-header behavior;
-19. invalid supplied key never falls through to bypass;
-20. production forbids bypass;
-21. create returns raw key once;
-22. rotate revokes old and creates new;
-23. old rotated key fails;
-24. revoke is durable/idempotent;
-25. queued revocation blocks pre-dispatch;
-26. queued auth failure leaves no quota reservation;
-27. queued auth failure leaves no budget reservation/snapshot;
-28. queued auth failure leaves no endpoint reservation/attempt;
-29. attribution reaches InferenceRequest;
-30. attribution reaches UsageRecord;
-31. migration 0008 -> 0009;
-32. empty DB -> latest;
-33. existing 220-test baseline remains green;
-34. official SDK chat regressions remain green.
+1. create rejects missing project;
+2. create rejects missing principal;
+3. create rejects cross-project principal;
+4. create rejects inactive project;
+5. create rejects inactive principal;
+6. valid create still returns raw key once;
+7. rotate rejects missing credential;
+8. rotate rejects revoked credential;
+9. rotate rejects inactive credential;
+10. rotate rejects expired credential;
+11. rotate rejects now-invalid project;
+12. rotate rejects now-invalid principal;
+13. failed rotation creates no replacement credential;
+14. first revoke sets timestamp;
+15. repeated revoke preserves timestamp;
+16. admin audience does not inherit inference scope;
+17. incompatible audience/scope combination rejected;
+18. inference default scope remains `inference:invoke`;
+19. queued revocation invariant remains green;
+20. auth failure produces no enqueue;
+21. normal DTOs remain secret/hash-free;
+22. existing 250-test baseline remains green or higher.
+
+## Migration
+
+Do not add a migration unless lifecycle hardening actually requires a schema change.
+
+Do not rewrite `0001` through `0009`.
+
+If a migration is required, use the next linear revision and verify existing DB -> latest and empty DB -> latest.
 
 ## Logging / Security
 
-Never log:
+Never log or write into the handoff:
 
-- raw API key;
-- Authorization header;
-- credential hash;
+- raw API keys;
+- Authorization headers;
+- credential hashes/verifiers;
 - provider secrets;
 - queue encryption key.
 
-Safe logs may include:
-
-- gateway request ID;
-- opaque credential ID;
-- opaque principal/project IDs;
-- safe public key prefix.
-
-Add canary tests proving auth failures do not emit raw credential material.
+Live verification evidence must use opaque credential/project/principal IDs or counts only.
 
 ## Documentation
 
@@ -525,71 +301,64 @@ Update:
 
 - `docs/architecture/security.md`;
 - `docs/contracts/domain-model.md`;
-- `docs/contracts/admin-v1-foundation.md`;
-- `docs/architecture/scheduler.md` for pre-dispatch revalidation;
+- `docs/contracts/admin-v1-foundation.md` if lifecycle contract behavior changed;
 - `docs/development/README.md`;
 - `docs/development/agent-handoff.md`.
 
-Document explicitly:
+Replace the AGV2-012 handoff statements that say expiry/queued-revocation/inactive/audience/scope are
+only deterministic once their live verification is complete.
 
-- generated high-entropy API keys use one-way SHA-256 verification;
-- this is not a password hashing scheme;
-- inference and admin audiences remain separate;
-- dev bypass is never production auth;
-- queued work is authorization-revalidated before dispatch;
-- OIDC/browser/device-flow/admin RBAC remain next-phase work.
-
-Do not modify the dated audit.
+Document rotation eligibility and idempotent revocation semantics.
 
 ## Still Deferred
 
-Do not implement in this task:
+Do not implement:
 
+- admin HTTP CRUD;
 - OIDC authorization-code flow;
 - browser sessions/cookies/CSRF;
 - OAuth device flow;
-- full admin RBAC;
-- admin HTTP CRUD routes;
+- admin RBAC;
 - CLI;
 - React UI;
-- principal-level budgets;
-- retry/fallback orchestration;
-- `/v1/responses`;
+- Responses API;
 - embeddings;
 - v1 SQLite migration.
 
 ## Verification Before Commit
 
 - full containerized test suite;
-- migration `0008 -> 0009`;
-- empty DB -> latest;
 - ruff/lint;
+- migration head verification;
 - `git diff --check`;
 - secret scan;
 - auth-log canary check;
-- legacy `app/` and `frontend/src/` untouched;
+- legacy v1 untouched;
 - dated audit unchanged;
-- all required nomnom auth verification complete with bypass disabled.
+- all live scenarios above completed.
 
 ## Handoff
 
-Update `docs/development/agent-handoff.md` with concise evidence for:
+Update `docs/development/agent-handoff.md` with:
 
-- implementation commit(s);
-- migration revision;
-- API key format/verifier design without secret values;
-- identity/request-context model;
-- audience/scope behavior;
-- queued revocation behavior;
-- real SDK auth result;
-- rotation/revocation result;
+- implementation/verification commit(s);
+- credential create-validation behavior;
+- rotation eligibility behavior;
+- idempotent revocation behavior;
+- audience/scope default rule;
+- live expired-key result;
+- live queued-revocation result;
+- live inactive project/principal results;
+- live audience/scope separation result;
+- bypass regression result;
+- real SDK non-stream/stream result;
 - final test count;
 - dynamic AetherGate port;
-- backend/model;
+- current backend/model;
 - issues/risks;
 - exactly one recommended next step.
 
-Never include a raw API key, Authorization header, verifier/hash, credential secret, or large logs.
+No raw credentials, hashes, Authorization headers, prompts/completions, secrets, or large logs.
 
 ## Commit and Push
 
@@ -597,15 +366,15 @@ Use conventional commits on branch `v2`.
 
 Suggested primary commit:
 
-`feat(identity): add scoped inference API credentials`
+`fix(identity): harden credential lifecycle and live authorization checks`
 
-A handoff-only follow-up commit is allowed.
+A verification/handoff-only follow-up commit is allowed.
 
-**Push all completed commits to `origin/v2`.**
+Push all completed commits to `origin/v2`.
 
 Never push directly to `main`.
 
-Do not ask the user whether to commit or push. This task explicitly requires both.
+Do not ask the user whether to commit or push.
 
-The task is complete only when all stated verification criteria are met and `origin/v2` contains the
-work and updated handoff.
+The task is complete only when all stated live and automated verification criteria are met and
+`origin/v2` contains the updated implementation and handoff.
