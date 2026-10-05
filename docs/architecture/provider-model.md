@@ -56,6 +56,21 @@ non-empty `upstream_model` on the selected route and returns it as `ResolvedRout
 A route with no `upstream_model` is unresolved and raises `RouteUnresolved` (implemented in the
 first inference milestone).
 
+## Catalog/routing admin control plane (AGV2-016)
+
+The catalog/routing entities are now administered through `/admin/v1` (see `admin-api.md`), enforcing
+the invariants above at configuration time rather than only at dispatch:
+
+- One active `RouteBinding` per alias (partial unique index, migration `0014`); ambiguous active-route
+  states are prevented at write time, not merely rejected by the runtime resolver.
+- `route_binding.provider_account_id` must match the endpoint's account and any attached quota group's
+  account.
+- Endpoint destinations are egress-validated on create/update using the same `DestinationPolicy` as
+  dispatch, so an endpoint that dispatch would reject is never persisted.
+- `SecretRef` is metadata only; the production secret backend remains deferred.
+- Quota limit edits take effect on future admission without rewriting historical reservation/window
+  rows.
+
 ## Direct dispatch (current milestone)
 
 The first inference path directly dispatches a single resolved route to the provider adapter

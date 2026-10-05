@@ -235,3 +235,57 @@ class PricePolicyConflictError(DomainError):
             f"route binding {route_binding_id!r} already has an enabled price policy"
         )
         self.route_binding_id = route_binding_id
+
+
+class CatalogConflictError(DomainError):
+    """A catalog resource conflicts with an existing one (deterministic 409).
+
+    Raised for uniqueness violations (duplicate provider/account/alias/quota
+    names) detected at the service boundary or translated from a database
+    unique-constraint race. The message carries only admin-supplied safe
+    metadata (resource kind and field/value), never SQL text or constraint
+    names.
+    """
+
+    def __init__(self, resource: str, field: str, value: str) -> None:
+        super().__init__(f"{resource} with {field}={value!r} already exists")
+        self.resource = resource
+        self.field = field
+        self.value = value
+
+
+class ActiveRouteConflictError(CatalogConflictError):
+    """A second active route for a model alias would be ambiguous at runtime.
+
+    The runtime resolver has no route-selection policy, so exactly one active
+    route per alias is enforced (by the partial unique index and the service
+    layer). Raised when creating/activating a route would produce a second
+    active route for an alias.
+    """
+
+    def __init__(self, model_alias_id: str) -> None:
+        super().__init__("route binding", "active model_alias", model_alias_id)
+        self.model_alias_id = model_alias_id
+
+
+class CatalogParentMismatchError(DomainError):
+    """A catalog child references a parent that does not match its other parents.
+
+    Raised when, e.g., a route binding's ``provider_account_id`` differs from its
+    endpoint's ``provider_account_id``, or its quota group belongs to a different
+    account. It is a clear validation failure (4xx), never a scheduler invariant
+    crash.
+    """
+
+
+class CatalogDestinationDenied(DomainError):
+    """A configured endpoint destination violates the egress destination policy.
+
+    Raised by the catalog admin service when a create/update would persist a
+    destination the dispatch path would reject. ``reason`` is the sanitized
+    policy explanation (never a secret or upstream URL).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"upstream destination denied: {reason}")
+        self.reason = reason

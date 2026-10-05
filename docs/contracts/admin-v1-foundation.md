@@ -8,8 +8,8 @@ decisions. FastAPI routes, paths, and filters are **not** finalized yet.
 ## Established DTO shapes
 
 Read/create/update foundations exist for: providers, provider accounts, endpoints, quota
-groups, quota limits, model aliases, route bindings, projects, principals, and API credential
-metadata.
+groups, quota limits, model aliases, route bindings, projects, principals, API credential
+metadata, and secret-reference metadata.
 
 - Create shapes carry required fields plus defaults.
 - Read shapes carry stable opaque IDs and no secret material.
@@ -59,6 +59,35 @@ Admin CRUD DTOs (AGV2-014):
 
 These DTOs now back the full `/admin/v1` identity CRUD surface (project/principal/role-assignment/
 credential list/create/read/update/revoke) introduced in AGV2-014.
+
+Catalog/routing admin DTOs (AGV2-016):
+
+- `SecretRefCreate`/`SecretRefRead` — metadata-only secret reference (`id`, `name`, `created_at`).
+  No raw secret value is ever accepted or returned; there is no delete/rotate in this task.
+- `ProviderCreate`/`Read`/`Update` — `kind`, `name`, `capabilities`, `is_active`. `kind` is a
+  non-empty opaque string, not a restrictive enum (LiteLLM-backed providers must not be
+  over-constrained).
+- `ProviderAccountCreate`/`Read`/`Update` — `provider_id`, `name`, `external_account_id` (optional),
+  `secret_ref_id` (optional), `is_active`. `provider_id` is immutable; PATCH distinguishes omitted
+  vs explicit `null` for `external_account_id`/`secret_ref_id`.
+- `EndpointCreate`/`Read`/`Update` — `provider_account_id`, `name`, `base_destination`,
+  `max_concurrency` (>=1), `is_active`. `provider_account_id` is immutable; `base_destination`
+  changes are egress-validated.
+- `QuotaGroupCreate`/`Read`/`Update` — `provider_account_id` (immutable), `name`, `description`.
+- `QuotaLimitCreate`/`Read`/`Update` — `quota_group_id` (immutable), `metric`
+  (`requests`|`tokens`, immutable), positive `limit_units`/`window_seconds`, `enabled`, optional
+  `name`. Only `limit_units`/`window_seconds`/`enabled`/`name` are mutable.
+- `ModelAliasCreate`/`Read`/`Update` — `name`, `capabilities`, `is_active`. No delete; deactivate
+  via `is_active`.
+- `RouteBindingCreate`/`Read`/`Update` — `model_alias_id`, `endpoint_id`, `provider_account_id`,
+  `upstream_model` (explicit provider-facing config, never inferred from the alias name),
+  `quota_group_id` (optional), `default_output_tokens` (positive when present), `is_active`.
+  PATCH distinguishes omitted vs explicit `null` for `upstream_model`/`quota_group_id`/
+  `default_output_tokens`.
+
+These DTOs back the full `/admin/v1` catalog/routing CRUD surface (provider/secret-ref/account/
+endpoint/quota-group/quota-limit/alias/route-binding list/create/read/update) introduced in AGV2-016,
+reusing the shared `Page[T]` shape and PATCH omitted-vs-null semantics.
 
 Human OIDC/session DTOs (AGV2-015):
 

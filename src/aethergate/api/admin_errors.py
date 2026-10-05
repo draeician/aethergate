@@ -13,12 +13,16 @@ from fastapi.responses import JSONResponse
 
 from aethergate.api.deps import get_gateway_request_id
 from aethergate.errors import (
+    ActiveRouteConflictError,
     AdminAuthenticationRequired,
     AdminAuthorizationError,
     AdminResourceNotFound,
     AdminValidationError,
     BootstrapAlreadyCompleted,
     BootstrapTokenRejected,
+    CatalogConflictError,
+    CatalogDestinationDenied,
+    CatalogParentMismatchError,
     CredentialLifecycleError,
     CsrfValidationError,
     OidcAuthenticationFailed,
@@ -176,6 +180,50 @@ async def csrf_validation_error_handler(
     )
 
 
+async def catalog_conflict_error_handler(
+    request: Request, exc: CatalogConflictError
+) -> JSONResponse:
+    return _admin_error(
+        409,
+        "resource_conflict",
+        str(exc),
+        get_gateway_request_id(request),
+    )
+
+
+async def active_route_conflict_error_handler(
+    request: Request, exc: ActiveRouteConflictError
+) -> JSONResponse:
+    return _admin_error(
+        409,
+        "active_route_conflict",
+        "The model alias already has an active route binding.",
+        get_gateway_request_id(request),
+    )
+
+
+async def catalog_parent_mismatch_error_handler(
+    request: Request, exc: CatalogParentMismatchError
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "parent_mismatch",
+        str(exc),
+        get_gateway_request_id(request),
+    )
+
+
+async def catalog_destination_denied_error_handler(
+    request: Request, exc: CatalogDestinationDenied
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "destination_denied",
+        str(exc),
+        get_gateway_request_id(request),
+    )
+
+
 __all__ = [
     "admin_auth_error_handler",
     "admin_authorization_error_handler",
@@ -189,4 +237,8 @@ __all__ = [
     "oidc_login_state_invalid_handler",
     "session_invalid_handler",
     "csrf_validation_error_handler",
+    "catalog_conflict_error_handler",
+    "active_route_conflict_error_handler",
+    "catalog_parent_mismatch_error_handler",
+    "catalog_destination_denied_error_handler",
 ]

@@ -43,12 +43,28 @@ from aethergate.domain.ids import (
     RouteBindingId,
     SecretRefId,
 )
-from aethergate.errors import PricePolicyConflictError
+from aethergate.errors import (
+    ActiveRouteConflictError,
+    CatalogConflictError,
+    CatalogParentMismatchError,
+    PricePolicyConflictError,
+)
 from aethergate.persistence import models
 
 
 def _capabilities(values: list | None) -> tuple[Capability, ...]:
     return tuple(Capability(v) for v in (values or []))
+
+
+def _is_unique_violation(exc: IntegrityError, constraint: str) -> bool:
+    """Return True if an ``IntegrityError`` is a unique violation on ``constraint``.
+
+    Matches the asyncpg/PostgreSQL message against the constraint name substring
+    so conflicts are translated to stable domain errors, never surfaced as raw
+    SQL text.
+    """
+    message = str(exc.orig).lower() if exc.orig else ""
+    return constraint.lower() in message
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +170,12 @@ async def create_secret_ref(
 ) -> domain.SecretRef:
     row = models.SecretRef(id=str(entity.id), name=entity.name)
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "secret_refs_name_key"):
+            raise CatalogConflictError("secret ref", "name", entity.name) from exc
+        raise
     await session.refresh(row)
     return _secret_ref_to_domain(row)
 
@@ -164,6 +185,31 @@ async def get_secret_ref(
 ) -> domain.SecretRef | None:
     row = await session.get(models.SecretRef, str(ref_id))
     return _secret_ref_to_domain(row) if row else None
+
+
+async def get_secret_ref_by_name(session: AsyncSession, name: str) -> domain.SecretRef | None:
+    result = await session.execute(
+        select(models.SecretRef).where(models.SecretRef.name == name)
+    )
+    row = result.scalar_one_or_none()
+    return _secret_ref_to_domain(row) if row else None
+
+
+async def list_secret_refs(
+    session: AsyncSession, *, limit: int = 50, offset: int = 0
+) -> list[domain.SecretRef]:
+    stmt = (
+        select(models.SecretRef)
+        .order_by(models.SecretRef.created_at.asc(), models.SecretRef.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_secret_ref_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_secret_refs(session: AsyncSession) -> int:
+    return (await session.execute(select(func.count()).select_from(models.SecretRef))).scalar_one()
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +236,12 @@ async def create_provider(session: AsyncSession, entity: domain.Provider) -> dom
         is_active=entity.is_active,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "providers_name_key"):
+            raise CatalogConflictError("provider", "name", entity.name) from exc
+        raise
     return _provider_to_domain(row)
 
 
@@ -205,6 +256,52 @@ async def get_provider_by_name(session: AsyncSession, name: str) -> domain.Provi
     )
     row = result.scalar_one_or_none()
     return _provider_to_domain(row) if row else None
+
+
+async def list_providers(
+    session: AsyncSession, *, limit: int = 50, offset: int = 0
+) -> list[domain.Provider]:
+    stmt = (
+        select(models.Provider)
+        .order_by(models.Provider.created_at.asc(), models.Provider.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_provider_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_providers(session: AsyncSession) -> int:
+    return (await session.execute(select(func.count()).select_from(models.Provider))).scalar_one()
+
+
+async def update_provider(
+    session: AsyncSession,
+    provider_id: ProviderId,
+    *,
+    kind: str | None = None,
+    name: str | None = None,
+    capabilities: tuple[Capability, ...] | None = None,
+    is_active: bool | None = None,
+) -> domain.Provider | None:
+    row = await session.get(models.Provider, str(provider_id))
+    if row is None:
+        return None
+    if kind is not None:
+        row.kind = kind
+    if name is not None:
+        row.name = name
+    if capabilities is not None:
+        row.capabilities = [c.value for c in capabilities]
+    if is_active is not None:
+        row.is_active = is_active
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "providers_name_key"):
+            raise CatalogConflictError("provider", "name", name or "") from exc
+        raise
+    return _provider_to_domain(row)
 
 
 def _provider_account_to_domain(row: models.ProviderAccount) -> domain.ProviderAccount:
@@ -251,6 +348,66 @@ async def get_provider_account_by_name(
     return _provider_account_to_domain(row) if row else None
 
 
+async def list_provider_accounts(
+    session: AsyncSession,
+    *,
+    provider_id: ProviderId | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.ProviderAccount]:
+    stmt = select(models.ProviderAccount)
+    if provider_id is not None:
+        stmt = stmt.where(models.ProviderAccount.provider_id == str(provider_id))
+    stmt = (
+        stmt.order_by(
+            models.ProviderAccount.created_at.asc(), models.ProviderAccount.id.asc()
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_provider_account_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_provider_accounts(
+    session: AsyncSession, *, provider_id: ProviderId | None = None
+) -> int:
+    stmt = select(func.count()).select_from(models.ProviderAccount)
+    if provider_id is not None:
+        stmt = stmt.where(models.ProviderAccount.provider_id == str(provider_id))
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_provider_account(
+    session: AsyncSession,
+    account_id: ProviderAccountId,
+    *,
+    name: str | None = None,
+    external_account_id: str | None = None,
+    clear_external_account_id: bool = False,
+    secret_ref_id: SecretRefId | None = None,
+    clear_secret_ref_id: bool = False,
+    is_active: bool | None = None,
+) -> domain.ProviderAccount | None:
+    row = await session.get(models.ProviderAccount, str(account_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if external_account_id is not None:
+        row.external_account_id = external_account_id
+    elif clear_external_account_id:
+        row.external_account_id = None
+    if secret_ref_id is not None:
+        row.secret_ref_id = str(secret_ref_id)
+    elif clear_secret_ref_id:
+        row.secret_ref_id = None
+    if is_active is not None:
+        row.is_active = is_active
+    await session.flush()
+    return _provider_account_to_domain(row)
+
+
 def _endpoint_to_domain(row: models.Endpoint) -> domain.Endpoint:
     return domain.Endpoint(
         id=EndpointId(row.id),
@@ -289,6 +446,62 @@ async def get_endpoint_by_name(session: AsyncSession, name: str) -> domain.Endpo
     return _endpoint_to_domain(row) if row else None
 
 
+async def list_endpoints(
+    session: AsyncSession,
+    *,
+    provider_account_id: ProviderAccountId | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.Endpoint]:
+    stmt = select(models.Endpoint)
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.Endpoint.provider_account_id == str(provider_account_id)
+        )
+    stmt = (
+        stmt.order_by(models.Endpoint.created_at.asc(), models.Endpoint.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_endpoint_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_endpoints(
+    session: AsyncSession, *, provider_account_id: ProviderAccountId | None = None
+) -> int:
+    stmt = select(func.count()).select_from(models.Endpoint)
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.Endpoint.provider_account_id == str(provider_account_id)
+        )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_endpoint(
+    session: AsyncSession,
+    endpoint_id: EndpointId,
+    *,
+    name: str | None = None,
+    base_destination: str | None = None,
+    max_concurrency: int | None = None,
+    is_active: bool | None = None,
+) -> domain.Endpoint | None:
+    row = await session.get(models.Endpoint, str(endpoint_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if base_destination is not None:
+        row.base_destination = base_destination
+    if max_concurrency is not None:
+        row.max_concurrency = max_concurrency
+    if is_active is not None:
+        row.is_active = is_active
+    await session.flush()
+    return _endpoint_to_domain(row)
+
+
 def _quota_group_to_domain(row: models.QuotaGroup) -> domain.QuotaGroup:
     return domain.QuotaGroup(
         id=QuotaGroupId(row.id),
@@ -308,7 +521,12 @@ async def create_quota_group(
         description=entity.description,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "quota_groups_name_key"):
+            raise CatalogConflictError("quota group", "name", entity.name) from exc
+        raise
     return _quota_group_to_domain(row)
 
 
@@ -320,6 +538,71 @@ async def get_quota_group_by_name(
     )
     row = result.scalar_one_or_none()
     return _quota_group_to_domain(row) if row else None
+
+
+async def get_quota_group(
+    session: AsyncSession, group_id: QuotaGroupId
+) -> domain.QuotaGroup | None:
+    row = await session.get(models.QuotaGroup, str(group_id))
+    return _quota_group_to_domain(row) if row else None
+
+
+async def list_quota_groups(
+    session: AsyncSession,
+    *,
+    provider_account_id: ProviderAccountId | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.QuotaGroup]:
+    stmt = select(models.QuotaGroup)
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.QuotaGroup.provider_account_id == str(provider_account_id)
+        )
+    stmt = (
+        stmt.order_by(models.QuotaGroup.created_at.asc(), models.QuotaGroup.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_quota_group_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_quota_groups(
+    session: AsyncSession, *, provider_account_id: ProviderAccountId | None = None
+) -> int:
+    stmt = select(func.count()).select_from(models.QuotaGroup)
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.QuotaGroup.provider_account_id == str(provider_account_id)
+        )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_quota_group(
+    session: AsyncSession,
+    group_id: QuotaGroupId,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    clear_description: bool = False,
+) -> domain.QuotaGroup | None:
+    row = await session.get(models.QuotaGroup, str(group_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if description is not None:
+        row.description = description
+    elif clear_description:
+        row.description = None
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "quota_groups_name_key"):
+            raise CatalogConflictError("quota group", "name", name or "") from exc
+        raise
+    return _quota_group_to_domain(row)
 
 
 def _quota_limit_to_domain(row: models.QuotaLimit) -> domain.QuotaLimit:
@@ -362,6 +645,68 @@ async def list_quota_limits_for_group(
     return [_quota_limit_to_domain(r) for r in result.scalars().all()]
 
 
+async def get_quota_limit(
+    session: AsyncSession, limit_id: QuotaLimitId
+) -> domain.QuotaLimit | None:
+    row = await session.get(models.QuotaLimit, str(limit_id))
+    return _quota_limit_to_domain(row) if row else None
+
+
+async def list_quota_limits(
+    session: AsyncSession,
+    *,
+    quota_group_id: QuotaGroupId | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.QuotaLimit]:
+    stmt = select(models.QuotaLimit)
+    if quota_group_id is not None:
+        stmt = stmt.where(models.QuotaLimit.quota_group_id == str(quota_group_id))
+    stmt = (
+        stmt.order_by(models.QuotaLimit.created_at.asc(), models.QuotaLimit.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_quota_limit_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_quota_limits(
+    session: AsyncSession, *, quota_group_id: QuotaGroupId | None = None
+) -> int:
+    stmt = select(func.count()).select_from(models.QuotaLimit)
+    if quota_group_id is not None:
+        stmt = stmt.where(models.QuotaLimit.quota_group_id == str(quota_group_id))
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_quota_limit(
+    session: AsyncSession,
+    limit_id: QuotaLimitId,
+    *,
+    limit_units: int | None = None,
+    window_seconds: int | None = None,
+    enabled: bool | None = None,
+    name: str | None = None,
+    clear_name: bool = False,
+) -> domain.QuotaLimit | None:
+    row = await session.get(models.QuotaLimit, str(limit_id))
+    if row is None:
+        return None
+    if limit_units is not None:
+        row.limit_units = limit_units
+    if window_seconds is not None:
+        row.window_seconds = window_seconds
+    if enabled is not None:
+        row.enabled = enabled
+    if name is not None:
+        row.name = name
+    elif clear_name:
+        row.name = None
+    await session.flush()
+    return _quota_limit_to_domain(row)
+
+
 async def update_endpoint_max_concurrency(
     session: AsyncSession, endpoint_id: EndpointId, max_concurrency: int
 ) -> domain.Endpoint:
@@ -392,7 +737,12 @@ async def create_model_alias(
         is_active=entity.is_active,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "model_aliases_name_key"):
+            raise CatalogConflictError("model alias", "name", entity.name) from exc
+        raise
     return _model_alias_to_domain(row)
 
 
@@ -423,6 +773,49 @@ async def list_active_model_aliases(session: AsyncSession) -> list[domain.ModelA
     return [_model_alias_to_domain(r) for r in result.scalars().all()]
 
 
+async def list_model_aliases(
+    session: AsyncSession, *, limit: int = 50, offset: int = 0
+) -> list[domain.ModelAlias]:
+    stmt = (
+        select(models.ModelAlias)
+        .order_by(models.ModelAlias.created_at.asc(), models.ModelAlias.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_model_alias_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_model_aliases(session: AsyncSession) -> int:
+    return (await session.execute(select(func.count()).select_from(models.ModelAlias))).scalar_one()
+
+
+async def update_model_alias(
+    session: AsyncSession,
+    alias_id: ModelAliasId,
+    *,
+    name: str | None = None,
+    capabilities: tuple[Capability, ...] | None = None,
+    is_active: bool | None = None,
+) -> domain.ModelAlias | None:
+    row = await session.get(models.ModelAlias, str(alias_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if capabilities is not None:
+        row.capabilities = [c.value for c in capabilities]
+    if is_active is not None:
+        row.is_active = is_active
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "model_aliases_name_key"):
+            raise CatalogConflictError("model alias", "name", name or "") from exc
+        raise
+    return _model_alias_to_domain(row)
+
+
 def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
     return domain.RouteBinding(
         id=RouteBindingId(row.id),
@@ -439,12 +832,19 @@ def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
 async def create_route_binding(
     session: AsyncSession, entity: domain.RouteBinding
 ) -> domain.RouteBinding:
+    endpoint = await session.get(models.Endpoint, str(entity.endpoint_id))
+    if endpoint is None:
+        raise ValueError(f"endpoint {entity.endpoint_id!s} not found")
+    if endpoint.provider_account_id != str(entity.provider_account_id):
+        raise CatalogParentMismatchError(
+            "route provider_account_id must equal its endpoint's provider_account_id"
+        )
     if entity.quota_group_id is not None:
         group = await session.get(models.QuotaGroup, str(entity.quota_group_id))
         if group is None:
             raise ValueError(f"quota group {entity.quota_group_id!s} not found")
         if group.provider_account_id != str(entity.provider_account_id):
-            raise ValueError(
+            raise CatalogParentMismatchError(
                 "route quota group must belong to the route's provider account"
             )
     row = models.RouteBinding(
@@ -458,7 +858,12 @@ async def create_route_binding(
         is_active=entity.is_active,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "uq_route_bindings_one_active_per_alias"):
+            raise ActiveRouteConflictError(str(entity.model_alias_id)) from exc
+        raise
     return _route_binding_to_domain(row)
 
 
@@ -471,6 +876,92 @@ async def list_route_bindings(
         )
     )
     return [_route_binding_to_domain(r) for r in result.scalars().all()]
+
+
+async def get_route_binding(
+    session: AsyncSession, binding_id: RouteBindingId
+) -> domain.RouteBinding | None:
+    row = await session.get(models.RouteBinding, str(binding_id))
+    return _route_binding_to_domain(row) if row else None
+
+
+async def list_route_bindings_paged(
+    session: AsyncSession,
+    *,
+    model_alias_id: ModelAliasId | None = None,
+    provider_account_id: ProviderAccountId | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.RouteBinding]:
+    stmt = select(models.RouteBinding)
+    if model_alias_id is not None:
+        stmt = stmt.where(models.RouteBinding.model_alias_id == str(model_alias_id))
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.RouteBinding.provider_account_id == str(provider_account_id)
+        )
+    stmt = (
+        stmt.order_by(models.RouteBinding.created_at.asc(), models.RouteBinding.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_route_binding_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_route_bindings(
+    session: AsyncSession,
+    *,
+    model_alias_id: ModelAliasId | None = None,
+    provider_account_id: ProviderAccountId | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.RouteBinding)
+    if model_alias_id is not None:
+        stmt = stmt.where(models.RouteBinding.model_alias_id == str(model_alias_id))
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.RouteBinding.provider_account_id == str(provider_account_id)
+        )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_route_binding(
+    session: AsyncSession,
+    binding_id: RouteBindingId,
+    *,
+    upstream_model: str | None = None,
+    clear_upstream_model: bool = False,
+    quota_group_id: QuotaGroupId | None = None,
+    clear_quota_group_id: bool = False,
+    default_output_tokens: int | None = None,
+    clear_default_output_tokens: bool = False,
+    is_active: bool | None = None,
+) -> domain.RouteBinding | None:
+    row = await session.get(models.RouteBinding, str(binding_id))
+    if row is None:
+        return None
+    model_alias_id = row.model_alias_id
+    if upstream_model is not None:
+        row.upstream_model = upstream_model
+    elif clear_upstream_model:
+        row.upstream_model = None
+    if quota_group_id is not None:
+        row.quota_group_id = str(quota_group_id)
+    elif clear_quota_group_id:
+        row.quota_group_id = None
+    if default_output_tokens is not None:
+        row.default_output_tokens = default_output_tokens
+    elif clear_default_output_tokens:
+        row.default_output_tokens = None
+    if is_active is not None:
+        row.is_active = is_active
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_unique_violation(exc, "uq_route_bindings_one_active_per_alias"):
+            raise ActiveRouteConflictError(model_alias_id) from exc
+        raise
+    return _route_binding_to_domain(row)
 
 
 def _principal_to_domain(row: models.Principal) -> domain.Principal:

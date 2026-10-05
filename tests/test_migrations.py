@@ -406,3 +406,25 @@ def test_migration_0012_to_0013() -> None:
         assert "txn_cookie_hash" not in _nullable_columns(url, "oidc_login_states")
     finally:
         asyncio.run(drop_database(url))
+
+
+def test_migration_0013_to_0014() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1314")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0013", env=env)
+        assert "uq_route_bindings_one_active_per_alias" not in _indexes(
+            url, "route_bindings"
+        )
+
+        _run_alembic("upgrade", "head", env=env)
+        assert "uq_route_bindings_one_active_per_alias" in _indexes(
+            url, "route_bindings"
+        )
+    finally:
+        asyncio.run(drop_database(url))

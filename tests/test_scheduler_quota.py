@@ -34,7 +34,7 @@ from aethergate.domain.ids import (
 )
 from aethergate.egress import DestinationPolicy
 from aethergate.encryption import QueueEncryptor
-from aethergate.errors import ProviderError
+from aethergate.errors import CatalogParentMismatchError, ProviderError
 from aethergate.inference.service import InferenceService
 from aethergate.persistence import models, repository
 from aethergate.scheduler import repository as sched_repo
@@ -305,7 +305,7 @@ async def test_route_cannot_reference_other_accounts_quota_group(sched_engine):
                 ),
             )
             # qg-a belongs to acct-ollama, but this route targets acct-other.
-            with pytest.raises(ValueError, match="provider account"):
+            with pytest.raises(CatalogParentMismatchError, match="provider account"):
                 await repository.create_route_binding(
                     session,
                     domain.RouteBinding(

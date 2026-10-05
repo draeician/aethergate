@@ -199,3 +199,27 @@ universal authorization requirement.
 
 Creating an additional alias or route does not imply additional provider capacity, and
 referencing a quota group on a route does not imply quota ownership.
+
+### Catalog admin invariants (AGV2-016)
+
+The catalog/routing control plane enforces the following invariants in the service layer (with a DB
+backstop where it is clean):
+
+- **Deployment scope.** Catalog resources are deployment infrastructure; authorization requires
+  deployment-scoped authority (`system_admin`) plus the matching `admin:catalog:read`/`write`
+  permission. Project-scoped roles are denied even if the credential carries `admin:catalog:*`.
+- **One active route per alias.** Exactly one active `RouteBinding` per `model_alias_id`, enforced by
+  the partial unique index `uq_route_bindings_one_active_per_alias` (`WHERE is_active = true`,
+  migration `0014`). Inactive alternates are permitted; deactivate-then-activate swaps are supported;
+  a second active route (or concurrent activation) resolves to exactly one winner, never an ambiguous
+  runtime state.
+- **Route/account consistency.** `route_binding.provider_account_id` must equal
+  `endpoint.provider_account_id`, and any `route_binding.quota_group_id` must belong to that same
+  account. The duplicated `provider_account_id` on the route is a validated invariant, not free-form.
+- **Egress.** Endpoint `base_destination` is validated against the same `DestinationPolicy` as
+  dispatch, so a destination the dispatch path would reject is never persisted.
+- **SecretRef is metadata only.** The production secret backend remains deferred; `SecretRef` exposes
+  only `id`/`name`/`created_at` and never the material.
+- **PATCH omitted-vs-null.** Nullable update fields (`external_account_id`, `secret_ref_id`,
+  `upstream_model`, `quota_group_id`, `default_output_tokens`, and nullable `description`/`name`)
+  distinguish omitted (leave unchanged) from explicit `null` (clear) via Pydantic `model_fields_set`.

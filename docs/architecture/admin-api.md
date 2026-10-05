@@ -102,6 +102,61 @@ is required; the shared identity service validates audience/scope coherence; aud
 List endpoints return `{"items":[...],"limit":N,"offset":N,"total":N}` with `limit` bounded
 `1..200` (default 50) and stable sort (created_at, id).
 
+## Catalog/routing admin CRUD surface (AGV2-016)
+
+`/admin/v1` now exposes the deployment-scoped catalog/routing control plane through the same thin
+routers + centralized catalog admin service + authorization/pagination foundations. Catalog resources
+are **deployment infrastructure, not project-owned**: every list/read/mutation requires
+deployment-scoped authority (`system_admin`) **and** the matching `admin:catalog:read`/`write`
+permission. A `project_admin`/`project_viewer` credential is denied regardless of its `admin:catalog:*`
+scopes, because deployment scope is also required.
+
+- Providers: `POST /providers`, `GET /providers` (paginated), `GET /providers/{id}`,
+  `PATCH /providers/{id}` (deactivate via `is_active`; no delete).
+- Secret refs (metadata only): `POST /secret-refs`, `GET /secret-refs`, `GET /secret-refs/{id}`.
+- Provider accounts: `POST /provider-accounts`, `GET /provider-accounts` (filter `provider_id`),
+  `GET /provider-accounts/{id}`, `PATCH /provider-accounts/{id}`.
+- Endpoints: `POST /endpoints`, `GET /endpoints` (filter `provider_account_id`),
+  `GET /endpoints/{id}`, `PATCH /endpoints/{id}`.
+- Quota groups: `POST /quota-groups`, `GET /quota-groups` (filter `provider_account_id`),
+  `GET /quota-groups/{id}`, `PATCH /quota-groups/{id}`.
+- Quota limits: `POST /quota-limits`, `GET /quota-limits` (filter `quota_group_id`),
+  `GET /quota-limits/{id}`, `PATCH /quota-limits/{id}`.
+- Model aliases: `POST /model-aliases`, `GET /model-aliases`, `GET /model-aliases/{id}`,
+  `PATCH /model-aliases/{id}` (deactivate/reactivate via `is_active`; no delete).
+- Route bindings: `POST /route-bindings`, `GET /route-bindings` (filter `model_alias_id` /
+  `provider_account_id`), `GET /route-bindings/{id}`, `PATCH /route-bindings/{id}`.
+
+### Invariants and error translation
+
+- **One active route per alias.** A partial unique index (`model_alias_id WHERE is_active = true`,
+  migration `0014`) plus service-layer validation guarantees exactly one active `RouteBinding` per
+  model alias. Creating/activating a second active route returns `409 active_route_conflict`; an
+  inactive alternate is allowed; deactivate-then-activate swaps are supported; concurrent activations
+  produce exactly one winner (translated from the index, never a raw `IntegrityError`/500).
+- **Parent consistency.** A route binding's `provider_account_id` must equal its endpoint's
+  `provider_account_id`, and its optional quota group must belong to the same account; violations
+  return `400 parent_mismatch` and are never persisted.
+- **Egress validation.** Endpoint create and `base_destination` updates run the same
+  `DestinationPolicy` used before dispatch: non-allowlisted hosts, URL userinfo, metadata/link-local/
+  loopback/reserved destinations return `400 destination_denied`; allowlisted private-LAN hosts are
+  accepted. A destination the dispatch path would reject is never persisted.
+- **PATCH omitted-vs-null.** `external_account_id`, `secret_ref_id`, `upstream_model`,
+  `quota_group_id`, `default_output_tokens`, `description`, and `name` (where nullable) distinguish
+  omitted (unchanged) from explicit `null` (clear) via `model_fields_set`.
+- **Uniqueness.** Duplicate provider/account/alias/quota-group names return `409 resource_conflict`
+  (translated, including DB unique-constraint races), never raw constraint text.
+- **Secret refs are metadata only.** No raw secret value is accepted or returned; the production
+  secret backend remains deferred and `EnvSecretResolver` remains a dev/test convenience.
+- **Audit.** Catalog create/update emit immutable audit events (`provider.created`/`updated`,
+  `secret_ref.created`, `provider_account.created`/`updated`, `endpoint.created`/`updated`,
+  `quota_group.created`/`updated`, `quota_limit.created`/`updated`, `model_alias.created`/`updated`,
+  `route_binding.created`/`updated`) with the actor principal ID and safe metadata only; idempotent
+  no-op PATCHes emit no event.
+- Quota limit edits (`limit_units`/`window_seconds`/`enabled`) take effect on future scheduler
+  admission without rewriting historical reservation/window rows; `metric` and `quota_group_id` are
+  immutable.
+
 ## Human OIDC/session auth surface (AGV2-015)
 
 Human administrators authenticate with an OIDC Authorization Code + PKCE flow and receive a

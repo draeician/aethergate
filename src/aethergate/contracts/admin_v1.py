@@ -250,6 +250,19 @@ class ExternalIdentityRead(ContractModel):
     is_active: bool
 
 
+# --- Secret references (metadata only) ---------------------------------------
+
+
+class SecretRefCreate(ContractModel):
+    name: str = Field(min_length=1)
+
+
+class SecretRefRead(ContractModel):
+    id: SecretRefId
+    name: str
+    created_at: datetime
+
+
 # --- Providers --------------------------------------------------------------
 
 
@@ -409,6 +422,7 @@ class RouteBindingCreate(ContractModel):
     upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
     default_output_tokens: int | None = Field(default=None, ge=1)
+    is_active: bool = True
 
 
 class RouteBindingRead(ContractModel):
@@ -617,6 +631,8 @@ __all__ = [
     "LogoutResult",
     "ExternalIdentityCreate",
     "ExternalIdentityRead",
+    "SecretRefCreate",
+    "SecretRefRead",
     "ProviderCreate",
     "ProviderRead",
     "ProviderUpdate",

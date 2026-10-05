@@ -15,7 +15,7 @@ from aethergate.domain.ids import (
     RouteBindingId,
 )
 from aethergate.errors import (
-    AmbiguousRoute,
+    ActiveRouteConflictError,
     ModelAliasNotFound,
     ResourceInactive,
     RouteUnresolved,
@@ -181,17 +181,19 @@ async def test_inactive_provider_rejected(session):
         await resolve_model_alias(session, "m3")
 
 
-async def test_ambiguous_multi_route_rejected(session):
+async def test_second_active_route_rejected(session):
     await _seed_base(session)
-    await repository.create_route_binding(
-        session,
-        domain.RouteBinding(
-            id=RouteBindingId("rb-2"),
-            model_alias_id=ModelAliasId("alias-1"),
-            endpoint_id=EndpointId("ep-1"),
-            provider_account_id=ProviderAccountId("acct-1"),
-            upstream_model="gpt-4-upstream-2",
-        ),
-    )
-    with pytest.raises(AmbiguousRoute):
-        await resolve_model_alias(session, "gpt-4")
+    # A second active route for the same alias is rejected at the repository
+    # boundary (the partial unique index is the authoritative backstop), so the
+    # resolver can never observe an ambiguous multi-route state.
+    with pytest.raises(ActiveRouteConflictError):
+        await repository.create_route_binding(
+            session,
+            domain.RouteBinding(
+                id=RouteBindingId("rb-2"),
+                model_alias_id=ModelAliasId("alias-1"),
+                endpoint_id=EndpointId("ep-1"),
+                provider_account_id=ProviderAccountId("acct-1"),
+                upstream_model="gpt-4-upstream-2",
+            ),
+        )

@@ -89,6 +89,31 @@ Human OIDC/session endpoints (AGV2-015):
 - `POST /admin/v1/auth/logout` — revoke the session and clear the cookie (CSRF-protected, idempotent).
 - `POST /admin/v1/oidc/identities` — link an external identity (`issuer` + `subject`) to a principal.
 
+Catalog/routing control-plane endpoints (AGV2-016), all deployment-scoped (`system_admin` +
+`admin:catalog:*`; project roles denied):
+
+- Providers: `POST /admin/v1/providers`, `GET /admin/v1/providers` (paginated),
+  `GET /admin/v1/providers/{id}`, `PATCH /admin/v1/providers/{id}`.
+- Secret refs (metadata only): `POST /admin/v1/secret-refs`, `GET /admin/v1/secret-refs`,
+  `GET /admin/v1/secret-refs/{id}`.
+- Provider accounts: `POST /admin/v1/provider-accounts`, `GET /admin/v1/provider-accounts`
+  (filter `provider_id`), `GET /admin/v1/provider-accounts/{id}`, `PATCH /admin/v1/provider-accounts/{id}`.
+- Endpoints: `POST /admin/v1/endpoints`, `GET /admin/v1/endpoints` (filter `provider_account_id`),
+  `GET /admin/v1/endpoints/{id}`, `PATCH /admin/v1/endpoints/{id}`.
+- Quota groups: `POST /admin/v1/quota-groups`, `GET /admin/v1/quota-groups` (filter
+  `provider_account_id`), `GET /admin/v1/quota-groups/{id}`, `PATCH /admin/v1/quota-groups/{id}`.
+- Quota limits: `POST /admin/v1/quota-limits`, `GET /admin/v1/quota-limits` (filter
+  `quota_group_id`), `GET /admin/v1/quota-limits/{id}`, `PATCH /admin/v1/quota-limits/{id}`.
+- Model aliases: `POST /admin/v1/model-aliases`, `GET /admin/v1/model-aliases`,
+  `GET /admin/v1/model-aliases/{id}`, `PATCH /admin/v1/model-aliases/{id}`.
+- Route bindings: `POST /admin/v1/route-bindings`, `GET /admin/v1/route-bindings` (filter
+  `model_alias_id`/`provider_account_id`), `GET /admin/v1/route-bindings/{id}`,
+  `PATCH /admin/v1/route-bindings/{id}`.
+
+Catalog errors use stable codes: `409 resource_conflict` (unique name), `409 active_route_conflict`
+(second active route), `400 parent_mismatch` (route/endpoint/quota-group account mismatch),
+`400 destination_denied` (egress), `404 not_found`.
+
 Admin auth requires an `admin`-audience credential (`Authorization: Bearer agk_...`) plus an active
 role assignment granting the needed `admin:*` permission (`system_admin` deployment-wide;
 `project_admin`/`project_viewer` scoped to one project). Admin errors use
@@ -120,8 +145,10 @@ empty means deny all.
 
 ## Seeding a development backend
 
-Because the admin API is not implemented yet, seed the minimum inference configuration
-idempotently through the service/repository layer:
+The catalog/routing control plane is now available through `/admin/v1` (AGV2-016), but `devseed`
+remains the convenient idempotent bootstrap for local development. It seeds the minimum inference
+configuration directly through the same service/repository validation layer (so it cannot create
+route/account inconsistencies or multiple active routes):
 
 ```bash
 docker compose --project-directory deploy/v2 --file deploy/v2/compose.yaml \
@@ -265,6 +292,8 @@ active equivalent assignments), the singleton `bootstrap_state`, and `audit_even
 the role/scope coherence shape — `system_admin` must be deployment-scoped, project roles must be
 project-scoped; `0012` adds human identity — `external_identities` (unique `issuer`+`subject`),
 `browser_sessions` (one-way session/CSRF verifiers), and `oidc_login_states` (one-time PKCE
-transactions)).
+transactions); `0013` binds the OIDC login transaction to the initiating browser (one-way
+`txn_cookie_hash`); `0014` adds the catalog one-active-route partial unique index
+`uq_route_bindings_one_active_per_alias` (`model_alias_id WHERE is_active = true`).
 Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

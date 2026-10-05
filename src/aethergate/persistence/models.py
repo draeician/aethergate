@@ -486,6 +486,12 @@ class RouteBinding(Base, TimestampMixin):
             "default_output_tokens IS NULL OR default_output_tokens >= 1",
             name="ck_route_bindings_default_output_positive",
         ),
+        Index(
+            "uq_route_bindings_one_active_per_alias",
+            "model_alias_id",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
