@@ -20,9 +20,12 @@ from aethergate.domain.enums import (
     CredentialScope,
     PrincipalKind,
     QuotaMetric,
+    ResourceScopeType,
+    Role,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
+    AuditEventId,
     BudgetPolicyId,
     EndpointId,
     ModelAliasId,
@@ -33,6 +36,7 @@ from aethergate.domain.ids import (
     ProviderId,
     QuotaGroupId,
     QuotaLimitId,
+    RoleAssignmentId,
     RouteBindingId,
     SecretRefId,
 )
@@ -507,6 +511,7 @@ async def create_api_credential(
     )
     session.add(row)
     await session.flush()
+    await session.refresh(row)
     return _api_credential_to_domain(row)
 
 
@@ -574,6 +579,210 @@ async def update_api_credential_last_used(
         return
     row.last_used_at = used_at
     await session.flush()
+
+
+# ---------------------------------------------------------------------------
+# RBAC / role assignments
+# ---------------------------------------------------------------------------
+
+
+def _role_assignment_to_domain(row: models.RoleAssignment) -> domain.RoleAssignment:
+    return domain.RoleAssignment(
+        id=RoleAssignmentId(row.id),
+        principal_id=PrincipalId(row.principal_id),
+        role=Role(row.role),
+        resource_scope_type=ResourceScopeType(row.resource_scope_type),
+        resource_id=ProjectId(row.resource_id) if row.resource_id else None,
+        created_at=row.created_at,
+        created_by=PrincipalId(row.created_by) if row.created_by else None,
+        revoked_at=row.revoked_at,
+        is_active=row.is_active,
+    )
+
+
+async def create_role_assignment(
+    session: AsyncSession, entity: domain.RoleAssignment
+) -> domain.RoleAssignment:
+    row = models.RoleAssignment(
+        id=str(entity.id),
+        principal_id=str(entity.principal_id),
+        role=entity.role.value,
+        resource_scope_type=entity.resource_scope_type.value,
+        resource_id=str(entity.resource_id) if entity.resource_id else "",
+        created_by=str(entity.created_by) if entity.created_by else None,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _role_assignment_to_domain(row)
+
+
+async def get_role_assignment(
+    session: AsyncSession, assignment_id: RoleAssignmentId
+) -> domain.RoleAssignment | None:
+    row = await session.get(models.RoleAssignment, str(assignment_id))
+    return _role_assignment_to_domain(row) if row else None
+
+
+async def list_active_role_assignments(
+    session: AsyncSession, principal_id: PrincipalId
+) -> list[domain.RoleAssignment]:
+    result = await session.execute(
+        select(models.RoleAssignment).where(
+            models.RoleAssignment.principal_id == str(principal_id),
+            models.RoleAssignment.is_active.is_(True),
+            models.RoleAssignment.revoked_at.is_(None),
+        )
+    )
+    return [_role_assignment_to_domain(r) for r in result.scalars().all()]
+
+
+async def find_active_equivalent_assignment(
+    session: AsyncSession,
+    principal_id: PrincipalId,
+    role: Role,
+    resource_scope_type: ResourceScopeType,
+    resource_id: ProjectId | None,
+) -> domain.RoleAssignment | None:
+    result = await session.execute(
+        select(models.RoleAssignment).where(
+            models.RoleAssignment.principal_id == str(principal_id),
+            models.RoleAssignment.role == role.value,
+            models.RoleAssignment.resource_scope_type == resource_scope_type.value,
+            models.RoleAssignment.resource_id == (str(resource_id) if resource_id else ""),
+            models.RoleAssignment.is_active.is_(True),
+            models.RoleAssignment.revoked_at.is_(None),
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _role_assignment_to_domain(row) if row else None
+
+
+async def revoke_role_assignment(
+    session: AsyncSession, assignment_id: RoleAssignmentId, revoked_at: datetime
+) -> domain.RoleAssignment | None:
+    row = await session.get(models.RoleAssignment, str(assignment_id))
+    if row is None:
+        return None
+    if row.revoked_at is None:
+        row.revoked_at = revoked_at
+    row.is_active = False
+    await session.flush()
+    return _role_assignment_to_domain(row)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap state
+# ---------------------------------------------------------------------------
+
+BOOTSTRAP_STATE_ID = "bootstrap"
+
+
+def _bootstrap_state_to_domain(row: models.BootstrapState) -> domain.BootstrapState:
+    return domain.BootstrapState(
+        id=row.id,
+        completed=row.completed,
+        completed_at=row.completed_at,
+        initial_project_id=ProjectId(row.initial_project_id)
+        if row.initial_project_id
+        else None,
+        initial_admin_principal_id=PrincipalId(row.initial_admin_principal_id)
+        if row.initial_admin_principal_id
+        else None,
+        initial_admin_credential_id=ApiCredentialId(row.initial_admin_credential_id)
+        if row.initial_admin_credential_id
+        else None,
+    )
+
+
+async def get_bootstrap_state(session: AsyncSession) -> domain.BootstrapState | None:
+    row = await session.get(models.BootstrapState, BOOTSTRAP_STATE_ID)
+    return _bootstrap_state_to_domain(row) if row else None
+
+
+async def get_bootstrap_state_for_update(
+    session: AsyncSession,
+) -> domain.BootstrapState | None:
+    result = await session.execute(
+        select(models.BootstrapState)
+        .where(models.BootstrapState.id == BOOTSTRAP_STATE_ID)
+        .with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    return _bootstrap_state_to_domain(row) if row else None
+
+
+async def create_bootstrap_state(session: AsyncSession) -> domain.BootstrapState:
+    row = models.BootstrapState(id=BOOTSTRAP_STATE_ID, completed=False)
+    session.add(row)
+    await session.flush()
+    return _bootstrap_state_to_domain(row)
+
+
+async def mark_bootstrap_completed(
+    session: AsyncSession,
+    *,
+    project_id: ProjectId,
+    principal_id: PrincipalId,
+    credential_id: ApiCredentialId,
+    completed_at: datetime,
+) -> domain.BootstrapState:
+    row = await session.get(models.BootstrapState, BOOTSTRAP_STATE_ID)
+    assert row is not None  # guaranteed by bootstrap flow
+    row.completed = True
+    row.completed_at = completed_at
+    row.initial_project_id = str(project_id)
+    row.initial_admin_principal_id = str(principal_id)
+    row.initial_admin_credential_id = str(credential_id)
+    await session.flush()
+    return _bootstrap_state_to_domain(row)
+
+
+# ---------------------------------------------------------------------------
+# Audit events
+# ---------------------------------------------------------------------------
+
+
+def _audit_event_to_domain(row: models.AuditEvent) -> domain.AuditEvent:
+    return domain.AuditEvent(
+        id=AuditEventId(row.id),
+        actor_principal_id=PrincipalId(row.actor_principal_id)
+        if row.actor_principal_id
+        else None,
+        project_id=ProjectId(row.project_id) if row.project_id else None,
+        action=row.action,
+        resource_type=row.resource_type,
+        resource_id=row.resource_id,
+        occurred_at=row.occurred_at,
+        metadata=row.details or {},
+    )
+
+
+async def create_audit_event(
+    session: AsyncSession, entity: domain.AuditEvent
+) -> domain.AuditEvent:
+    row = models.AuditEvent(
+        id=str(entity.id),
+        actor_principal_id=str(entity.actor_principal_id)
+        if entity.actor_principal_id
+        else None,
+        project_id=str(entity.project_id) if entity.project_id else None,
+        action=entity.action,
+        resource_type=entity.resource_type,
+        resource_id=entity.resource_id,
+        occurred_at=entity.occurred_at,
+        details=entity.metadata,
+    )
+    session.add(row)
+    await session.flush()
+    return _audit_event_to_domain(row)
+
+
+async def list_audit_events(session: AsyncSession) -> list[domain.AuditEvent]:
+    result = await session.execute(
+        select(models.AuditEvent).order_by(models.AuditEvent.occurred_at.asc())
+    )
+    return [_audit_event_to_domain(r) for r in result.scalars().all()]
 
 
 def _price_policy_to_domain(row: models.PricePolicy) -> domain.PricePolicy:

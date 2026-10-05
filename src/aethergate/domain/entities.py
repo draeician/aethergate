@@ -24,6 +24,8 @@ from aethergate.domain.enums import (
     PrincipalKind,
     QuotaMetric,
     RequestState,
+    ResourceScopeType,
+    Role,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -45,6 +47,7 @@ from aethergate.domain.ids import (
     QuotaLimitId,
     RequestId,
     ReservationId,
+    RoleAssignmentId,
     RouteBindingId,
     SecretRefId,
     UsageRecordId,
@@ -120,6 +123,54 @@ class RequestContext:
     api_credential_id: ApiCredentialId
     audience: CredentialAudience
     scopes: tuple[CredentialScope, ...]
+
+
+class RoleAssignment(Entity):
+    """A durable grant of an administrative role to a principal.
+
+    ``resource_scope_type`` is ``deployment`` (system-wide; ``resource_id`` is
+    ``None``) or ``project`` (``resource_id`` is the target project). Revocation
+    is durable (``revoked_at`` + ``is_active``) and never deletes the history.
+    """
+
+    id: RoleAssignmentId
+    principal_id: PrincipalId
+    role: Role
+    resource_scope_type: ResourceScopeType
+    resource_id: ProjectId | None = None
+    created_at: datetime | None = None
+    created_by: PrincipalId | None = None
+    revoked_at: datetime | None = None
+    is_active: bool = True
+
+
+@dataclass(frozen=True)
+class AdminRequestContext:
+    """The durable context resolved from an authenticated admin request.
+
+    Carries the credential audience/scopes and the effective (active) role
+    assignments for the authenticated principal so the authorization service can
+    answer ``authorize_admin`` without re-resolving identity.
+    """
+
+    project_id: ProjectId
+    principal_id: PrincipalId
+    api_credential_id: ApiCredentialId
+    audience: CredentialAudience
+    scopes: tuple[CredentialScope, ...]
+    roles: tuple[Role, ...]
+    assignments: tuple[RoleAssignment, ...]
+
+
+class BootstrapState(Entity):
+    """DB-authoritative one-use bootstrap completion state (safe metadata only)."""
+
+    id: str
+    completed: bool = False
+    completed_at: datetime | None = None
+    initial_project_id: ProjectId | None = None
+    initial_admin_principal_id: PrincipalId | None = None
+    initial_admin_credential_id: ApiCredentialId | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +523,9 @@ __all__ = [
     "Principal",
     "ApiCredential",
     "RequestContext",
+    "RoleAssignment",
+    "AdminRequestContext",
+    "BootstrapState",
     "Provider",
     "SecretRef",
     "ProviderAccount",

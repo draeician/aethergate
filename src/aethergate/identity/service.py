@@ -36,27 +36,41 @@ def _scope_defaults(audience: CredentialAudience) -> tuple[CredentialScope, ...]
     """Default scopes derived from the audience for supported audience types.
 
     ``inference`` defaults to ``inference:invoke``. ``admin`` has no default
-    scopes until admin resource scopes are explicitly introduced, so an admin
-    credential never silently inherits the inference permission.
+    scopes: an admin credential must be granted explicit ``admin:*`` permissions,
+    so it never silently inherits inference permission or unassigned authority.
     """
     if audience is CredentialAudience.INFERENCE:
         return (CredentialScope.INFERENCE_INVOKE,)
     return ()
 
 
+def _is_admin_scope(scope: CredentialScope) -> bool:
+    return scope.value.startswith("admin:")
+
+
+def _is_inference_scope(scope: CredentialScope) -> bool:
+    return scope.value.startswith("inference:")
+
+
 def _validate_scope_coherence(
     audience: CredentialAudience, scopes: tuple[CredentialScope, ...]
 ) -> None:
-    """Reject audience/scope combinations that are semantically incoherent.
+    """Reject audience/scope combinations that cross the admin/inference boundary.
 
-    For phase 1 the only incompatible combination is an ``admin`` credential
-    carrying the inference ``inference:invoke`` scope; accepting it would make a
-    future admin credential valid for inference merely because it exists.
+    Inference credentials may carry only inference scopes; admin credentials may
+    carry only admin permissions. Crossing the boundary (an admin credential
+    carrying ``inference:invoke``, or an inference credential carrying an
+    ``admin:*`` permission) is rejected so neither audience authorizes the other
+    surface merely by existing.
     """
-    if audience is CredentialAudience.ADMIN and CredentialScope.INFERENCE_INVOKE in scopes:
+    if audience is CredentialAudience.INFERENCE:
+        incompatible = [s for s in scopes if not _is_inference_scope(s)]
+    else:
+        incompatible = [s for s in scopes if not _is_admin_scope(s)]
+    if incompatible:
+        joined = ", ".join(s.value for s in incompatible)
         raise CredentialLifecycleError(
-            f"audience {audience.value!r} may not carry scope "
-            f"{CredentialScope.INFERENCE_INVOKE.value!r}"
+            f"audience {audience.value!r} may not carry scope(s) {joined!r}"
         )
 
 

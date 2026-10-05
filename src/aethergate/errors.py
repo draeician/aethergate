@@ -91,6 +91,35 @@ class AuthenticationRequired(DomainError):
     """Inference authentication is not configured/allowed for this request."""
 
 
+class AdminAuthenticationRequired(DomainError):
+    """Admin authentication is not configured/allowed for this request.
+
+    Distinct from :class:`AuthenticationRequired` so the control plane can map it
+    to its own structured error envelope without changing the inference surface.
+    """
+
+
+class AdminAuthorizationError(DomainError):
+    """An authenticated admin is not authorized for the requested action.
+
+    Raised by the centralized authorization service. The message is deliberately
+    fixed and indistinguishable: it never reveals whether a target resource
+    exists or which specific role/permission was missing.
+    """
+
+
+class BootstrapTokenRejected(DomainError):
+    """The bootstrap secret was missing or did not match the configured value.
+
+    Raised before any database work so a wrong/missing token cannot be used to
+    probe bootstrap state.
+    """
+
+
+class BootstrapAlreadyCompleted(DomainError):
+    """Bootstrap has already been completed and cannot be run again."""
+
+
 class CredentialLifecycleError(DomainError):
     """A credential create/rotate request violates a lifecycle invariant.
 

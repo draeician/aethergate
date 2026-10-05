@@ -35,12 +35,49 @@ class CredentialAudience(StrEnum):
 class CredentialScope(StrEnum):
     """Granular permission scopes carried by a credential.
 
-    Inference phase 1 implements only ``inference:invoke``; the enum is
-    extensible so future resource/admin scopes can be added without replacing
-    the credential model.
+    Inference credentials carry only ``inference:invoke``; admin credentials
+    carry only ``admin:*`` permission scopes. The enum is extensible so future
+    resource scopes can be added without replacing the credential model. The
+    ``admin:*`` values double as the typed administrative permission names
+    checked by the RBAC authorization service.
     """
 
     INFERENCE_INVOKE = "inference:invoke"
+
+    ADMIN_CREDENTIALS_READ = "admin:credentials:read"
+    ADMIN_CREDENTIALS_WRITE = "admin:credentials:write"
+    ADMIN_PROJECTS_READ = "admin:projects:read"
+    ADMIN_PROJECTS_WRITE = "admin:projects:write"
+    ADMIN_PRINCIPALS_READ = "admin:principals:read"
+    ADMIN_PRINCIPALS_WRITE = "admin:principals:write"
+    ADMIN_CATALOG_READ = "admin:catalog:read"
+    ADMIN_CATALOG_WRITE = "admin:catalog:write"
+    ADMIN_ACCOUNTING_READ = "admin:accounting:read"
+    ADMIN_ACCOUNTING_WRITE = "admin:accounting:write"
+    ADMIN_QUEUE_READ = "admin:queue:read"
+    ADMIN_QUEUE_WRITE = "admin:queue:write"
+    ADMIN_AUDIT_READ = "admin:audit:read"
+
+
+class Role(StrEnum):
+    """Built-in administrative roles for the control plane.
+
+    ``system_admin`` is deployment-wide; ``project_admin`` and ``project_viewer``
+    are scoped to exactly one project (their ``resource_id``). Custom-role CRUD
+    is deferred, but the model is designed so new roles can be added without a
+    rewrite of the authorization service.
+    """
+
+    SYSTEM_ADMIN = "system_admin"
+    PROJECT_ADMIN = "project_admin"
+    PROJECT_VIEWER = "project_viewer"
+
+
+class ResourceScopeType(StrEnum):
+    """The scope of a role assignment's authority."""
+
+    DEPLOYMENT = "deployment"
+    PROJECT = "project"
 
 
 class RequestState(StrEnum):
@@ -112,6 +149,8 @@ __all__ = [
     "PrincipalKind",
     "CredentialAudience",
     "CredentialScope",
+    "Role",
+    "ResourceScopeType",
     "RequestState",
     "ExecutionAttemptState",
     "LedgerEntryType",

@@ -62,6 +62,10 @@ class ApiCredentialId(ResourceId):
     __slots__ = ()
 
 
+class RoleAssignmentId(ResourceId):
+    __slots__ = ()
+
+
 class ProviderId(ResourceId):
     __slots__ = ()
 
@@ -143,6 +147,7 @@ __all__ = [
     "ProjectId",
     "PrincipalId",
     "ApiCredentialId",
+    "RoleAssignmentId",
     "ProviderId",
     "ProviderAccountId",
     "SecretRefId",

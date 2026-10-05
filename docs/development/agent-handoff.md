@@ -2,127 +2,119 @@
 
 ## Current State
 - Branch: v2
-- AGV2-012V implementation commit: `fix(identity): harden credential lifecycle and live authorization checks`
-  (`fca2359`), pushed to `origin/v2`.
-- Prior AGV2-012 commits remain (`c5aa986` implementation, `c852094` handoff); this handoff supersedes
-  the AGV2-012 handoff.
+- AGV2-013 implementation commit: `feat(identity): add admin RBAC and one-use bootstrap`
+  (created this session), pushed to `origin/v2`.
+- Prior commits remain: `fca2359` (AGV2-012V lifecycle hardening), `68a8844` (AGV2-012V handoff),
+  `2c8af13` (task queue doc). This handoff supersedes the AGV2-012V handoff.
 
 ## Task Completed
-AGV2-012V — Complete inference-identity live verification and harden credential lifecycle invariants.
+AGV2-013 — Identity phase 2: admin service authentication, RBAC, and one-use bootstrap.
 
-### Lifecycle hardening (behavioral changes)
-- **Create validation.** `create_credential` now validates the target identity before generating any
-  key: project must exist and be active, principal must exist and be active, and
-  `principal.project_id` must equal the requested `project_id`. A failing creation raises
-  `CredentialLifecycleError` (a new `DomainError` in `src/aethergate/errors.py`) and generates/returns
-  no raw key and persists no credential row.
-- **Rotation eligibility.** `rotate_credential` is now an active-credential operation only: the old
-  credential must exist, be active, not revoked, and not already expired, and its project/principal
-  must still be valid/active/matching. Any failure raises `CredentialLifecycleError` before a
-  replacement is created, so a failed rotation never yields a new valid key.
-- **Idempotent revocation.** `revoke_api_credential` stamps `revoked_at` only on the first revoke;
-  repeated revokes preserve the original timestamp and only re-assert `is_active=False`. There is no
-  reactivation path through revoke/rotate.
-- **Audience/scope coherence.** Default scopes are audience-derived: `inference` -> `(inference:invoke,)`,
-  `admin` -> `()`. An admin credential carrying `inference:invoke` is rejected. The `dev_credential`
-  CLI `--scopes` default is now `None` (audience-derived).
-- **`last_used_at`** remains intentionally unset: no unconditional credential-row write is performed
-  per inference request (hot-row avoidance); deferred.
+### Admin audience / scopes
+- New typed admin permissions on `CredentialScope`: `admin:credentials:read|write`,
+  `admin:projects:read|write`, `admin:principals:read|write`, `admin:catalog:read|write`,
+  `admin:accounting:read|write`, `admin:queue:read|write`, `admin:audit:read`.
+- Audience/scope coherence is now enforced **both ways**: inference-audience credentials may carry
+  only `inference:invoke`; admin-audience credentials may carry only `admin:*`. Cross-audience scope
+  is rejected at create/rotate and at authentication.
 
-### Live nomnom verification (real Ollama, bypass disabled)
-Host = nomnom; backend = ollama `qwen3.8-2b-distill:Q6_K`; litellm 1.104.0 has no trusted token
-estimator (fail-closed), so the seeded token quota limit remains disabled for smoke (known
-AGV2-008/010 limitation). Dynamic AetherGate port this session (final): **45137** (re-run
-`scripts/dev/v2 url`). Live scenarios A–H ran against an earlier dynamic port (40991); the dev-bypass
-regression (G) required a restart to toggle bypass.
+### RBAC model
+- `Role` (`system_admin` | `project_admin` | `project_viewer`) and `ResourceScopeType`
+  (`deployment` | `project`). Durable `RoleAssignment` entity + `role_assignments` table with a
+  partial unique index `uq_role_assignments_active_equivalent` preventing duplicate active equivalent
+  assignments. `system_admin` is deployment-scoped; project roles require a project scope.
+- Centralized `authorize_admin(context, permission, resource_type, resource_id)` in
+  `src/aethergate/identity/rbac.py` + `admin.py` — not scattered router checks. Authentication
+  (`authenticate_admin` -> `AdminRequestContext`) and authorization are separate steps; active role
+  assignments are re-checked on every protected request.
 
-- **A. Expired credential — PASS.** Expired key -> 401; zero `inference_requests` enqueued; no
-  upstream call.
-- **B. Revocation while queued — PASS (live multi-process).** Forced a durable queue via the request
-  quota limit (temporarily `limit_units=1`): an "exhaust" request committed the single unit, and the
-  target request enqueued and waited with `wait_reason=quota_window_exhausted`. Revoking the target
-  credential while queued terminated it with `state=failed, error_code=authorization_failed`. Durable
-  state for that request showed zero `execution_attempts`, zero endpoint `reservations`, zero
-  `quota_reservations`, zero `budget_reservations`, no `price_snapshot`, zero `usage_records`, and
-  zero `ledger_entries` (API + worker + real PostgreSQL as separate processes).
-- **C. Inactive project — PASS.** Deactivating the project made the next valid-key request 401;
-  reactivated for cleanup.
-- **D. Inactive principal — PASS.** Deactivating the principal made the next request 401; reactivated.
-- **E. Audience separation — PASS.** Admin-audience credential -> 401 on both `/v1/models` and
-  `/v1/chat/completions`.
-- **F. Missing inference scope — PASS.** Inference credential with empty scopes -> 401 on both
-  endpoints.
-- **G. Dev-bypass — PASS (containerized).** `bypass=true` + no Authorization -> 200 (seeded dev
-  identity); `bypass=true` + invalid Authorization -> 401 (never falls through); `prod` + `bypass=true`
-  -> startup config validation fails ("allow_inference_auth_bypass cannot be enabled in production
-  mode").
-- **H. Rotation lifecycle — PASS.** Rotating an active credential produced a new key (new succeeds,
-  old -> 401). Rotating the now-revoked old credential raised `CredentialLifecycleError ... is revoked`
-  and created no third credential. Two repeated revokes preserved the identical `revoked_at`.
-- **I. Regression — PASS.** Real OpenAI SDK non-stream and stream both succeeded on a valid key;
-  full scheduler/quota/accounting suite, six-request/two-slot, queued-authorization regression, and
-  migration head checks all green in the full containerized suite below.
+### Bootstrap
+- `AETHERGATE_BOOTSTRAP_TOKEN` is a `SecretStr`, no default, empty/unset disables bootstrap,
+  placeholders rejected, never logged. `POST /admin/v1/bootstrap` transactionally establishes the
+  initial project/principal, grants `system_admin`, creates the admin credential, marks
+  `bootstrap_state` complete, and returns the raw admin key once. `SELECT ... FOR UPDATE` + the
+  singleton state make concurrent bootstrap exactly-one-wins; restart does not reopen bootstrap.
 
-### Automated tests
-`scripts/dev/v2 test` -> **268 passed** (was 250; +18). `ruff check src tests` clean;
-`git diff --check` clean; staged-content secret scan clean (no raw keys/hashes/secrets committed).
-New deterministic coverage: create-rejects missing/cross-project/inactive project & principal, no raw
-key on rejection, rotate-rejects missing/revoked/inactive/expired/invalid project/invalid principal,
-failed rotation creates no replacement, repeated revoke preserves timestamp, admin audience has no
-inference scope, incompatible audience/scope rejected, inference default scope, auth-failure no-enqueue.
+### Admin HTTP surface (minimal)
+- `POST /admin/v1/bootstrap`, `GET /admin/v1/whoami`, `GET /admin/v1/projects/{id}/credentials`,
+  `POST /admin/v1/credentials`, `POST /admin/v1/credentials/{id}/rotate` and `/revoke`.
+- Admin error envelope `{"error":{"code","message","request_id"}}`; auth/authorization/bootstrap
+  failures are fixed and indistinguishable. No query-string credentials; raw key never logged.
+
+### Audit
+- `audit_events` table (JSON column `details`, avoiding the SQLAlchemy-reserved `metadata`). Records
+  `bootstrap.completed` (NULL actor), `role_assignment.created`/`revoked`,
+  `admin_credential.created`/`rotated`/`revoked` with actor principal ID, action, resource
+  type/ID, timestamp, safe metadata only.
 
 ## Migration
-- No new migration: lifecycle hardening is enforced in the service/repository layer only; `0001`–`0009`
-  untouched. Live DB stays at `alembic_version = 0009`; empty-DB -> latest and `0008 -> 0009` remain
-  green in the suite.
+- New revision `0010` (identity phase 2): `role_assignments`, `bootstrap_state`, `audit_events`.
+  `0009 -> 0010` succeeded on the live DB and is green in the suite; empty-DB -> latest is green;
+  `0001`–`0009` untouched; old inference credentials remain valid (proven live).
 
-## API key / verifier design (no secret values)
-- Raw key format `agk_<display>_<secret>`; `<display>` is 8 non-secret hex chars, `<secret>` is 32
-  bytes of `secrets` CSPRNG entropy (>= 256 bits). Raw key returned exactly once at create/rotate.
-- Verifier is `SHA-256(raw_key)` hex; lookup is exact by full-key hash (fixed-cost indexed). The
-  display prefix is never the authentication selector. Safe only for high-entropy generated tokens —
-  not a password-hashing scheme.
+## Real nomnom verification (dynamic port 36299; backend ollama `qwen3.8-2b-distill:Q6_K`)
+- **A. Bootstrap** — missing token `401 bootstrap_token_rejected`; wrong token `401`; correct token
+  `201` (raw key once); second use `409 bootstrap_already_completed`; API restart keeps it closed and
+  the admin key valid; DB holds only completion state, role assignment, credential metadata; raw
+  admin key and bootstrap token absent from all tables (SQL grep = 0).
+- **B. Concurrent bootstrap** — 5 concurrent calls: exactly one `201`, four `409`.
+- **C. whoami** — admin key `200` (safe principal/role/audience, no secret); inference key `401`.
+- **D. Project RBAC** — `system_admin` lists A and B; `project_admin(A)` lists/writes A (200/201),
+  `403` on B (list + write); `project_viewer(A)` lists A (200) but write `403` and `403` on B.
+- **E. Role revocation** — revoked the viewer assignment; its next protected request `403` while the
+  credential stayed active; the project_admin still worked.
+- **F. Credential lifecycle** — create/list/rotate/revoke over HTTP; list carries no raw key/hash;
+  rotate -> old key `401`/new key `200`; revoke -> `401`; audit events for create/rotate/revoke with
+  the real actor principal ID.
+- **G. Audience separation** — inference key `401` on `/admin/v1/whoami`; admin key `401` on
+  `/v1/models` and `/v1/chat/completions`.
+- **H. Regression** — official OpenAI SDK non-stream and stream both succeeded on a fresh inference
+  key; scheduler/quota/accounting/migration suites green in the full containerized suite.
+
+## Automated tests
+`scripts/dev/v2 test` -> **290 passed** (was 268; +22). `ruff check src tests` clean;
+`git diff --check` clean; staged-content secret scan clean. New coverage: audience coherence both
+ways, system_admin deployment-wide, project_admin/project_viewer isolation + read-only, revoked
+assignment denied, duplicate active assignment prevented, admin request context, cross-audience
+rejection both directions, bootstrap missing/wrong/correct/second-use/concurrent/restart-survival/
+raw-secret-absence, whoami safety, role-revocation immediate block, admin credential lifecycle
+authorization, audit events, migration `0009 -> 0010`.
 
 ## Key files
-- `src/aethergate/identity/service.py` — create/rotate lifecycle validation + shared auth/authorization.
-- `src/aethergate/identity/keys.py` — key generation/hashing.
-- `src/aethergate/errors.py` — `CredentialLifecycleError`.
-- `src/aethergate/persistence/repository.py` — idempotent `revoke_api_credential`.
-- `src/aethergate/dev_credential.py` — audience-derived `--scopes` default.
-- `src/aethergate/api/deps.py` — real Bearer auth + dev bypass.
-- `src/aethergate/scheduler/service.py` — pre-dispatch revalidation (queued revocation block).
-- `tests/test_identity.py`, `tests/test_openai_auth.py` — lifecycle + auth no-enqueue coverage.
-- `docs/architecture/security.md`, `docs/contracts/domain-model.md`,
-  `docs/contracts/admin-v1-foundation.md`, `docs/development/README.md` — lifecycle invariants
-  documented.
+- `src/aethergate/identity/admin.py` — authenticate/authorize/bootstrap/RBAC/audit service.
+- `src/aethergate/identity/rbac.py` — centralized role->permission policy.
+- `src/aethergate/identity/service.py` — shared create/rotate/revoke + audience coherence.
+- `src/aethergate/api/admin.py` + `api/admin_errors.py` — minimal admin HTTP surface + envelope.
+- `src/aethergate/persistence/models.py` / `repository.py` — role/bootstrap/audit persistence.
+- `src/aethergate/migrations/versions/0010_admin_identity.py` — new migration.
+- `src/aethergate/config.py` — `bootstrap_token` (`AETHERGATE_BOOTSTRAP_TOKEN`).
+- `deploy/v2/compose.yaml` + `scripts/dev/v2` — bootstrap-token env + `ensure_bootstrap_token`.
+- `tests/test_admin_auth.py`, `tests/test_migrations.py` — new/updated tests.
 
 ## Decisions
-- Lifecycle invariants are enforced in the shared identity service (single source), not scattered in
-  callers; a rejected create/rotate never generates or returns a raw key.
-- `CredentialLifecycleError` (a `DomainError`) is distinct from `AuthenticationRequired` (presented-key
-  failure) so create/rotate validation errors are explicit domain errors.
-- Rotation eligibility reuses `_require_valid_identity`, keeping project/principal validity rules
-  identical between create and rotate.
-- `last_used_at` deferred rather than a throttled write — the simplest correct option with no hot-row
-  risk.
-
-## Deferred
-- OIDC authorization-code flow, browser sessions/CSRF, OAuth device flow, full admin RBAC, admin HTTP
-  CRUD routes, CLI, React UI, principal-level budgets, `/v1/responses`, embeddings, v1 SQLite
-  migration, `last_used_at` population.
+- Authorization is centralized in `authorize_admin` with role assignments as the single gate; a
+  credential carrying an `admin:*` scope alone does not grant access — the active role assignment
+  does. This keeps the design open to later custom roles without a rewrite (custom-role CRUD is out
+  of scope).
+- `AuditEvent` ORM maps its JSON column to `details` (SQLAlchemy reserves `metadata`); the domain
+  entity field stays `metadata`.
+- `AETHERGATE_BOOTSTRAP_TOKEN` empty/unset disables bootstrap (safe), rather than failing startup, so
+  the token can be removed after bootstrap; placeholder strings are still rejected.
+- Bootstrap's actor is `NULL` in audit (no authenticated actor yet), not a synthetic principal.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
-  `--no-deps`. The dynamic API host port changes every `up`/`workers`; re-run `scripts/dev/v2 url`.
-- litellm 1.104.0 exposes no trusted token estimator, so token-quota/budget routes fail closed
-  (`quota_token_estimator_unavailable`); live smoke used request-only quota.
-- The dev DB volume retains a now-disabled token quota limit from the smoke; not committed.
-- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content; gateway timings don't reflect upstream
-  parallelism.
-- Live queued-revocation (B) temporarily set the dev request-quota limit to 1 and endpoint
-  `max_concurrency` to 1, both restored afterward (request limit 30/60, max_concurrency 2).
+  `--no-deps`. Dynamic host port changes every `up`; re-run `scripts/dev/v2 url` (this session: 36299).
+- litellm 1.104.0 has no trusted token estimator, so token-quota/budget routes fail closed
+  (`quota_token_estimator_unavailable`); live inference smoke used request-only quota.
+- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content; gateway timings don't reflect
+  upstream parallelism.
+- Admin role-assignment/credential creation is currently exercised via the service layer (no HTTP
+  endpoint yet for role assignment or project/principal create) — expected for the minimal surface.
+- The dev DB volume retains leftover inference credentials/model aliases from AGV2-012V smoke tests;
+  not committed.
 
 ## Recommended Next Step
-Expose the admin v1 credential lifecycle (create/read/list/rotate/revoke) over `/admin/v1` using the
-identity service and the `ApiCredential*` DTO foundations, followed by the human OIDC identity/admin
-phase.
+Expose the remaining admin identity CRUD (role-assignment create/revoke, project/principal create)
+over `/admin/v1` reusing the centralized `authorize_admin`/service layer, then proceed to the human
+OIDC authorization-code flow plugged into the same principal/RoleAssignment model.

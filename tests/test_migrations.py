@@ -31,6 +31,9 @@ EXPECTED_TABLES = {
     "principals",
     "secret_refs",
     "api_credentials",
+    "role_assignments",
+    "bootstrap_state",
+    "audit_events",
     "providers",
     "provider_accounts",
     "endpoints",
@@ -290,5 +293,33 @@ def test_migration_0008_to_0009() -> None:
         assert "secret_ref_id" not in cred_cols
         assert "uq_api_credentials_key_hash" in _indexes(url, "api_credentials")
         assert "ck_api_credentials_audience" in _check_constraints(url, "api_credentials")
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0009_to_0010() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig910")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0009", env=env)
+        assert "role_assignments" not in asyncio.run(_table_names(url))
+        assert "bootstrap_state" not in asyncio.run(_table_names(url))
+        assert "audit_events" not in asyncio.run(_table_names(url))
+
+        _run_alembic("upgrade", "head", env=env)
+        assert {
+            "role_assignments",
+            "bootstrap_state",
+            "audit_events",
+        } <= asyncio.run(_table_names(url))
+        assert "ck_role_assignments_role" in _check_constraints(url, "role_assignments")
+        assert "ck_role_assignments_scope_type" in _check_constraints(url, "role_assignments")
+        assert "uq_role_assignments_active_equivalent" in _indexes(url, "role_assignments")
+        assert "details" in _columns(url, "audit_events")
     finally:
         asyncio.run(drop_database(url))

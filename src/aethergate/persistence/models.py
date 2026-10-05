@@ -124,6 +124,102 @@ class ApiCredential(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class RoleAssignment(Base, TimestampMixin):
+    """A durable grant of an administrative role to a principal.
+
+    ``resource_scope_type`` is ``deployment`` (``resource_id`` is ``''``) or
+    ``project`` (``resource_id`` is the target project id). ``resource_id`` is
+    stored as a non-empty string so the active-equivalence unique index treats
+    deployment assignments as equivalent; the repository maps ``''`` <-> None.
+    """
+
+    __tablename__ = "role_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('system_admin', 'project_admin', 'project_viewer')",
+            name="ck_role_assignments_role",
+        ),
+        CheckConstraint(
+            "resource_scope_type IN ('deployment', 'project')",
+            name="ck_role_assignments_scope_type",
+        ),
+        CheckConstraint(
+            "resource_scope_type <> 'project' OR resource_id <> ''",
+            name="ck_role_assignments_project_scope_requires_resource",
+        ),
+        Index(
+            "uq_role_assignments_active_equivalent",
+            "principal_id",
+            "role",
+            "resource_scope_type",
+            "resource_id",
+            unique=True,
+            postgresql_where=text("is_active AND revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    principal_id: Mapped[str] = mapped_column(
+        ForeignKey("principals.id"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_scope_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class BootstrapState(Base, TimestampMixin):
+    """Singleton DB-authoritative bootstrap completion state.
+
+    Exactly one row exists (fixed id ``bootstrap``), created by migration 0010.
+    The bootstrap service locks it with ``SELECT ... FOR UPDATE`` so concurrent
+    bootstrap attempts serialize and only one can transition it to completed.
+    """
+
+    __tablename__ = "bootstrap_state"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    initial_project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    initial_admin_principal_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    initial_admin_credential_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+
+
+class AuditEvent(Base, TimestampMixin):
+    """Immutable administrative audit event (safe metadata only).
+
+    ``actor_principal_id`` is ``NULL`` for the bootstrap (no authenticated actor
+    yet) — represented explicitly rather than inventing an actor. No raw keys,
+    hashes, tokens, prompts, or provider secrets are ever written here.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    actor_principal_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    project_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now()
+    )
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class Provider(Base, TimestampMixin):
     __tablename__ = "providers"
 
@@ -762,6 +858,9 @@ __all__ = [
     "Principal",
     "SecretRef",
     "ApiCredential",
+    "RoleAssignment",
+    "BootstrapState",
+    "AuditEvent",
     "Provider",
     "ProviderAccount",
     "Endpoint",

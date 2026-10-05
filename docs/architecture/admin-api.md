@@ -30,11 +30,34 @@ accounts, keys, budgets, queues, audit, and configuration. (Settled)
 - Administrative endpoints authenticate a named principal (OIDC/session or service account), not a
   shared master secret. (Settled)
 - The v1 `x-admin-key` master-key scheme is superseded; it exists only as a one-use bootstrap path. (Direction)
+- Admin bearer authentication is a distinct dependency from inference auth: it requires an
+  `admin`-audience credential (`Authorization: Bearer agk_...`) and a permission granted by an active
+  role assignment; an inference credential is never accepted. (Settled — AGV2-013)
+- One-use bootstrap: `POST /admin/v1/bootstrap` consumes a configured `AETHERGATE_BOOTSTRAP_TOKEN`
+  once and returns the initial `system_admin` credential's raw key a single time. (Settled — AGV2-013)
 
 ## Audience separation
 
 Administrative and inference permissions are separate; the same credential should not gate both
 surfaces. (Settled)
+
+Enforced in both directions (AGV2-013): admin-audience credentials carry only `admin:*` scopes and
+inference-audience credentials carry only `inference:invoke`; a cross-audience scope is rejected, an
+inference key is rejected by admin endpoints, and an admin key is rejected by `/v1/models` and
+`/v1/chat/completions`.
+
+## Minimal protected surface (AGV2-013)
+
+Proving the model only; full admin CRUD reuses the same dependencies/services later:
+
+- `POST /admin/v1/bootstrap` — one-use initialization (no admin auth; bootstrap token).
+- `GET /admin/v1/whoami` — safe principal/role/audience metadata for the authenticated admin key.
+- `GET /admin/v1/projects/{project_id}/credentials` — protected read (list, metadata only).
+- `POST /admin/v1/credentials` — protected create (raw key returned once).
+- `POST /admin/v1/credentials/{id}/rotate` / `.../revoke` — protected lifecycle.
+
+Admin errors use a structured envelope `{"error":{"code","message","request_id"}}`; auth/authorization/
+bootstrap failures are fixed and indistinguishable.
 
 ## Deferred
 

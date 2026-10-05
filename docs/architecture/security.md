@@ -58,9 +58,49 @@ OAuth device flow, and full admin RBAC remain the next identity/admin phase.
 - `last_used_at` remains intentionally unset: no unconditional credential-row write is performed per
   inference request, avoiding a hot-row bottleneck. (Deferred)
 
+## Identity phase 2 — admin RBAC and one-use bootstrap (AGV2-013)
+
+The control plane has its own identity/authorization boundary, separate from the inference data
+plane. Human OIDC/browser/device flow remains the next identity phase and must plug into the same
+principal/RBAC model.
+
+- **Audience separation is enforced both ways.** Admin-audience credentials may carry only
+  `admin:*` permissions; inference-audience credentials may carry only `inference:invoke`. A
+  cross-audience scope is rejected at create/rotate and at authentication, an inference credential
+  never authorizes an admin endpoint, and an admin credential never authorizes inference merely
+  because it exists. (Settled)
+- **Typed admin permissions** (`CredentialScope`): `admin:credentials:read|write`,
+  `admin:projects:read|write`, `admin:principals:read|write`, `admin:catalog:read|write`,
+  `admin:accounting:read|write`, `admin:queue:read|write`, `admin:audit:read`. (Settled)
+- **Centralized RBAC.** `authorize_admin(context, permission, resource_type, resource_id)` is the
+  single authorization policy (not scattered router role checks). Roles: `system_admin`
+  (deployment-wide), `project_admin` (one project, read+write), `project_viewer` (one project,
+  read-only). Assignments are durable (`role_assignments`) with stable ID, principal, role, resource
+  scope type, optional resource ID, created-by, revocation, and active state; duplicate active
+  equivalent assignments are prevented by a partial unique index. (Settled)
+- **Authentication and authorization are separate steps.** Credential authentication (active/not
+  revoked/not expired/audience) produces a typed `AdminRequestContext`; role assignments are loaded
+  once per request and re-checked on every protected action. Revoking a role assignment blocks the
+  next protected request while the credential remains active. (Settled)
+- **One-use bootstrap.** `POST /admin/v1/bootstrap` consumes a configured
+  `AETHERGATE_BOOTSTRAP_TOKEN` (a `SecretStr`, no default, placeholders rejected, never logged)
+  exactly once: it establishes the initial project/principal, grants `system_admin`, creates the
+  first admin credential, marks durable `bootstrap_state` complete, and returns the raw admin key
+  exactly once. Concurrent calls cannot both succeed (`SELECT ... FOR UPDATE` + partial-unique
+  singleton); restart does not reopen bootstrap; the token never acts as an ongoing master key and
+  should be removed after bootstrap. The raw bootstrap/admin secrets are never stored in PostgreSQL.
+  (Settled)
+- **Administrative audit.** Immutable `audit_events` record bootstrap completion, role-assignment
+  create/revoke, and admin-credential create/rotate/revoke, with actor principal ID where available,
+  action, resource type/ID, timestamp, and safe metadata only. Bootstrap has no authenticated actor
+  and records `NULL` explicitly. No raw key, hash, Authorization header, bootstrap token, prompt, or
+  provider secret is ever recorded. (Settled)
+- **Authorization failures are indistinguishable.** Admin auth/authorization/bootstrap failures are
+  fixed messages that do not leak bootstrap state or whether a target resource exists. (Settled)
+
 ## Bootstrap and fail-closed startup
 
-- A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled)
+- A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled — AGV2-013)
 - Management startup refuses absent, empty, or placeholder credentials; no shared default grants
   access. (Settled — closes AG-001.)
 

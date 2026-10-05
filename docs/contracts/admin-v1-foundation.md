@@ -34,7 +34,20 @@ API credential lifecycle DTOs (AGV2-012):
 - Rotation is an active-credential operation: rotating a revoked/expired/inactive credential fails
   with no replacement credential created.
 
-These are service/repository/contract foundations only; no HTTP admin CRUD router exists yet.
+Admin identity DTOs (AGV2-013):
+
+- `BootstrapResult` — the one-time bootstrap response: `credential` (`ApiCredentialRead`) plus the
+  single `raw_key` reveal of the initial `system_admin` credential. No secret is ever re-readable.
+- `WhoamiRead` — safe metadata for the authenticated admin key: `principal_id`, `project_id`,
+  `api_credential_id`, `audience`, `scopes`, `roles`. Never the raw key, hash, or verifier.
+- `RoleAssignmentRead` — durable role-grant metadata: `id`, `principal_id`, `role`,
+  `resource_scope_type`, optional `resource_id`, `created_by`, `revoked_at`, `is_active`, timestamps.
+- `ApiCredentialCreate.scopes` defaults to `None` (audience-derived at the service boundary), keeping
+  the DTO persistence- and audience-neutral; inference resolves to `inference:invoke` and admin to
+  none.
+
+These DTOs now back a minimal protected admin HTTP surface (bootstrap, whoami, credential
+list/create/rotate/revoke); full admin resource CRUD routes remain deferred.
 
 Quota DTOs (scheduler phase 2):
 
@@ -61,7 +74,10 @@ Accounting DTOs (AGV2-010/011):
 - `UsageRecordRead` — measured usage read shape (no content/secrets).
 - `LedgerEntryRead` — ledger entry read shape (signed amount, entry type, idempotency key, reason).
 
-No admin HTTP CRUD routes yet; these are the persistence/transport-independent foundations.
+No admin HTTP CRUD routes yet; these are the persistence/transport-independent foundations. A
+minimal protected admin surface (bootstrap, whoami, credential list/create/rotate/revoke) exists
+since AGV2-013 to prove the identity model; the remaining resource CRUD reuses the same DTOs and
+services.
 
 ## Requirements honored
 

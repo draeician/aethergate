@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Literal
 from urllib.parse import quote_plus
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["dev", "test", "prod"]
@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # Development-only inference auth bypass. Must never be enabled in prod.
     allow_inference_auth_bypass: bool = Field(
         default=False, validation_alias="AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS"
+    )
+    # One-use bootstrap secret for the initial admin bootstrap endpoint. No
+    # default; an empty/unset value disables bootstrap, and placeholder values
+    # are rejected so a weak or forgotten value can never silently enable
+    # bootstrap with a guessable secret. Never logged.
+    bootstrap_token: SecretStr | None = Field(
+        default=None, validation_alias="AETHERGATE_BOOTSTRAP_TOKEN"
     )
     # Comma-separated upstream host allowlist for the egress destination guard.
     upstream_allowlist: str = Field(
@@ -78,6 +85,20 @@ class Settings(BaseSettings):
             for host in self.upstream_allowlist.split(",")
             if host.strip()
         }
+
+    @field_validator("bootstrap_token", mode="after")
+    @classmethod
+    def _reject_placeholder_bootstrap_token(
+        cls, value: SecretStr | None
+    ) -> SecretStr | None:
+        if value is not None:
+            raw = value.get_secret_value().strip()
+            placeholder = {"changeme", "change-me", "replaceme", "replace-me", "bootstrap"}
+            if raw.lower() in placeholder:
+                raise ValueError("bootstrap_token must not be a placeholder")
+            if not raw:
+                return None
+        return value
 
     @model_validator(mode="after")
     def _forbid_insecure_auth_bypass_in_prod(self) -> Settings:

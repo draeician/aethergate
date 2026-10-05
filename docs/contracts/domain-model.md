@@ -18,7 +18,7 @@ not part of any contract.
 `ExecutionAttemptState`, `LedgerEntryType`, `QuotaMetric` (`requests`|`tokens`), and
 `QuotaReservationState` (`reserved`|`committed`|`released`), plus `BudgetReservationState`
 (`reserved`|`committed`|`released`), `CredentialAudience` (`inference`|`admin`), and
-`CredentialScope` (`inference:invoke`). `LedgerEntryType` is `usage_debit`|`adjustment_credit`|
+`CredentialScope`. `LedgerEntryType` is `usage_debit`|`adjustment_credit`|
 `adjustment_debit`. `RequestState` includes the full
 lifecycle through `outcome_unknown`:
 
@@ -29,6 +29,15 @@ plus `outcome_unknown`.
 disposition (`failed`/`cancelled`/`succeeded`) for a request whose post-dispatch lease expired, and
 the reconciliation action is recorded durably (`reconciled_state`, `reconciled_at`, `reconciled_by`)
 as part of releasing the held reservation. There is no automatic replay or bulk slot release.
+
+Identity phase 2 (AGV2-013) extends the enums:
+
+- `CredentialScope` gains the typed admin permissions `admin:credentials:read|write`,
+  `admin:projects:read|write`, `admin:principals:read|write`, `admin:catalog:read|write`,
+  `admin:accounting:read|write`, `admin:queue:read|write`, and `admin:audit:read`. Inference
+  credentials may carry only `inference:invoke`; admin credentials may carry only `admin:*` scopes.
+- `Role` (`system_admin`|`project_admin`|`project_viewer`) — the authorization role.
+- `ResourceScopeType` (`deployment`|`project`) — the scope a role assignment grants over.
 
 ## Value objects
 
@@ -42,8 +51,8 @@ floating point (`float`) is rejected for money and pricing. There is no
 
 `domain/entities.py` groups contracts by domain:
 
-- Identity/access: `Project`, `Principal`, `ApiCredential`, `RequestContext` (see
-  "Identity and request context" below).
+- Identity/access: `Project`, `Principal`, `ApiCredential`, `RequestContext`, `RoleAssignment`,
+  `AdminRequestContext`, `BootstrapState` (see "Identity and request context" below).
 - Catalog/routing: `Provider`, `ProviderAccount`, `SecretRef`, `Endpoint`, `QuotaGroup`,
   `QuotaLimit`, `ModelAlias`, `RouteBinding`.
 - Scheduler/execution: `InferenceRequest`, `ExecutionAttempt`, `Reservation`.
@@ -71,6 +80,26 @@ floating point (`float`) is rejected for money and pricing. There is no
   replacement on failure; revocation is idempotent (the original `revoked_at` is preserved on repeat).
   Default scopes are audience-derived (`inference` -> `inference:invoke`; `admin` -> none), and an
   admin credential carrying `inference:invoke` is rejected.
+
+### Admin identity, RBAC, and bootstrap (AGV2-013)
+
+- `RoleAssignment` — durable role grant: stable `RoleAssignmentId`, `principal_id`, `role`
+  (`Role`), `resource_scope_type` (`ResourceScopeType`), optional `resource_id` (required for
+  project-scoped roles), `created_by` (actor principal ID when available), `revoked_at`, `is_active`,
+  timestamps. `system_admin` must be `deployment`-scoped; `project_admin`/`project_viewer` require a
+  project scope. Duplicate active equivalent assignments are prevented.
+- `AdminRequestContext` — typed value resolved from an authenticated admin key: `project_id`,
+  `principal_id`, `api_credential_id`, `audience`, `scopes`, and the active `roles`/`assignments`
+  (`RoleAssignment` tuple) needed to authorize without re-resolving identity.
+- `BootstrapState` — singleton DB-authoritative one-use bootstrap completion record: `completed`,
+  `completed_at`, `initial_project_id`, `initial_admin_principal_id`, `initial_admin_credential_id`.
+  Safe metadata only; never stores the bootstrap token or the admin raw key.
+- `AuditEvent` — immutable administrative audit record: `actor_principal_id` (nullable — bootstrap
+  has no actor), `project_id`, `action`, `resource_type`, `resource_id`, `occurred_at`, and safe
+  `metadata` (JSON). Never raw keys, hashes, Authorization headers, bootstrap tokens, prompts, or
+  provider secrets.
+- `Principal` + `RoleAssignment` are the same model later human OIDC principals receive; no code
+  encodes service-account == admin role.
 
 ### Accounting entities (AGV2-010)
 

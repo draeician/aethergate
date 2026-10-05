@@ -25,6 +25,8 @@ from aethergate.domain.enums import (
     LedgerEntryType,
     PrincipalKind,
     QuotaMetric,
+    ResourceScopeType,
+    Role,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -43,6 +45,7 @@ from aethergate.domain.ids import (
     QuotaGroupId,
     QuotaLimitId,
     RequestId,
+    RoleAssignmentId,
     RouteBindingId,
     SecretRefId,
     UsageRecordId,
@@ -104,7 +107,7 @@ class ApiCredentialCreate(ContractModel):
     principal_id: PrincipalId | None = None
     name: str = Field(min_length=1)
     audience: CredentialAudience = CredentialAudience.INFERENCE
-    scopes: tuple[CredentialScope, ...] = (CredentialScope.INFERENCE_INVOKE,)
+    scopes: tuple[CredentialScope, ...] | None = None
     expires_at: datetime | None = None
 
 
@@ -145,6 +148,37 @@ class ApiCredentialRevokeResult(ContractModel):
 class ApiCredentialUpdate(ContractModel):
     name: str | None = Field(default=None, min_length=1)
     is_active: bool | None = None
+
+
+# --- Admin identity / RBAC / bootstrap ---------------------------------------
+
+
+class BootstrapResult(ContractModel):
+    credential: ApiCredentialRead
+    raw_key: str = Field(min_length=1)
+
+
+class RoleAssignmentRead(ContractModel):
+    id: RoleAssignmentId
+    principal_id: PrincipalId
+    role: Role
+    resource_scope_type: ResourceScopeType
+    resource_id: ProjectId | None = None
+    created_at: datetime | None = None
+    created_by: PrincipalId | None = None
+    revoked_at: datetime | None = None
+    is_active: bool
+
+
+class WhoamiRead(ContractModel):
+    """Safe admin identity metadata; never includes the raw key or hash."""
+
+    principal_id: PrincipalId
+    project_id: ProjectId
+    api_credential_id: ApiCredentialId
+    audience: CredentialAudience
+    scopes: tuple[CredentialScope, ...]
+    roles: tuple[Role, ...]
 
 
 # --- Providers --------------------------------------------------------------
@@ -504,6 +538,9 @@ __all__ = [
     "ApiCredentialRevokeRequest",
     "ApiCredentialRevokeResult",
     "ApiCredentialUpdate",
+    "BootstrapResult",
+    "RoleAssignmentRead",
+    "WhoamiRead",
     "ProviderCreate",
     "ProviderRead",
     "ProviderUpdate",
