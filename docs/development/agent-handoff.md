@@ -1,225 +1,171 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: v2
-- AGV2-015 implementation commit: `805c403` (`feat(identity): add OIDC human sessions and CSRF
-  protection`), pushed to `origin/v2`.
-- AGV2-015V hardening follow-up commits (pushed to `origin/v2`):
-  - `41aefca` `feat(identity): bind OIDC login transaction to initiating browser`
-  - `7eea53f` `fix(identity): clear OIDC login transaction cookie on callback completion`
-- AGV2-015C follow-up commit (pushed to `origin/v2` this session):
-  - `1732b28` `fix(identity): clear OIDC transaction cookie on all callback failures`
-- Prior commits remain: `d7842c9` (AGV2-014V), `d283fd2` (AGV2-014), `5a81425` (AGV2-013). This
-  handoff supersedes the AGV2-014V handoff.
-
-## AGV2-015C follow-up (this session)
-Closed the remaining acceptance gap: pre-consume callback failures did not clear `ag_oidc_txn`.
-
-**Failure paths now clearing the transaction cookie** (all preserve the existing error
-code/status and never set `ag_session`):
-- provider `error` parameter → `401 oidc_authentication_failed`;
-- missing `code` → `401 oidc_authentication_failed`;
-- missing `state` → `401 oidc_authentication_failed`;
-- unknown/wrong `state` → `400 invalid_login_state`;
-- missing browser-binding cookie → `400 invalid_login_state`;
-- wrong browser-binding cookie → `400 invalid_login_state`;
-- callback replay after transaction consumption → `400 invalid_login_state`.
-
-Each is emitted via a single helper (`_oidc_failure_response`) that appends a deletion
-`Set-Cookie` for `ag_oidc_txn` at the exact transaction-cookie path (`/admin/v1/auth/oidc`).
-
-**State semantics.** `consume_login_transaction` verifies the binding (constant-time) *before*
-deleting the row, so a missing/wrong binding or wrong/unknown state does **not** consume or delete
-the legitimate pending login-state row. Successful consumption remains delete-on-consume; expired
-rows are still cleaned up on transaction creation. No migration was added (head remains `0013`);
-migrations `0001`–`0013` are unchanged.
-
-Live nomnom verification (host-network IdP `http://192.168.22.50:8490`, pinned API port `44777`,
-`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`): Browser B presented A's valid state/code without
-the cookie → `400` with `ag_oidc_txn` deletion and no session, A's pending row still present
-(count=1); Browser B with a forged cookie → `400` (same); Browser A then completed the same pending
-login → `200` + session; A's fresh wrong-state → `400` + cookie cleared + no session; happy path →
-`200` + `system_admin` + `whoami`. Official OpenAI SDK non-stream and stream chat completions both
-succeeded against `gpt-4` (upstream `qwen3.8-2b-distill:Q6_K` at `http://192.168.22.50:11434`)
-using a freshly minted inference credential.
-
-## Hardening follow-up (AGV2-015V)
-Code review of AGV2-015 found the login transaction was not bound to the initiating browser and the
-raw OIDC `state` leaked into failed-login audit rows. Fixed (see `current-task.md` AGV2-015V):
-
-1. **Login transaction cookie binding (login-CSRF / state-injection defense).** `/auth/oidc/login`
-   now sets a dedicated short-lived `ag_oidc_txn` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` in
-   prod, `Path=/admin/v1/auth/oidc`, `Max-Age` = login TTL). `OidcLoginState` persists only the
-   one-way SHA-256 `txn_cookie_hash` of the raw cookie (new `txn_cookie_hash` column, migration
-   `0013`). `/auth/oidc/callback` requires the cookie to match in constant time; a missing, wrong,
-   or cross-browser cookie fails with `400 invalid_login_state`. The raw transaction cookie value is
-   never persisted or logged, and grants no authority (it is not the authenticated session).
-2. **Transaction cookie cleared on every post-consume outcome.** Success and exchange/ID-token/
-   identity failures all clear `ag_oidc_txn` (the failure paths return the standard
-   `oidc_authentication_failed` envelope with the cookie deleted).
-3. **Raw OIDC state removed from audit.** `_record_login_failed` previously wrote the raw `state` as
-   `resource_id` under `resource_type=session`; it now records an opaque transaction id under
-   `resource_type=oidc_login` (metadata carries only the failure `reason`). Raw `state`/`nonce`/PKCE
-   verifier/binding never appear in audit.
-4. **Login-state cleanup.** The login transaction is now **deleted on consumption** (instead of
-   marking `consumed_at`), and expired transactions are **deleted when a new transaction is
-   created**. `consumed_at` is retained on the entity/table but is no longer used for consumption
-   semantics; rows do not accumulate.
-
-Live nomnom verification (host-network IdP `http://192.168.22.50:8490`, pinned API port `44777`,
-`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`): happy path still `200` + `system_admin` + `whoami`
-via cookie; cross-browser callback with no/forged transaction cookie → `400`; genuine browser still
-completes; replay → `400`; forged code → `401` and the resulting `human.login_failed` audit row used
-`resource_type=oidc_login` with an opaque id (no raw state); `oidc_login_states` empty after logins.
-
+- Branch: `v2`.
+- AGV2-016 implementation commit: `3243efc` (`feat(admin): add catalog and routing control plane`),
+  pushed to `origin/v2` this session. This handoff supersedes the AGV2-015C handoff.
+- Migration head: `0014`.
+- Full containerized suite: **386 passed** (was 364; +22: 21 new `tests/test_catalog_admin.py` +
+  1 new migration test).
 
 ## Task Completed
-AGV2-015 — Human identity phase: OIDC authorization-code flow and secure admin browser sessions.
+AGV2-016 — Catalog and routing admin API with configuration invariants.
 
-### OIDC library / validation approach
-- Added `PyJWT>=2.8,<3` and `httpx>=0.27,<1` to runtime dependencies. ID-token signature verification
-  is delegated to PyJWT against the provider JWKS; only asymmetric algorithms (`RS256/384/512`,
-  `ES256/384/512`, `PS256/384/512`) are accepted — `none` and symmetric `HS*` are rejected regardless
-  of provider metadata. `iss`, `aud` (client ID), `exp`/`nbf`, and `nonce` are validated (nonce in
-  constant time); a missing/empty `sub` is rejected. Discovery/JWKS are derived only from the
-  configured issuer, fetched over `httpx`, and cached in memory with a bounded TTL; signing keys are
-  selected by `kid` (single-key fallback).
+### Endpoints added (deployment-scoped `/admin/v1`)
+- Providers: `POST /providers`, `GET /providers` (paginated), `GET /providers/{id}`,
+  `PATCH /providers/{id}`.
+- Secret refs (metadata only): `POST /secret-refs`, `GET /secret-refs`, `GET /secret-refs/{id}`.
+- Provider accounts: `POST /provider-accounts`, `GET /provider-accounts` (filter `provider_id`),
+  `GET /provider-accounts/{id}`, `PATCH /provider-accounts/{id}`.
+- Endpoints: `POST /endpoints`, `GET /endpoints` (filter `provider_account_id`),
+  `GET /endpoints/{id}`, `PATCH /endpoints/{id}`.
+- Quota groups: `POST /quota-groups`, `GET /quota-groups` (filter `provider_account_id`),
+  `GET /quota-groups/{id}`, `PATCH /quota-groups/{id}`.
+- Quota limits: `POST /quota-limits`, `GET /quota-limits` (filter `quota_group_id`),
+  `GET /quota-limits/{id}`, `PATCH /quota-limits/{id}`.
+- Model aliases: `POST /model-aliases`, `GET /model-aliases`, `GET /model-aliases/{id}`,
+  `PATCH /model-aliases/{id}`.
+- Route bindings: `POST /route-bindings`, `GET /route-bindings` (filter `model_alias_id` /
+  `provider_account_id`), `GET /route-bindings/{id}`, `PATCH /route-bindings/{id}`.
 
-### External identity model
-- `ExternalIdentity`: stable ID, `principal_id`, `issuer`, opaque case-sensitive `subject`, optional
-  safe display claims (`email`, `display_name`), `created_at`, `last_login_at`, `is_active`.
-  `(issuer, subject)` is unique and is the identity key; **email is never the identity key**; one
-  external identity maps to exactly one principal; no ID/access/refresh token is persisted.
+Routers are thin; all authorization/validation lives in `src/aethergate/catalog/admin.py`, which
+accepts a typed `AdminRequestContext` and authorizes internally.
 
-### Session model and cookie properties
-- `BrowserSession` persists the authoritative session in PostgreSQL: stable ID, principal ID, one-way
-  SHA-256 `session_hash` (raw cookie never persisted), `created_at`, `last_seen_at` (throttled idle
-  slide), idle/absolute expiry, `revoked_at`, and a one-way `csrf_token_hash`.
-- Cookie: cryptographically random (>=256 bits), `HttpOnly`, `SameSite=Lax`, `Secure` in `prod`,
-  `Path=/admin`, `Max-Age` = absolute lifetime (43200s default; idle 3600s). No raw token in JSON or
-  URL.
+### Deployment-scope authorization
+Catalog resources are deployment infrastructure, not project-owned. Every list/read/mutation
+requires deployment-scoped authority (`system_admin`) **and** the matching `admin:catalog:read`/
+`write` permission. A `project_admin`/`project_viewer` credential is denied (`403`) regardless of its
+`admin:catalog:*` scopes. Bearer admin credentials and human OIDC browser sessions share the same
+service layer; browser mutations remain CSRF-protected via the existing session machinery.
 
-### CSRF model
-- `X-CSRF-Token` header required for `POST/PUT/PATCH/DELETE` when authenticated by browser session;
-  compared in constant time against the one-way verifier. `GET`/`HEAD` and Bearer service-account
-  requests are exempt. Missing/invalid => fixed `403 invalid_csrf_token`. The raw token is delivered
-  exactly once in the callback response.
+### Egress validation
+Endpoint create and `base_destination` updates run the same `DestinationPolicy` used before dispatch:
+non-allowlisted hosts, URL userinfo, and metadata/link-local/loopback/reserved destinations return
+`400 destination_denied`; allowlisted private-LAN hosts are accepted. A destination dispatch would
+reject is never persisted.
 
-### Authentication precedence
-- A supplied `Authorization` header is authoritative and must authenticate successfully; an invalid
-  header never falls through to a cookie. CSRF applies only when the selected mechanism is browser
-  session. `AdminRequestContext` carries `authentication_kind`
-  (`service_credential`|`browser_session`) and `browser_session_id` vs `api_credential_id`.
+### One-active-route enforcement
+Migration `0014` adds the partial unique index `uq_route_bindings_one_active_per_alias`
+(`model_alias_id WHERE is_active = true`). Together with service-layer validation this guarantees
+exactly one active `RouteBinding` per alias: a second active route (or activating an inactive
+alternate while another is active) returns `409 active_route_conflict`; inactive alternates are
+allowed; deactivate-then-activate swaps work; concurrent activations resolve to exactly one winner.
+The migration fails with a clear diagnostic if an existing DB already has multiple active routes per
+alias (no silent winner selection).
 
-### Human provisioning / linking policy
-- A known `(issuer, subject)` resolves to its linked, active principal. A `system_admin` links an
-  identity via `POST /admin/v1/oidc/identities`. Unknown identities are denied unless
-  `AETHERGATE_OIDC_JIT_PROVISIONING=true`, which creates an unprivileged `user` principal with zero
-  roles. No role is derived from email domain, group, username, or claims.
+### Route/account/quota consistency
+`route_binding.provider_account_id` must equal `endpoint.provider_account_id`, and any
+`route_binding.quota_group_id` must belong to that same account. Violations return `400
+parent_mismatch` and are never persisted. `devseed` was refactored only as necessary so it still
+cannot create inconsistent routes or multiple active routes (no HTTP authentication required).
 
-### Local test IdP strategy
-- `aethergate.dev_oidc_idp.DevOidcIdp` implements discovery, JWKS (RS256), an auto-approving
-  authorize endpoint, and a PKCE S256 token endpoint that returns a signed ID token. It is
-  deterministic and offline; not production identity infrastructure. It generates its RSA key in
-  memory, so restarting it changes the signing key (restart the API to clear its in-memory JWKS cache).
+### PATCH omitted-vs-null semantics
+Via Pydantic `model_fields_set`: `external_account_id`, `secret_ref_id`, `upstream_model`,
+`quota_group_id`, `default_output_tokens` (and nullable `description`/`name`) distinguish omitted
+(unchanged) from explicit `null` (clear where clearing is supported). Direct HTTP tests cover both.
 
-### Real nomnom verification (dynamic host port 44777)
-Live via a one-off host-network IdP container (`http://192.168.22.50:8490`) and a pinned API host
-port (uncommitted compose override) so the redirect URI was stable; backend Ollama
-`http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`.
+### Secret-ref metadata decision
+`SecretRef` exposes only `id`/`name`/`created_at`; no raw secret value is accepted or returned, and
+no environment-variable value is exposed. The production secret backend remains deferred;
+`EnvSecretResolver` stays a dev/test convenience. No delete/rotate in this task.
 
-- **A happy path.** Linked USER principal + `system_admin` role; `/auth/oidc/login` -> IdP authorize
-  (S256 PKCE) -> callback `200`, `SessionEstablished` with `roles:["system_admin"]` + `csrf_token`,
-  session cookie set; `GET /admin/v1/whoami` `200` via cookie only (`authentication_kind:
-  browser_session`, `api_credential_id: null`).
-- **B cookie properties.** `Set-Cookie: ag_session=...; HttpOnly; Max-Age=43200; Path=/admin;
-  SameSite=lax` (no `Secure` in dev). No raw token in response JSON or URL.
-- **C state/nonce/PKCE failures.** Wrong state -> `400 invalid_login_state`; replayed callback ->
-  `400 invalid_login_state` (no session); forged code (real state) -> `401 oidc_authentication_failed`
-  (no session, exchange failed). Nonce/PKCE-verifier mismatches are covered by offline unit tests.
-- **D unknown identity.** JIT off: valid but unlinked IdP identity -> `401`, no session. JIT on: same
-  identity provisions a `user` principal in the JIT project with zero roles; `whoami` `roles:[]` and a
-  protected list returns an empty page.
-- **E RBAC continuity.** `system_admin` human listed projects; revoking the role via a Bearer admin
-  made the next `whoami` report `roles:[]` and the next protected list return an empty page — no
-  re-login, immediate effect.
-- **F principal/project deactivation.** Deactivating the human principal (or its project) made the
-  next session-authenticated `whoami` return `401`; reactivation restored access — revalidated on
-  every request.
-- **G CSRF.** Cookie POST without token -> `403`; wrong token -> `403`; correct token -> `201`;
-  Bearer admin POST without token -> `201`.
-- **H logout.** Correct CSRF -> `revoked:true`; next session read -> `401`; repeated logout ->
-  `revoked:false` (idempotent).
-- **I audience regression.** Inference key on `/admin/v1/whoami` -> `401`; admin key on `/v1/models` ->
-  `401`; OIDC session cookie on `/v1/models` -> `401`; inference key on `/v1/models` -> `200`.
-- **J real SDK inference** (`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`): official OpenAI Python
-  SDK non-stream and stream chat completions succeeded against `gpt-4`; both requests recorded
-  `succeeded` with `project_id`/`principal_id`/`api_credential_id` matching the inference credential.
+### Audit behavior
+Immutable audit events on actual state changes only: `provider.created`/`updated`,
+`secret_ref.created`, `provider_account.created`/`updated`, `endpoint.created`/`updated`,
+`quota_group.created`/`updated`, `quota_limit.created`/`updated`, `model_alias.created`/`updated`,
+`route_binding.created`/`updated`. Actor principal ID and safe metadata only; no raw secrets,
+Authorization/session/CSRF/OIDC tokens; idempotent no-op PATCH emits no event.
+
+### Error translation
+Stable admin codes, never SQL text/constraint names/stack traces: `409 resource_conflict` (unique
+name, including DB-constraint races), `409 active_route_conflict`, `400 parent_mismatch`,
+`400 destination_denied`, `404 not_found`, `400 invalid_request` (validation). Conflict races are
+translated (savepoint + `IntegrityError` recovery), not only pre-checked.
+
+## Live nomnom verification (dynamic host port 44777)
+Clean reset -> `scripts/dev/v2 migrate` (empty -> `0014`) -> one-use bootstrap -> catalog built
+entirely through `/admin/v1` (no direct DB inserts). Backend Ollama `http://192.168.22.50:11434`,
+upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
+
+- **A catalog via admin API.** Created provider/account/endpoint/quota-group/request-limit/alias/
+  active route; every list/read DTO round-tripped; pagination bounded (`limit=1000` -> `400`).
+- **B real SDK inference.** Official OpenAI Python SDK `/v1/models` listed `gpt-4`; non-stream and
+  stream chat completions both succeeded; both `inference_requests` rows recorded `succeeded` with
+  `project_id`/`principal_id`/`api_credential_id` matching the minted inference credential.
+- **C active-state.** Deactivating alias (absent from `/v1/models`, inference fails safely),
+  endpoint, provider account, and provider each failed inference without hidden fallback; reactivation
+  restored inference.
+- **D egress.** Non-allowlisted, URL-userinfo, metadata, and link-local destinations each returned
+  `400 destination_denied`; the allowlisted Ollama host was accepted.
+- **E route ambiguity.** Inactive second route allowed; activating it while the first is active
+  returned `409 active_route_conflict`.
+- **F route/account mismatch.** Route with endpoint-A + account-B, and quota-group-A on a route for
+  account-B, both returned `400 parent_mismatch`; `route-bindings` total stayed 2 (no invalid row).
+- **G quota edit live effect.** PATCH `limit_units=1/window_seconds=60`; request #1 succeeded;
+  request #2 observed `wait_reason=quota_window_exhausted` in the DB then auto-dispatched on the
+  fixed-window reset; `enabled` toggled false/true; limit restored. Historical reservation/window rows
+  remained coherent.
+- **H RBAC/CSRF (browser session) not re-run live.** The host-network IdP
+  (`http://192.168.22.50:8490`) is currently unreachable; browser-session RBAC/CSRF is covered by
+  `tests/test_oidc_session.py` (47 tests) and the prior AGV2-015 live proof. Catalog routers reuse the
+  existing session/CSRF machinery unchanged.
 
 ## Migration
-- New migration `0012` adds `external_identities` (unique `(issuer, subject)`), `browser_sessions`
-  (one-way session/CSRF verifiers, expiry), and `oidc_login_states` (one-time PKCE transactions).
-  `0001`–`0011` untouched; `0011 -> 0012` and empty-DB -> latest both succeeded live.
-- New migration `0013` adds the one-way `txn_cookie_hash` column to `oidc_login_states`
-  (`NOT NULL`, server default dropped after backfill). Live `0012 -> 0013` succeeded.
-- AGV2-015C adds no migration; head remains `0013`.
+- `0014` (`src/aethergate/migrations/versions/0014_one_active_route_per_alias.py`): partial unique
+  index `uq_route_bindings_one_active_per_alias` plus an explicit diagnostic pre-flight for
+  pre-existing ambiguous active routes. `0001`–`0013` untouched. Live `0013 -> 0014` and empty-DB ->
+  latest both succeeded.
 
 ## Automated tests
-- `scripts/dev/v2 test` -> **364 passed** (was 348; +16 across AGV2-015V and AGV2-015C). New coverage
-  includes OIDC config validation, HTTPS-in-prod enforcement, discovery issuer mismatch, login-state
-  entropy/expiry, nonce/PKCE/state one-time consumption, callback replay, ID-token
-  issuer/audience/expiry/subject validation, unsafe algorithm rejection, unique `(issuer,subject)`,
-  email-not-key, JIT-off denial, JIT unprivileged, inactive principal denial, service-credential vs
-  browser-session `AdminRequestContext`, raw cookie never persisted, idle/absolute expiry, revoked
-  session, cookie attributes, CSRF missing/wrong/correct, Bearer-no-CSRF,
-  invalid-header-no-cookie-fallback, role revocation and project/principal deactivation on next
-  request, logout idempotency, audit secret redaction, login transaction cookie binding
-  (missing/forged/cross-browser), login-state delete-on-consume, login-state expiry cleanup, failed
-  login audit raw-state redaction, transaction-cookie attributes (dev + prod `Secure`),
-  clear-on-success and clear-on-failure, raw binding never persisted, session fixation replacement,
-  migration `0012 -> 0013`, plus the AGV2-015C pre-consume failure paths (provider error / missing
-  code / missing state / wrong state / missing binding / wrong binding / replay all clear the
-  transaction cookie and create no session), no-pre-consume-failure-creates-a-session, and
-  legitimate-browser-completes-after-a-failed-cross-browser-binding.
-- `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean.
+- `scripts/dev/v2 test` -> **386 passed**. New `tests/test_catalog_admin.py` (21 tests: deployment
+  authorization, project_admin denial, provider CRUD/pagination/conflict, secret-ref metadata only,
+  provider-account parent/omitted-vs-null, endpoint parent/egress/max-concurrency, quota-group CRUD,
+  quota-limit validation/update/no-historical-mutation, model-alias CRUD/conflict/`/v1/models`
+  reflection, route parent/mismatch/omitted-vs-null/one-active/inactive-alternate/concurrent-activation/
+  409-translation, list filter bounds, no-op-audit, audit-no-secret-material). `tests/test_migrations.py`
+  gained `0013 -> 0014`. `tests/test_catalog.py`/`tests/test_scheduler_quota.py` updated for the new
+  typed errors (`ActiveRouteConflictError`, `CatalogParentMismatchError`).
+- `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean (one pre-commit
+  hook false positive on the local `clear_secret` flag resolved by renaming it to `clear_secret_ref`).
 
 ## Key files
-- `src/aethergate/config.py` — OIDC/session settings, `_validate_oidc`, empty-env handling, scope parsing.
-- `src/aethergate/identity/oidc.py` — `OidcProvider` (discovery/JWKS/PKCE/token exchange/ID-token validation).
-- `src/aethergate/identity/session.py` — session service (login transactions, sessions, CSRF, linking, JIT).
-- `src/aethergate/api/session_auth.py` — login/callback/session/logout endpoints.
-- `src/aethergate/api/admin.py` / `identity/admin.py` / `identity/authorization.py` — kind-aware admin auth.
-- `src/aethergate/dev_oidc_idp.py` — local deterministic OIDC provider.
-- `src/aethergate/migrations/versions/0012_human_oidc_sessions.py` — migration 0012.
-- `src/aethergate/migrations/versions/0013_login_transaction_cookie_binding.py` — migration 0013
-  (`txn_cookie_hash`).
-- `tests/test_oidc_session.py` — new test suite (login/session/CSRF/binding/cleanup/audit).
-- `tests/test_migrations.py` — migration round-trip tests incl. `0012 -> 0013`.
+- `src/aethergate/catalog/admin.py` — catalog admin service (authz, invariants, egress, audit, conflict
+  translation).
+- `src/aethergate/api/catalog_admin.py` — thin `/admin/v1` catalog router (PATCH `model_fields_set`).
+- `src/aethergate/api/admin_errors.py`, `src/aethergate/errors.py` — catalog error types + handlers.
+- `src/aethergate/contracts/admin_v1.py` — catalog DTOs (create/read/update + `Page[T]`).
+- `src/aethergate/persistence/models.py`, `src/aethergate/persistence/repository.py` — `RouteBinding`
+  partial unique index + catalog repository functions.
+- `src/aethergate/migrations/versions/0014_one_active_route_per_alias.py` — migration 0014.
+- `src/aethergate/main.py` — router registration.
+- `tests/test_catalog_admin.py` — new suite; `tests/test_migrations.py`, `tests/test_catalog.py`,
+  `tests/test_scheduler_quota.py` — updated.
 
 ## Decisions
-- External identity key is `(issuer, subject)`; email is display-only. JIT provisioning is off by
-  default and creates zero-role users; roles are never derived from claims.
-- `AdminAuthenticationKind` distinguishes `service_credential` from `browser_session` so a browser
-  session never fabricates an `ApiCredential`; scope checks apply only to service credentials.
-- The session cookie and CSRF token are stored only as one-way SHA-256 verifiers (high-entropy
-  random tokens, so SHA-256 — not a password hash — is appropriate).
-- The login transaction is bound to the initiating browser via a dedicated short-lived `ag_oidc_txn`
-  cookie (persisted only as `txn_cookie_hash`), and consumed transactions are deleted rather than
-  marked, so replay and cross-browser state theft fail closed.
-- `last_seen_at` is slid on a throttled basis (not per request) to avoid a hot-row write.
+- Catalog resources are deployment-scoped; project roles never see them.
+- SecretRef is metadata only; production secret backend still deferred.
+- `provider.kind` stays an opaque non-empty string (not a restrictive enum) so LiteLLM-backed providers
+  are not over-constrained.
+- The one-active-route invariant is enforced by a DB partial unique index plus service validation; a
+  cross-table trigger was deliberately avoided.
+- `quota_limit.metric` and `quota_group_id` are immutable; only `limit_units`/`window_seconds`/`enabled`
+  (and `name`) are editable, and edits never rewrite historical reservation/window rows.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
   `--no-deps`.
-- The local IdP's RSA key is generated in memory, so restarting it changes the key; the API's 300s
-  in-memory JWKS cache must be cleared (API restart) when the IdP is restarted.
-- The committed `deploy/v2/compose.yaml` does not wire OIDC env passthrough (kept out to avoid leaking
-  `.env` OIDC settings into `scripts/dev/v2 test`); live OIDC verification used an uncommitted compose
-  override to pin the host port and inject `AETHERGATE_OIDC_*`.
-- litellm still has no trusted token estimator, so token-priced quotas/budgets fail closed; the
-  inference smoke used a request-only quota and a request-priced policy.
+- The full suite has pre-existing flaky concurrency tests
+  (`test_scheduler_quota.py::test_saturated_quota_group_does_not_block_unrelated_group` and
+  `test_accounting.py::test_two_workers_cannot_oversubscribe_budget`) that fail intermittently only
+  under full-suite load; they pass in isolation/targeted runs and are unrelated to AGV2-016.
+- Live scenario H (browser-session RBAC/CSRF) was not re-run because the host-network IdP is
+  unreachable this session.
+- `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; live verification used an
+  uncommitted compose override to pin the host port (`44777`).
+- litellm still has no trusted token estimator; token-priced quotas fail closed (request-only quota used
+  in the smoke).
 
 ## Recommended Next Step
-Build the React web console against the new OIDC login/session/CSRF contracts, or extend the remaining
-catalog/accounting/queue admin CRUD over `/admin/v1` reusing the same authorization/pagination
-foundations.
+Queue the next workstream task (pricing/budget admin CRUD, usage/ledger admin reads, or the
+queue/operator admin API) and, once the host IdP is reachable again, re-run live scenario H to confirm
+browser-session catalog RBAC/CSRF end-to-end.
