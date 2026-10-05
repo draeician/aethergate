@@ -31,7 +31,12 @@ from aethergate.contracts.admin_v1 import (
 )
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import AdminAuthenticationKind
-from aethergate.errors import OidcAuthenticationFailed, OidcConfigurationError, SessionInvalid
+from aethergate.errors import (
+    OidcAuthenticationFailed,
+    OidcConfigurationError,
+    OidcLoginStateInvalid,
+    SessionInvalid,
+)
 from aethergate.identity import oidc as oidc_module
 from aethergate.identity import session as session_service
 from aethergate.persistence import repository
@@ -90,9 +95,10 @@ def _oidc_failure_response(
 ) -> JSONResponse:
     """Return a standardized OIDC failure envelope and clear the transaction cookie.
 
-    Used for post-consume callback failures (exchange / ID token / identity). The
-    login transaction is already consumed at that point, so the browser's stale
-    binding cookie is cleared alongside the error.
+    Used for every callback failure path (pre- and post-consume). The browser's
+    binding cookie is cleared alongside the error, but a valid pending login
+    transaction is never consumed or deleted merely because a callback failed its
+    binding/state check.
     """
     response = JSONResponse(
         status_code=status_code,
@@ -163,17 +169,31 @@ async def oidc_callback(
     error: str | None = Query(default=None),
 ) -> JSONResponse:
     if error is not None or not code or not state:
-        raise OidcAuthenticationFailed()
+        return _oidc_failure_response(
+            request,
+            code="oidc_authentication_failed",
+            message="OIDC authentication failed.",
+            status_code=401,
+        )
 
     now = session_service.utcnow()
     settings = get_settings()
     txn_cookie = request.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
 
-    # Consume the one-time login transaction first (committed independently so a
-    # replayed or mis-bound callback cannot be retried with the same state).
-    async with session.begin():
-        transaction = await session_service.consume_login_transaction(
-            session, state, txn_cookie, now
+    # Consume the one-time login transaction. A missing/wrong/unknown state or a
+    # missing/wrong binding cookie fails here WITHOUT deleting the transaction, so
+    # a legitimate initiating browser can still complete its pending login.
+    try:
+        async with session.begin():
+            transaction = await session_service.consume_login_transaction(
+                session, state, txn_cookie, now
+            )
+    except OidcLoginStateInvalid:
+        return _oidc_failure_response(
+            request,
+            code="invalid_login_state",
+            message="The login attempt is invalid or expired.",
+            status_code=400,
         )
     txn_id = str(transaction.id)
 
