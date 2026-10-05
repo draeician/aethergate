@@ -1,27 +1,31 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-015
+AGV2-015V
 
 ## Title
-Human identity phase — OIDC authorization code flow and secure admin browser sessions
+Harden OIDC login transaction binding and audit secrecy
 
 ## Ownership
 Primary: identity/auth
-Coordinating: admin API, contracts, platform/testing, future web console
+Coordinating: admin API, platform/testing
 
 ## Why This Task Exists
 
-Machine inference authentication, admin service-account authentication, RBAC, bootstrap, and admin
-identity CRUD are now complete and live-verified.
+AGV2-015 implemented OIDC authorization-code + PKCE login, durable external identity linking,
+server-managed browser sessions, CSRF protection, and live nomnom verification with 348 passing tests.
 
-The project specification requires human administrators to use OIDC-backed named identities with
-server-managed browser sessions, Secure/HttpOnly cookies, CSRF protection, and the same
-Principal/RoleAssignment authorization model already used by service accounts.
+Code review found two security invariants that were claimed but not actually implemented:
 
-This task implements that human-admin authentication boundary.
+1. the OIDC login transaction is not bound to the browser that initiated it;
+2. failed-login audit events persist the raw OIDC state value as AuditEvent.resource_id.
 
-Do not build the React web console yet. Build the backend/session contracts the console will use.
+The current login flow validates state, nonce, PKCE, and one-time consumption, but /auth/oidc/login
+sets no short-lived pre-auth browser binding cookie. Any browser that obtains a valid pending state can
+present the callback and receive the authenticated session. That leaves a login-CSRF/session-swapping
+path and violates the task requirement that state/nonce/PKCE be bound to the initiating browser.
+
+Fix these before advancing the roadmap.
 
 ## Compaction Recovery
 
@@ -33,7 +37,7 @@ If context is compacted, summarized, restarted, or uncertain:
 5. inspect git status and recent commits;
 6. continue from repository state.
 
-docs/development/current-task.md is authoritative.
+current-task.md is authoritative.
 
 ## Before You Start
 
@@ -44,466 +48,255 @@ docs/development/current-task.md is authoritative.
    - docs/development/current-task.md
    - docs/development/agent-handoff.md
    - docs/architecture/security.md
-   - docs/architecture/admin-api.md
-   - docs/contracts/domain-model.md
-   - docs/contracts/admin-v1-foundation.md
-   - current Principal / RoleAssignment / AdminRequestContext code
-   - current admin auth dependencies and error handlers
-3. Preserve all service-account admin and inference authentication behavior.
+   - src/aethergate/api/session_auth.py
+   - src/aethergate/identity/session.py
+   - src/aethergate/identity/oidc.py
+   - migration 0012
+   - persistence models/repository for oidc_login_states
+   - tests/test_oidc_session.py
+3. Preserve all AGV2-015 OIDC, session, CSRF, RBAC, JIT, and Bearer-vs-cookie behavior.
 4. Do not modify/delete legacy v1 app/ or frontend/src/.
 5. Do not commit unrelated local/untracked files.
-6. Do not implement JWT/OIDC signature verification cryptography by hand when a vetted standards-aware
-   library can provide it.
 
-## Goal
+## 1. Bind the login transaction to the initiating browser
 
-A human administrator can authenticate through an external OpenID Connect provider using the
-Authorization Code flow with PKCE and receive a server-managed AetherGate session.
+Add a separate, short-lived, pre-authentication browser-binding secret.
 
-That session authenticates the human as a durable AetherGate Principal and authorizes all admin
-requests through the existing RoleAssignment/RBAC service.
+Preferred design:
 
-No OIDC access token, ID token, client secret, session bearer secret, or bootstrap secret is stored in
-browser JavaScript storage.
+- /admin/v1/auth/oidc/login generates a random >=256-bit transaction binding value;
+- response sets it in a dedicated HttpOnly cookie, separate from the authenticated session cookie;
+- PostgreSQL stores only a one-way verifier/hash of that binding value on the OIDC login-state row;
+- callback must present both:
+  - the provider-returned state; and
+  - the matching transaction-binding cookie;
+- callback rejects if the binding cookie is missing or wrong;
+- successful or failed callback clears the transaction cookie;
+- transaction cookie expires with the login-state TTL;
+- transaction cookie is never an authenticated session and grants no authority.
 
-## 1. OIDC provider configuration
-
-Add typed runtime configuration for one OIDC provider in this phase.
-
-At minimum:
-- issuer URL;
-- client ID;
-- client secret when the provider requires one;
-- configured redirect/callback URL;
-- requested scopes, with openid required;
-- optional display/provider name;
-- enable/disable flag.
-
-Requirements:
-- issuer must be HTTPS in production;
-- localhost/internal HTTP may be permitted only in explicit dev/test mode for the local verification IdP;
-- client secret is SecretStr and never logged;
-- no default client secret;
-- openid scope is mandatory;
-- redirect URI must be fixed/configured, never accepted from an arbitrary request parameter;
-- no user-controlled discovery/JWKS/token endpoint URL.
-
-Use OIDC discovery from the configured issuer. Cache discovery/JWKS safely with bounded refresh.
-
-## 2. Authorization Code + PKCE
-
-Implement standards-aware human login endpoints, for example:
-
-- GET /admin/v1/auth/oidc/login
-- GET /admin/v1/auth/oidc/callback
-- GET /admin/v1/auth/session
-- POST /admin/v1/auth/logout
-
-Exact naming may differ, but keep the surface under the admin authentication boundary and document it.
-
-Login requirements:
-- generate cryptographically random state;
-- generate nonce;
-- generate PKCE verifier/challenge using S256;
-- bind state/nonce/PKCE transaction to the initiating browser;
-- short expiration;
-- one-time consumption;
-- fixed callback URI;
-- do not place client secret/session secret in query parameters.
-
-Callback requirements:
-- exact state match;
-- exchange authorization code using configured provider metadata;
-- validate ID token using provider keys and OIDC rules;
-- validate issuer;
-- validate audience/client ID;
-- validate expiration/not-before as applicable;
-- validate nonce;
-- reject unsupported/unsafe algorithms according to the selected standards library/provider metadata;
-- reject malformed/missing subject;
-- authorization code may be consumed only once;
-- no open redirect.
-
-Do not treat email as the identity key.
-
-## 3. Durable external-identity link
-
-Add a durable external identity link instead of storing OIDC identity fields directly on Principal in a
-provider-specific way.
-
-Recommended shape:
-- stable ExternalIdentityId;
-- principal_id;
-- provider/issuer;
-- subject (sub);
-- optional safe display claims such as email/display name;
-- created_at;
-- last_login_at;
-- active flag if useful.
-
-Database invariants:
-- unique (issuer, subject);
-- one external identity maps to exactly one Principal;
-- subject is opaque/case-sensitive data;
-- email is not unique identity authority;
-- do not store raw ID/access/refresh tokens in this table.
-
-Principal remains the authorization identity. RoleAssignment remains the authorization grant.
-
-Add migration 0012 unless a different next linear revision is required by repository state.
-
-## 4. Human principal provisioning/linking
-
-Do not automatically grant administrative roles based solely on an IdP claim.
-
-Use a safe phase-1 human provisioning policy.
-
-Preferred model:
-- an already-authorized system_admin creates a USER Principal in an AetherGate project and explicitly
-  links/authorizes an OIDC identity by issuer + subject, OR
-- first successful OIDC login may create an unprivileged USER Principal only if an explicit config
-  flag permits just-in-time provisioning; it receives no admin role until a system_admin grants one.
-
-No role may be created from email domain, group name, username, or arbitrary claim unless an explicit
-mapping feature is designed in a later task.
-
-Requirements:
-- unknown identity without enabled JIT policy is denied safely;
-- linked inactive principal is denied;
-- disabled external link is denied if implemented;
-- role revocation immediately affects the next session-authenticated request;
-- project/principal deactivation immediately affects the next request;
-- existing service-account principals continue unchanged.
-
-## 5. AdminRequestContext must support multiple authentication methods
-
-Do not invent a fake ApiCredential for a browser session.
-
-Refine the admin request context so the actor can be authenticated by:
-- admin API credential; or
-- human browser session.
-
-Represent authentication method explicitly.
-
-At minimum expose internally:
-- principal_id;
-- project_id;
-- active role assignments;
-- authentication kind (service credential vs browser session);
-- api_credential_id when applicable;
-- browser_session_id when applicable;
-- credential scopes when applicable.
-
-Authorization decisions must continue to use the same centralized RBAC engine.
-
-Service-account admin endpoints must remain backward compatible.
-
-## 6. Server-managed browser sessions
-
-Persist authoritative browser sessions in PostgreSQL.
-
-At minimum:
-- stable session ID;
-- principal ID;
-- one-way verifier/hash for the raw session cookie value;
-- created_at;
-- last_seen_at or equivalent;
-- idle_expires_at;
-- absolute_expires_at;
-- revoked_at;
-- CSRF verifier/state;
-- safe OIDC login metadata if necessary, but no provider token secrets.
-
-Session cookie:
-- cryptographically random >=256-bit value;
-- raw value returned only in Set-Cookie;
-- PostgreSQL stores verifier/hash, not raw cookie;
+Cookie properties:
+- HttpOnly;
+- SameSite=Lax;
 - Secure in production;
-- HttpOnly;
-- SameSite=Lax unless documented provider flow requires a stricter/different safe setting;
-- Path restricted appropriately;
-- no session token in URL;
-- no LocalStorage/sessionStorage auth token.
-
-Define configurable idle and absolute lifetimes with safe defaults.
-
-Do not update last_seen_at on every request if doing so would create an avoidable hot row; use a
-throttled update or intentionally defer it while enforcing expiration correctly.
-
-## 7. Session revocation and logout
-
-Logout must durably revoke the server session and clear the browser cookie.
+- narrow Path, preferably /admin/v1/auth/oidc/callback or /admin/v1/auth/oidc;
+- bounded Max-Age equal to login TTL;
+- raw binding value never returned in JSON or URL.
 
 Requirements:
-- repeated logout is safe/idempotent;
-- revoked session fails next request;
-- expired session fails;
-- inactive project/principal fails;
-- role revocation does not require session destruction; next request re-resolves active assignments
-  and loses authority;
-- do not depend only on cookie deletion for revocation.
+- valid state from browser A must fail when callback is sent from browser B without A's binding cookie;
+- copying only state/code is insufficient;
+- wrong binding fails;
+- replay still fails;
+- callback cannot silently create a session when binding is absent.
 
-Provide service/repository support for listing/revoking a user's sessions later, but full session-admin
-CRUD is not required in this task.
+Do not overload the real authenticated ag_session cookie for this.
 
-## 8. CSRF protection
+## 2. Persist only a verifier for browser binding
 
-Cookie-authenticated state-changing admin requests require CSRF protection.
-
-Use a server-backed synchronizer-token design or another well-established design compatible with the
-future React console.
-
-Recommended:
-- create a random CSRF token when session is established;
-- store only a verifier/hash with the session;
-- expose the raw CSRF token through a safe session/bootstrap response for the in-memory web client;
-- require a header such as X-CSRF-Token for POST/PATCH/PUT/DELETE requests authenticated by browser
-  session;
-- compare in constant time;
-- rotate token when session rotates if session rotation is implemented.
+Add a new field such as browser_binding_hash to OidcLoginState.
 
 Requirements:
-- GET/HEAD safe methods do not require CSRF;
-- Bearer-authenticated service-account requests do not require CSRF because they do not use ambient
-  cookie authority;
-- missing/invalid CSRF => fixed 403;
-- Origin/Referer validation may be added as defense-in-depth but is not a substitute for the CSRF token.
+- raw binding secret never stored;
+- hash uses the same one-way high-entropy-token approach already used for session/CSRF tokens;
+- lookup is still by provider state or a hashed state design if you choose to improve it;
+- constant-time comparison for binding verification.
 
-Never put the authentication session secret in a readable CSRF cookie.
+Migration:
+- do not rewrite 0012;
+- add migration 0013 for the binding verifier field and any additional safe login-transaction changes;
+- 0012 -> 0013 succeeds;
+- empty DB -> latest succeeds.
 
-## 9. Session fixation / login transaction safety
+If you decide to replace raw state storage with state_hash in this task, do it completely and safely.
+Do not partially support both models without a documented transition.
 
-Prevent session fixation.
+## 3. Remove raw OIDC state from audit records
 
-Requirements:
-- no authenticated session exists before successful callback;
-- successful OIDC callback creates a fresh random session;
-- any previous session cookie is replaced;
-- failed callback creates no authenticated session;
-- state/nonce/PKCE transaction is one-time and expires;
-- replayed callback fails.
+Current _record_login_failed writes:
 
-## 10. Admin authentication dependency unification
+resource_id = raw state
 
-Protected /admin/v1 endpoints must accept either:
-- valid admin Bearer credential; or
-- valid browser session cookie.
+That violates the security requirement that raw login transaction secrets not be persisted in audit.
 
-The resulting AdminRequestContext must flow into the same service-layer authorization code.
+Fix audit semantics.
 
-Precedence/ambiguity:
-- define behavior if both cookie and Authorization header are present;
-- preferred: a supplied Authorization header is authoritative and must authenticate successfully;
-  do not silently fall back to cookie when an invalid header is supplied;
-- CSRF applies only when the selected auth mechanism is browser session.
+Required:
+- no raw state in resource_id;
+- no raw state in metadata;
+- no nonce, code, PKCE verifier, session cookie, CSRF token, ID/access/refresh token in audit;
+- use a safe opaque login-state row ID, fixed resource identifier, or fixed failure category instead;
+- pre-auth failure actor remains NULL;
+- failure reason may remain a fixed safe category such as token_exchange_failed / invalid_id_token /
+  unknown_identity.
 
-Keep bootstrap separate and one-use as today.
+Add a direct DB/audit canary test proving raw state and other transaction secrets do not appear in any
+AuditEvent field.
 
-## 11. Session/API contracts
+## 4. Review login-state persistence claims
 
-Add transport-independent DTOs for at least:
-- OIDC login/start result if the endpoint does not redirect directly;
-- current human session / whoami metadata;
-- CSRF token delivery;
-- logout result;
-- safe external identity metadata for admin read operations if exposed.
+Migration 0012 documentation currently says raw state/nonce/PKCE values are not persisted by the
+migration while the runtime table explicitly stores state, nonce, code_verifier, and code_challenge.
 
-Do not expose:
-- ID token;
-- access token;
-- refresh token;
-- session hash/verifier;
-- raw session cookie value in JSON;
-- client secret.
+Clarify documentation so it is not misleading.
 
-whoami/session responses may expose safe issuer/provider name and subject only if the product actually
-needs it; prefer minimal identity metadata.
+For this phase:
+- browser binding raw secret must not be persisted;
+- authenticated session raw secret and CSRF raw token must not be persisted;
+- raw OIDC provider tokens must not be persisted;
+- if state/nonce/PKCE verifier remain in the short-lived login-state table, explicitly document that
+  they are ephemeral login transaction material with bounded TTL and are never logged/audited;
+- if you choose to hash state/nonce or encrypt PKCE material, document the stronger model.
 
-## 12. Audit
+Do not claim values are absent from runtime storage when they are present.
 
-Create immutable safe audit events for at least:
-- human login success;
-- human login failure category if useful and safe;
-- session logout/revoke;
-- external identity link/create if this task exposes such an admin action.
+## 5. Expired/consumed login-state cleanup
 
-Audit actor:
-- login success may identify the resulting principal;
-- pre-auth failures have no actor;
-- never put authorization code, ID token, access token, refresh token, state, nonce, PKCE verifier,
-  cookie/session secret, or CSRF raw token in audit metadata.
+Add or verify a safe cleanup path for short-lived login transaction rows.
 
-## 13. Development/live verification provider
+At minimum:
+- old consumed/expired OIDC login-state rows can be deleted by a service/repository cleanup function;
+- cleanup never touches active transactions;
+- callback correctness does not depend on cleanup running;
+- no background scheduler is required yet.
 
-The task must be testable without depending on an external Internet IdP.
+A dev/test callable cleanup helper is sufficient for this task.
 
-Use a deterministic local OIDC test provider or standards-aware mock service inside the test/dev
-environment.
+## 6. Session fixation regression
 
-Requirements:
-- no real company IdP credentials committed;
-- provider supports discovery, authorization code, PKCE S256, token exchange, and signed ID tokens;
-- deterministic automated tests remain offline;
-- live nomnom verification uses this local/internal test IdP or an equivalent controlled fixture.
+Re-test:
+- successful callback creates a fresh ag_session value;
+- a pre-existing ag_session cookie is replaced by the new session cookie;
+- the pre-auth transaction cookie is cleared;
+- a failed callback creates no new browser session.
 
-Do not add a heavyweight production dependency solely for tests if a small standards-compliant fixture
-is sufficient.
+Do not require revoking every previously authenticated browser session merely because a new login is
+performed unless the architecture explicitly chooses single-session semantics.
 
-## 14. Real nomnom verification — required
+## Real nomnom Verification — Required
 
-Use dynamic host ports.
+Use the local/internal deterministic OIDC provider and dynamic AetherGate port.
 
-### A. OIDC happy path
-- configure local test IdP;
-- create/link a USER Principal with an admin role;
-- initiate login;
-- complete authorization code + PKCE flow;
-- callback creates session;
-- browser/session whoami succeeds;
-- no Bearer admin key is required for the browser request.
+### A. Cross-browser login binding
 
-### B. Cookie properties
-Prove Set-Cookie has expected properties for the environment:
-- HttpOnly;
-- SameSite;
-- Secure in production-mode configuration;
-- appropriate Path;
-- no raw token in response JSON or URL.
+Browser A:
+- GET /auth/oidc/login;
+- receives the transaction-binding cookie;
+- IdP returns valid code+state.
 
-### C. State / nonce / PKCE failures
+Browser B:
+- sends the callback with A's valid code+state but without A's binding cookie;
+- callback must fail;
+- zero authenticated browser sessions created.
+
+Then Browser A:
+- uses its binding cookie with a fresh valid login transaction;
+- callback succeeds.
+
+### B. Wrong binding
+
+- valid state/code;
+- wrong transaction-binding cookie;
+- callback fails;
+- no authenticated session.
+
+### C. Binding cookie properties
+
 Prove:
-- wrong state fails;
-- replayed state/callback fails;
-- wrong nonce fails;
-- bad PKCE verifier/code exchange fails;
-- no session is created on any failure.
+- HttpOnly;
+- SameSite=Lax;
+- Secure in prod-mode configuration;
+- narrow Path;
+- Max-Age bounded to login TTL;
+- raw binding value absent from body/redirect URL.
 
-### D. Unknown identity
-With JIT disabled:
-- valid IdP identity not linked to AetherGate => denied;
-- no privileged Principal/RoleAssignment is created.
+### D. Binding one-time lifecycle
 
-If JIT unprivileged provisioning is implemented:
-- principal is created with zero roles;
-- protected admin operation remains denied.
+- success clears transaction cookie;
+- failed callback clears transaction cookie where response handling permits;
+- replayed callback fails even if old binding value is manually replayed.
 
-### E. RBAC continuity
-- human system_admin can perform deployment action;
-- human project_admin(A) can administer A;
-- human project_admin(A) cannot enumerate B;
-- human project_viewer(A) can read but not write;
-- revoke role during active session and prove next protected request loses access without relogin.
+### E. Audit secrecy
 
-### F. Principal/project deactivation
-During an active session:
-- deactivate principal => next request rejected;
-- reactivate if needed;
-- deactivate project => next request rejected.
+Force token-exchange failure and unknown-identity failure.
 
-### G. CSRF
-Using browser-session auth:
-- GET works without CSRF;
-- state-changing request without token => 403;
-- wrong token => 403;
-- correct token => succeeds.
+Prove PostgreSQL audit rows contain none of:
+- raw state;
+- code;
+- nonce;
+- PKCE verifier;
+- binding cookie;
+- authenticated session cookie;
+- CSRF token.
 
-Using Bearer admin service credential:
-- same state-changing endpoint remains usable without browser CSRF token.
+### F. Existing OIDC regressions
 
-### H. Logout
-- logout with correct CSRF succeeds;
-- cookie cleared;
-- DB session revoked;
-- replaying old cookie fails;
-- repeated logout is safe.
+Re-run:
+- happy-path linked USER login;
+- state mismatch;
+- nonce failure;
+- bad PKCE;
+- callback replay;
+- unknown identity/JIT behavior;
+- RBAC continuity;
+- project/principal deactivation;
+- CSRF;
+- logout;
+- Bearer-vs-cookie precedence.
 
-### I. Audience / existing-auth regression
-- inference credential still cannot call admin;
-- admin service credential still cannot call inference;
-- admin service credential still works on admin endpoints;
-- OIDC browser session is admin-only and cannot authenticate the OpenAI inference surface.
+### G. Real inference regression
 
-### J. Real inference regression
-With AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false:
-- official OpenAI Python SDK non-stream completion succeeds using inference credential;
-- streaming completion succeeds;
-- persisted attribution remains correct.
+With inference auth bypass disabled:
+- official OpenAI SDK non-stream succeeds;
+- official SDK stream succeeds;
+- inference/admin/browser audience separation remains correct.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. OIDC config validation;
-2. production issuer HTTPS enforcement;
-3. discovery issuer mismatch rejected;
-4. login state entropy/expiry;
-5. nonce validation;
-6. PKCE S256 generation/use;
-7. state one-time consumption;
-8. authorization-code callback replay rejected;
-9. ID token issuer validation;
-10. ID token audience validation;
-11. ID token expiry validation;
-12. subject required;
-13. unique issuer+subject external identity;
-14. email not used as unique identity key;
-15. unknown identity denied with JIT off;
-16. JIT path unprivileged if implemented;
-17. inactive linked principal denied;
-18. service credential AdminRequestContext still works;
-19. browser-session AdminRequestContext works without fake credential;
-20. session raw cookie never persisted;
-21. session hash lookup;
-22. session idle expiry;
-23. session absolute expiry;
-24. revoked session denied;
-25. cookie attributes;
-26. session fixation prevented;
-27. CSRF missing/wrong/correct;
-28. Bearer admin mutation does not require CSRF;
-29. invalid supplied Authorization never falls through to valid cookie;
-30. role revocation reflected on next session request;
-31. project/principal deactivation reflected on next session request;
-32. logout durable/idempotent;
-33. audit contains no OIDC/session/CSRF secrets;
-34. migration 0011 -> 0012;
-35. empty DB -> latest;
-36. existing 315-test baseline remains green or higher;
-37. official SDK inference regressions remain green.
-
-## Migration
-
-Do not rewrite migrations 0001 through 0011.
-
-Add migration 0012 for external identities, browser sessions, OIDC login transactions, and required
-indexes/constraints.
-
-Requirements:
-- live 0011 -> 0012 succeeds;
-- empty DB -> latest succeeds;
-- no raw token/session/cookie/nonce/PKCE/client secret invented or persisted by migration;
-- existing service-account credentials and roles remain unchanged.
+1. login endpoint sets transaction-binding cookie;
+2. raw binding value not persisted;
+3. stored binding verifier matches raw cookie;
+4. missing binding cookie rejected;
+5. wrong binding rejected;
+6. valid state from another browser rejected;
+7. correct binding succeeds;
+8. callback replay still rejected;
+9. transaction cookie cleared on success;
+10. transaction cookie clear behavior on failure;
+11. prod transaction cookie Secure;
+12. transaction cookie HttpOnly/SameSite/Path/Max-Age;
+13. pre-existing authenticated session cookie replaced with fresh session on successful login;
+14. failed callback creates no BrowserSession;
+15. failed-login audit contains no raw state;
+16. audit contains no code/nonce/PKCE/binding/session/CSRF secret;
+17. expired/consumed login cleanup removes only stale rows;
+18. migration 0012 -> 0013;
+19. empty DB -> latest;
+20. existing 348-test baseline remains green or higher;
+21. official SDK inference regressions remain green.
 
 ## Security / logging
 
-Never log or persist in audit:
-- OIDC client secret;
-- authorization code;
-- ID token;
-- access token;
-- refresh token;
+Never log or place in audit:
+- raw transaction binding;
 - raw state;
-- raw nonce;
+- nonce;
 - PKCE verifier;
+- authorization code;
+- ID/access/refresh token;
 - raw session cookie;
 - raw CSRF token;
 - API keys;
 - bootstrap token.
 
-Safe logs may use gateway request ID, opaque principal/session/external-identity IDs, issuer hostname,
-and fixed failure category.
-
-Add canary tests for redaction.
+Safe identifiers:
+- opaque OidcLoginState ID;
+- opaque BrowserSession ID;
+- principal ID;
+- fixed failure category;
+- configured issuer hostname.
 
 ## Documentation
 
@@ -511,30 +304,28 @@ Update:
 - docs/architecture/security.md
 - docs/architecture/admin-api.md
 - docs/contracts/domain-model.md
-- docs/contracts/admin-v1-foundation.md
 - docs/development/README.md
 - docs/development/agent-handoff.md
+- migration 0012 commentary if needed for truthful runtime-storage wording
 
 Document:
-- OIDC authorization-code + PKCE flow;
-- external identity linking;
-- session cookie attributes/lifetimes;
-- CSRF design;
-- Bearer-vs-cookie precedence;
-- role/project/principal revalidation;
-- no automatic privilege from IdP claims;
-- local test IdP strategy.
+- pre-auth transaction cookie/browser binding;
+- one-way binding verifier;
+- callback requires state + binding;
+- audit never stores raw state;
+- ephemeral login-state storage policy;
+- cleanup semantics.
 
 Do not modify the dated audit.
 
 ## Still Deferred
 
 Do not implement:
-- OAuth device flow for Linux CLI;
+- Linux CLI OAuth device flow;
 - React web console;
+- multiple OIDC providers;
 - IdP group-to-role mapping;
 - SCIM;
-- multiple OIDC providers;
 - SAML;
 - full remaining catalog/accounting/queue admin CRUD;
 - Responses API;
@@ -544,29 +335,26 @@ Do not implement:
 ## Verification Before Commit
 
 - full containerized test suite;
-- migration 0011 -> 0012;
+- migration 0012 -> 0013;
 - empty DB -> latest;
 - ruff/lint;
 - git diff --check;
-- secret/token log canary checks;
+- secret/state/token audit/log canary checks;
 - legacy v1 untouched;
 - dated audit unchanged;
-- all required local-IdP/live nomnom scenarios completed.
+- all live nomnom scenarios complete.
 
 ## Handoff
 
 Include:
 - implementation commit(s);
 - migration revision;
-- OIDC library/validation approach;
-- external identity model;
-- session model and cookie properties;
-- CSRF model;
-- authentication precedence;
-- human provisioning/linking policy;
-- local test IdP strategy;
-- live state/nonce/PKCE/replay evidence;
-- live RBAC/deactivation/revocation evidence;
+- browser-binding design;
+- transaction-cookie properties;
+- audit secrecy behavior;
+- login-state persistence/cleanup policy;
+- live cross-browser rejection proof;
+- live happy-path proof;
 - real SDK inference result;
 - final test count;
 - dynamic port/backend;
@@ -580,11 +368,11 @@ Never include raw OIDC/session/CSRF/API/bootstrap secrets, tokens, prompt/comple
 Use conventional commits on v2.
 
 Suggested primary commit:
-feat(identity): add OIDC human sessions and CSRF protection
+fix(identity): bind OIDC login transactions to browser
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to commit/push.
 
-The task is complete only when all live and automated criteria are met and origin/v2 contains the
-implementation and updated handoff.
+The task is complete only when all stated live and automated criteria are met and origin/v2 contains
+the implementation and updated handoff.
