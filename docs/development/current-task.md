@@ -1,32 +1,31 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-014V
+AGV2-015
 
 ## Title
-Close admin CRUD verification gaps and harden bootstrap/RBAC races
+Human identity phase — OIDC authorization code flow and secure admin browser sessions
 
 ## Ownership
-Primary: admin API + identity/auth
-Coordinating: platform/testing, audit
+Primary: identity/auth
+Coordinating: admin API, contracts, platform/testing, future web console
 
 ## Why This Task Exists
 
-AGV2-014 implemented the intended admin identity CRUD and authorization boundaries, with 306 tests.
+Machine inference authentication, admin service-account authentication, RBAC, bootstrap, and admin
+identity CRUD are now complete and live-verified.
 
-Review found three remaining gaps before moving to human OIDC:
+The project specification requires human administrators to use OIDC-backed named identities with
+server-managed browser sessions, Secure/HttpOnly cookies, CSRF protection, and the same
+Principal/RoleAssignment authorization model already used by service accounts.
 
-1. the task explicitly required re-running real OpenAI SDK non-stream/stream inference after the admin changes, but the handoff deferred it;
-2. principal-deactivation and immediate role-revocation effects were not both proven live in the AGV2-014 verification;
-3. two production-boundary invariants are still weak:
-   - bootstrap runtime config accepts arbitrarily short non-placeholder secrets even though the design requires a high-entropy operator secret;
-   - concurrent duplicate role-assignment creation can race past the application pre-check and hit the partial unique index as an unhandled IntegrityError instead of resolving idempotently.
+This task implements that human-admin authentication boundary.
 
-Close these only. Do not expand into OIDC or broader admin CRUD.
+Do not build the React web console yet. Build the backend/session contracts the console will use.
 
 ## Compaction Recovery
 
-If context is compacted/restarted/uncertain:
+If context is compacted, summarized, restarted, or uncertain:
 1. re-read AGENTS.md;
 2. re-read project_spec.md;
 3. re-read this file;
@@ -34,206 +33,558 @@ If context is compacted/restarted/uncertain:
 5. inspect git status and recent commits;
 6. continue from repository state.
 
-current-task.md is authoritative.
+docs/development/current-task.md is authoritative.
 
 ## Before You Start
 
-- Work on branch v2; pull latest origin/v2.
-- Read the four canonical files plus:
-  - docs/architecture/security.md
-  - docs/architecture/admin-api.md
-  - src/aethergate/config.py
-  - src/aethergate/identity/admin.py
-  - src/aethergate/identity/authorization.py
-  - role-assignment persistence/model code
-  - tests/test_admin_auth.py
-  - tests/test_admin_crud.py
-- Preserve all AGV2-014 anti-enumeration and service-layer authorization semantics.
-- Do not touch legacy v1 app/ or frontend/src/.
-- Do not commit unrelated files.
+1. Work on branch v2 and pull latest origin/v2.
+2. Read:
+   - AGENTS.md
+   - project_spec.md
+   - docs/development/current-task.md
+   - docs/development/agent-handoff.md
+   - docs/architecture/security.md
+   - docs/architecture/admin-api.md
+   - docs/contracts/domain-model.md
+   - docs/contracts/admin-v1-foundation.md
+   - current Principal / RoleAssignment / AdminRequestContext code
+   - current admin auth dependencies and error handlers
+3. Preserve all service-account admin and inference authentication behavior.
+4. Do not modify/delete legacy v1 app/ or frontend/src/.
+5. Do not commit unrelated local/untracked files.
+6. Do not implement JWT/OIDC signature verification cryptography by hand when a vetted standards-aware
+   library can provide it.
 
-## 1. Bootstrap secret strength guard
+## Goal
 
-The development helper already generates a strong token using secrets.token_urlsafe(32), but Settings currently accepts any non-placeholder non-empty string.
+A human administrator can authenticate through an external OpenID Connect provider using the
+Authorization Code flow with PKCE and receive a server-managed AetherGate session.
 
-Add a runtime validation guard suitable for production-facing configuration.
+That session authenticates the human as a durable AetherGate Principal and authorizes all admin
+requests through the existing RoleAssignment/RBAC service.
+
+No OIDC access token, ID token, client secret, session bearer secret, or bootstrap secret is stored in
+browser JavaScript storage.
+
+## 1. OIDC provider configuration
+
+Add typed runtime configuration for one OIDC provider in this phase.
+
+At minimum:
+- issuer URL;
+- client ID;
+- client secret when the provider requires one;
+- configured redirect/callback URL;
+- requested scopes, with openid required;
+- optional display/provider name;
+- enable/disable flag.
 
 Requirements:
-- no built-in/default bootstrap token;
-- empty/unset still disables bootstrap;
-- reject obvious placeholders as today;
-- reject trivially short configured bootstrap tokens;
-- preferred minimum: at least 32 characters of operator-provided secret material;
-- do not claim a length check proves entropy; docs must still require randomly generated high-entropy secrets;
-- existing dev helper remains valid;
-- token remains SecretStr and never logged.
+- issuer must be HTTPS in production;
+- localhost/internal HTTP may be permitted only in explicit dev/test mode for the local verification IdP;
+- client secret is SecretStr and never logged;
+- no default client secret;
+- openid scope is mandatory;
+- redirect URI must be fixed/configured, never accepted from an arbitrary request parameter;
+- no user-controlled discovery/JWKS/token endpoint URL.
 
-Add tests for:
-- unset accepted;
-- generated dev-format token accepted;
-- short arbitrary token rejected;
-- placeholder rejected;
-- token value does not appear in validation/log output.
+Use OIDC discovery from the configured issuer. Cache discovery/JWKS safely with bounded refresh.
 
-No migration should be needed.
+## 2. Authorization Code + PKCE
 
-## 2. Concurrent duplicate role assignment must be idempotent
+Implement standards-aware human login endpoints, for example:
 
-Current flow:
-- check for active equivalent assignment;
-- then insert;
-- DB partial unique index prevents duplicate rows.
+- GET /admin/v1/auth/oidc/login
+- GET /admin/v1/auth/oidc/callback
+- GET /admin/v1/auth/session
+- POST /admin/v1/auth/logout
 
-Under concurrent requests, both can pass the pre-check and one can receive IntegrityError.
+Exact naming may differ, but keep the surface under the admin authentication boundary and document it.
 
-Required behavior:
-- concurrent creation of the same effective active assignment never returns a raw DB/500 error;
-- exactly one active assignment row exists;
-- callers receive either the same canonical assignment or another documented deterministic idempotent success result;
-- exactly one role_assignment.created audit event exists;
-- no duplicate history/event is created merely because of the race;
-- unrelated role-assignment conflicts still surface correctly.
+Login requirements:
+- generate cryptographically random state;
+- generate nonce;
+- generate PKCE verifier/challenge using S256;
+- bind state/nonce/PKCE transaction to the initiating browser;
+- short expiration;
+- one-time consumption;
+- fixed callback URI;
+- do not place client secret/session secret in query parameters.
 
-Preferred implementation:
-- use a race-safe insert/fetch pattern or savepoint/IntegrityError translation narrowly around the active-equivalent uniqueness constraint;
-- do not swallow unrelated IntegrityError values.
+Callback requirements:
+- exact state match;
+- exchange authorization code using configured provider metadata;
+- validate ID token using provider keys and OIDC rules;
+- validate issuer;
+- validate audience/client ID;
+- validate expiration/not-before as applicable;
+- validate nonce;
+- reject unsupported/unsafe algorithms according to the selected standards library/provider metadata;
+- reject malformed/missing subject;
+- authorization code may be consumed only once;
+- no open redirect.
 
-Add a true concurrent DB-gated regression test with at least two sessions/tasks.
+Do not treat email as the identity key.
 
-## 3. Live principal-deactivation proof
+## 3. Durable external-identity link
 
-On nomnom with real admin credentials:
+Add a durable external identity link instead of storing OIDC identity fields directly on Principal in a
+provider-specific way.
 
-- create a project/principal/admin credential;
-- verify protected admin access works;
-- deactivate the principal through the admin API;
-- next protected admin request using that credential must fail immediately;
-- reactivate only for cleanup if needed;
-- no container restart required.
+Recommended shape:
+- stable ExternalIdentityId;
+- principal_id;
+- provider/issuer;
+- subject (sub);
+- optional safe display claims such as email/display name;
+- created_at;
+- last_login_at;
+- active flag if useful.
 
-Record only opaque IDs/status, not raw keys.
+Database invariants:
+- unique (issuer, subject);
+- one external identity maps to exactly one Principal;
+- subject is opaque/case-sensitive data;
+- email is not unique identity authority;
+- do not store raw ID/access/refresh tokens in this table.
 
-## 4. Live role-revocation proof
+Principal remains the authorization identity. RoleAssignment remains the authorization grant.
 
-On nomnom:
+Add migration 0012 unless a different next linear revision is required by repository state.
 
-- create a project-scoped admin credential with an active role assignment;
-- verify an allowed protected action works;
-- revoke the role assignment while credential remains otherwise valid;
-- next protected request requiring that role must fail immediately;
-- credential metadata remains active;
-- no stale role authority survives a new HTTP request.
+## 4. Human principal provisioning/linking
 
-This must exercise the real API/container/DB path, not only an in-process test.
+Do not automatically grant administrative roles based solely on an IdP claim.
 
-## 5. Real inference regression — required now
+Use a safe phase-1 human provisioning policy.
 
-The AGV2-014 task required this but it was deferred.
+Preferred model:
+- an already-authorized system_admin creates a USER Principal in an AetherGate project and explicitly
+  links/authorizes an OIDC identity by issuer + subject, OR
+- first successful OIDC login may create an unprivileged USER Principal only if an explicit config
+  flag permits just-in-time provisioning; it receives no admin role until a system_admin grants one.
 
-Use scripts/dev/v2 devseed or equivalent dev-safe setup as needed.
+No role may be created from email domain, group name, username, or arbitrary claim unless an explicit
+mapping feature is designed in a later task.
 
-With a real inference-audience credential and AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false:
+Requirements:
+- unknown identity without enabled JIT policy is denied safely;
+- linked inactive principal is denied;
+- disabled external link is denied if implemented;
+- role revocation immediately affects the next session-authenticated request;
+- project/principal deactivation immediately affects the next request;
+- existing service-account principals continue unchanged.
 
-- official OpenAI Python SDK non-stream chat completion succeeds;
-- official SDK streaming chat completion succeeds;
-- admin credential still fails on /v1/models and /v1/chat/completions;
-- inference credential still fails on /admin/v1/whoami;
-- persisted request attribution remains correct.
+## 5. AdminRequestContext must support multiple authentication methods
 
-Use the current dynamic AetherGate port and current backend/model; do not assume the prior port.
+Do not invent a fake ApiCredential for a browser session.
 
-## 6. Regression
+Refine the admin request context so the actor can be authenticated by:
+- admin API credential; or
+- human browser session.
 
-Re-run:
-- full containerized test suite;
-- admin anti-enumeration tests;
-- project/principal CRUD;
-- role delegation/escalation defense;
-- bootstrap one-use/concurrent behavior;
-- queued inference credential revocation;
-- scheduler/quota/accounting suites;
-- migration head / empty-to-latest checks.
+Represent authentication method explicitly.
 
-Baseline before this task: 306 passing tests.
+At minimum expose internally:
+- principal_id;
+- project_id;
+- active role assignments;
+- authentication kind (service credential vs browser session);
+- api_credential_id when applicable;
+- browser_session_id when applicable;
+- credential scopes when applicable.
+
+Authorization decisions must continue to use the same centralized RBAC engine.
+
+Service-account admin endpoints must remain backward compatible.
+
+## 6. Server-managed browser sessions
+
+Persist authoritative browser sessions in PostgreSQL.
+
+At minimum:
+- stable session ID;
+- principal ID;
+- one-way verifier/hash for the raw session cookie value;
+- created_at;
+- last_seen_at or equivalent;
+- idle_expires_at;
+- absolute_expires_at;
+- revoked_at;
+- CSRF verifier/state;
+- safe OIDC login metadata if necessary, but no provider token secrets.
+
+Session cookie:
+- cryptographically random >=256-bit value;
+- raw value returned only in Set-Cookie;
+- PostgreSQL stores verifier/hash, not raw cookie;
+- Secure in production;
+- HttpOnly;
+- SameSite=Lax unless documented provider flow requires a stricter/different safe setting;
+- Path restricted appropriately;
+- no session token in URL;
+- no LocalStorage/sessionStorage auth token.
+
+Define configurable idle and absolute lifetimes with safe defaults.
+
+Do not update last_seen_at on every request if doing so would create an avoidable hot row; use a
+throttled update or intentionally defer it while enforcing expiration correctly.
+
+## 7. Session revocation and logout
+
+Logout must durably revoke the server session and clear the browser cookie.
+
+Requirements:
+- repeated logout is safe/idempotent;
+- revoked session fails next request;
+- expired session fails;
+- inactive project/principal fails;
+- role revocation does not require session destruction; next request re-resolves active assignments
+  and loses authority;
+- do not depend only on cookie deletion for revocation.
+
+Provide service/repository support for listing/revoking a user's sessions later, but full session-admin
+CRUD is not required in this task.
+
+## 8. CSRF protection
+
+Cookie-authenticated state-changing admin requests require CSRF protection.
+
+Use a server-backed synchronizer-token design or another well-established design compatible with the
+future React console.
+
+Recommended:
+- create a random CSRF token when session is established;
+- store only a verifier/hash with the session;
+- expose the raw CSRF token through a safe session/bootstrap response for the in-memory web client;
+- require a header such as X-CSRF-Token for POST/PATCH/PUT/DELETE requests authenticated by browser
+  session;
+- compare in constant time;
+- rotate token when session rotates if session rotation is implemented.
+
+Requirements:
+- GET/HEAD safe methods do not require CSRF;
+- Bearer-authenticated service-account requests do not require CSRF because they do not use ambient
+  cookie authority;
+- missing/invalid CSRF => fixed 403;
+- Origin/Referer validation may be added as defense-in-depth but is not a substitute for the CSRF token.
+
+Never put the authentication session secret in a readable CSRF cookie.
+
+## 9. Session fixation / login transaction safety
+
+Prevent session fixation.
+
+Requirements:
+- no authenticated session exists before successful callback;
+- successful OIDC callback creates a fresh random session;
+- any previous session cookie is replaced;
+- failed callback creates no authenticated session;
+- state/nonce/PKCE transaction is one-time and expires;
+- replayed callback fails.
+
+## 10. Admin authentication dependency unification
+
+Protected /admin/v1 endpoints must accept either:
+- valid admin Bearer credential; or
+- valid browser session cookie.
+
+The resulting AdminRequestContext must flow into the same service-layer authorization code.
+
+Precedence/ambiguity:
+- define behavior if both cookie and Authorization header are present;
+- preferred: a supplied Authorization header is authoritative and must authenticate successfully;
+  do not silently fall back to cookie when an invalid header is supplied;
+- CSRF applies only when the selected auth mechanism is browser session.
+
+Keep bootstrap separate and one-use as today.
+
+## 11. Session/API contracts
+
+Add transport-independent DTOs for at least:
+- OIDC login/start result if the endpoint does not redirect directly;
+- current human session / whoami metadata;
+- CSRF token delivery;
+- logout result;
+- safe external identity metadata for admin read operations if exposed.
+
+Do not expose:
+- ID token;
+- access token;
+- refresh token;
+- session hash/verifier;
+- raw session cookie value in JSON;
+- client secret.
+
+whoami/session responses may expose safe issuer/provider name and subject only if the product actually
+needs it; prefer minimal identity metadata.
+
+## 12. Audit
+
+Create immutable safe audit events for at least:
+- human login success;
+- human login failure category if useful and safe;
+- session logout/revoke;
+- external identity link/create if this task exposes such an admin action.
+
+Audit actor:
+- login success may identify the resulting principal;
+- pre-auth failures have no actor;
+- never put authorization code, ID token, access token, refresh token, state, nonce, PKCE verifier,
+  cookie/session secret, or CSRF raw token in audit metadata.
+
+## 13. Development/live verification provider
+
+The task must be testable without depending on an external Internet IdP.
+
+Use a deterministic local OIDC test provider or standards-aware mock service inside the test/dev
+environment.
+
+Requirements:
+- no real company IdP credentials committed;
+- provider supports discovery, authorization code, PKCE S256, token exchange, and signed ID tokens;
+- deterministic automated tests remain offline;
+- live nomnom verification uses this local/internal test IdP or an equivalent controlled fixture.
+
+Do not add a heavyweight production dependency solely for tests if a small standards-compliant fixture
+is sufficient.
+
+## 14. Real nomnom verification — required
+
+Use dynamic host ports.
+
+### A. OIDC happy path
+- configure local test IdP;
+- create/link a USER Principal with an admin role;
+- initiate login;
+- complete authorization code + PKCE flow;
+- callback creates session;
+- browser/session whoami succeeds;
+- no Bearer admin key is required for the browser request.
+
+### B. Cookie properties
+Prove Set-Cookie has expected properties for the environment:
+- HttpOnly;
+- SameSite;
+- Secure in production-mode configuration;
+- appropriate Path;
+- no raw token in response JSON or URL.
+
+### C. State / nonce / PKCE failures
+Prove:
+- wrong state fails;
+- replayed state/callback fails;
+- wrong nonce fails;
+- bad PKCE verifier/code exchange fails;
+- no session is created on any failure.
+
+### D. Unknown identity
+With JIT disabled:
+- valid IdP identity not linked to AetherGate => denied;
+- no privileged Principal/RoleAssignment is created.
+
+If JIT unprivileged provisioning is implemented:
+- principal is created with zero roles;
+- protected admin operation remains denied.
+
+### E. RBAC continuity
+- human system_admin can perform deployment action;
+- human project_admin(A) can administer A;
+- human project_admin(A) cannot enumerate B;
+- human project_viewer(A) can read but not write;
+- revoke role during active session and prove next protected request loses access without relogin.
+
+### F. Principal/project deactivation
+During an active session:
+- deactivate principal => next request rejected;
+- reactivate if needed;
+- deactivate project => next request rejected.
+
+### G. CSRF
+Using browser-session auth:
+- GET works without CSRF;
+- state-changing request without token => 403;
+- wrong token => 403;
+- correct token => succeeds.
+
+Using Bearer admin service credential:
+- same state-changing endpoint remains usable without browser CSRF token.
+
+### H. Logout
+- logout with correct CSRF succeeds;
+- cookie cleared;
+- DB session revoked;
+- replaying old cookie fails;
+- repeated logout is safe.
+
+### I. Audience / existing-auth regression
+- inference credential still cannot call admin;
+- admin service credential still cannot call inference;
+- admin service credential still works on admin endpoints;
+- OIDC browser session is admin-only and cannot authenticate the OpenAI inference surface.
+
+### J. Real inference regression
+With AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false:
+- official OpenAI Python SDK non-stream completion succeeds using inference credential;
+- streaming completion succeeds;
+- persisted attribution remains correct.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
-1. short bootstrap token rejected;
-2. strong generated bootstrap token accepted;
-3. bootstrap secret absent from validation/log output;
-4. concurrent duplicate role assignment yields one active assignment;
-5. concurrent duplicate assignment yields one created audit event;
-6. concurrent duplicate assignment does not expose IntegrityError/500;
-7. unrelated role-assignment integrity failure is not silently swallowed;
-8. principal deactivation still invalidates admin authentication;
-9. role revocation removes authority on next request;
-10. existing 306-test baseline remains green or higher.
+
+1. OIDC config validation;
+2. production issuer HTTPS enforcement;
+3. discovery issuer mismatch rejected;
+4. login state entropy/expiry;
+5. nonce validation;
+6. PKCE S256 generation/use;
+7. state one-time consumption;
+8. authorization-code callback replay rejected;
+9. ID token issuer validation;
+10. ID token audience validation;
+11. ID token expiry validation;
+12. subject required;
+13. unique issuer+subject external identity;
+14. email not used as unique identity key;
+15. unknown identity denied with JIT off;
+16. JIT path unprivileged if implemented;
+17. inactive linked principal denied;
+18. service credential AdminRequestContext still works;
+19. browser-session AdminRequestContext works without fake credential;
+20. session raw cookie never persisted;
+21. session hash lookup;
+22. session idle expiry;
+23. session absolute expiry;
+24. revoked session denied;
+25. cookie attributes;
+26. session fixation prevented;
+27. CSRF missing/wrong/correct;
+28. Bearer admin mutation does not require CSRF;
+29. invalid supplied Authorization never falls through to valid cookie;
+30. role revocation reflected on next session request;
+31. project/principal deactivation reflected on next session request;
+32. logout durable/idempotent;
+33. audit contains no OIDC/session/CSRF secrets;
+34. migration 0011 -> 0012;
+35. empty DB -> latest;
+36. existing 315-test baseline remains green or higher;
+37. official SDK inference regressions remain green.
 
 ## Migration
 
-Do not add a migration unless absolutely required.
+Do not rewrite migrations 0001 through 0011.
 
-Do not modify migrations 0001 through 0011.
+Add migration 0012 for external identities, browser sessions, OIDC login transactions, and required
+indexes/constraints.
 
-If no migration is needed, say so explicitly in the handoff.
+Requirements:
+- live 0011 -> 0012 succeeds;
+- empty DB -> latest succeeds;
+- no raw token/session/cookie/nonce/PKCE/client secret invented or persisted by migration;
+- existing service-account credentials and roles remain unchanged.
+
+## Security / logging
+
+Never log or persist in audit:
+- OIDC client secret;
+- authorization code;
+- ID token;
+- access token;
+- refresh token;
+- raw state;
+- raw nonce;
+- PKCE verifier;
+- raw session cookie;
+- raw CSRF token;
+- API keys;
+- bootstrap token.
+
+Safe logs may use gateway request ID, opaque principal/session/external-identity IDs, issuer hostname,
+and fixed failure category.
+
+Add canary tests for redaction.
 
 ## Documentation
 
 Update:
 - docs/architecture/security.md
-- docs/architecture/admin-api.md if concurrency semantics need mention
+- docs/architecture/admin-api.md
+- docs/contracts/domain-model.md
+- docs/contracts/admin-v1-foundation.md
 - docs/development/README.md
 - docs/development/agent-handoff.md
 
 Document:
-- bootstrap minimum-length guard is only a floor, not an entropy proof;
-- dev helper generates strong random bootstrap material;
-- duplicate role grant is concurrency-safe/idempotent;
-- live principal/role revocation and real SDK inference are now complete.
+- OIDC authorization-code + PKCE flow;
+- external identity linking;
+- session cookie attributes/lifetimes;
+- CSRF design;
+- Bearer-vs-cookie precedence;
+- role/project/principal revalidation;
+- no automatic privilege from IdP claims;
+- local test IdP strategy.
 
 Do not modify the dated audit.
 
+## Still Deferred
+
+Do not implement:
+- OAuth device flow for Linux CLI;
+- React web console;
+- IdP group-to-role mapping;
+- SCIM;
+- multiple OIDC providers;
+- SAML;
+- full remaining catalog/accounting/queue admin CRUD;
+- Responses API;
+- embeddings;
+- v1 migration.
+
 ## Verification Before Commit
 
-- full containerized suite;
+- full containerized test suite;
+- migration 0011 -> 0012;
+- empty DB -> latest;
 - ruff/lint;
 - git diff --check;
-- secret scan;
-- auth/bootstrap log canary checks;
-- migration head checks;
+- secret/token log canary checks;
 - legacy v1 untouched;
 - dated audit unchanged;
-- all live scenarios above complete.
+- all required local-IdP/live nomnom scenarios completed.
 
 ## Handoff
 
 Include:
-- implementation/verification commit(s);
-- bootstrap strength rule;
-- concurrent role-assignment behavior;
-- live principal-deactivation result;
-- live role-revocation result;
-- real SDK non-stream/stream result;
-- audience separation result;
+- implementation commit(s);
+- migration revision;
+- OIDC library/validation approach;
+- external identity model;
+- session model and cookie properties;
+- CSRF model;
+- authentication precedence;
+- human provisioning/linking policy;
+- local test IdP strategy;
+- live state/nonce/PKCE/replay evidence;
+- live RBAC/deactivation/revocation evidence;
+- real SDK inference result;
 - final test count;
-- dynamic AetherGate port;
-- current backend/model;
-- explicit migration/no-migration decision;
+- dynamic port/backend;
 - issues/risks;
 - exactly one recommended next step.
 
-Never include raw bootstrap tokens, API keys, Authorization headers, hashes, provider secrets, prompt/completion bodies, or large logs.
+Never include raw OIDC/session/CSRF/API/bootstrap secrets, tokens, prompt/completion bodies, or large logs.
 
 ## Commit and Push
 
 Use conventional commits on v2.
 
 Suggested primary commit:
-fix(admin): close identity verification and RBAC race gaps
+feat(identity): add OIDC human sessions and CSRF protection
 
 Push all completed commits to origin/v2.
 Never push directly to main.
-Do not ask whether to commit or push.
+Do not ask whether to commit/push.
 
-The task is complete only when all stated live and automated criteria are satisfied and origin/v2 contains the implementation and updated handoff.
+The task is complete only when all live and automated criteria are met and origin/v2 contains the
+implementation and updated handoff.
