@@ -14,6 +14,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["dev", "test", "prod"]
 
+# Minimum configured bootstrap-token length. This is only a floor against
+# trivially short/guessable operator secrets, NOT a proof of entropy; operators
+# must still supply randomly generated high-entropy material (the dev helper
+# uses ``secrets.token_urlsafe(32)``).
+MIN_BOOTSTRAP_TOKEN_LENGTH = 32
+
 
 class Settings(BaseSettings):
     """Runtime settings. Environment variables are read case-insensitively."""
@@ -88,16 +94,20 @@ class Settings(BaseSettings):
 
     @field_validator("bootstrap_token", mode="after")
     @classmethod
-    def _reject_placeholder_bootstrap_token(
-        cls, value: SecretStr | None
-    ) -> SecretStr | None:
-        if value is not None:
-            raw = value.get_secret_value().strip()
-            placeholder = {"changeme", "change-me", "replaceme", "replace-me", "bootstrap"}
-            if raw.lower() in placeholder:
-                raise ValueError("bootstrap_token must not be a placeholder")
-            if not raw:
-                return None
+    def _validate_bootstrap_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value().strip()
+        placeholder = {"changeme", "change-me", "replaceme", "replace-me", "bootstrap"}
+        if raw.lower() in placeholder:
+            raise ValueError("bootstrap_token must not be a placeholder")
+        if not raw:
+            return None
+        if len(raw) < MIN_BOOTSTRAP_TOKEN_LENGTH:
+            raise ValueError(
+                "bootstrap_token must be at least "
+                f"{MIN_BOOTSTRAP_TOKEN_LENGTH} characters"
+            )
         return value
 
     @model_validator(mode="after")

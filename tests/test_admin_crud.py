@@ -43,7 +43,7 @@ pytestmark = pytest.mark.skipif(
     TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set"
 )
 
-BOOTSTRAP_TOKEN = "test-bootstrap-secret"
+BOOTSTRAP_TOKEN = "test-bootstrap-secret-0123456789abcdefghij"
 ADMIN_SCOPE_VALUES = [s.value for s in rbac.ADMIN_PERMISSIONS]
 ADMIN_SCOPES = rbac.ADMIN_PERMISSIONS
 

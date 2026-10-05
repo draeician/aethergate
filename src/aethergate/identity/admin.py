@@ -413,7 +413,10 @@ async def create_role_assignment(
 
     The caller may never grant a role/scope broader than its own authority
     (enforced by ``authorize_role_grant``). Duplicate active equivalents are
-    idempotent and emit no second audit event.
+    idempotent: a sequential duplicate returns the existing assignment, and a
+    concurrent duplicate that races past the pre-check is translated back to the
+    canonical winner via the partial unique index (savepoint + IntegrityError
+    recovery). Exactly one ``role_assignment.created`` audit event is emitted.
     """
     authorize_role_grant(context, role, resource_scope_type, resource_id)
 
@@ -432,17 +435,31 @@ async def create_role_assignment(
     if principal is None or not principal.is_active:
         raise AdminResourceNotFound()
 
-    assignment = await repository.create_role_assignment(
-        session,
-        domain.RoleAssignment(
-            id=RoleAssignmentId(_new_id()),
-            principal_id=principal_id,
-            role=role,
-            resource_scope_type=resource_scope_type,
-            resource_id=resource_id,
-            created_by=context.principal_id,
-        ),
+    assignment = domain.RoleAssignment(
+        id=RoleAssignmentId(_new_id()),
+        principal_id=principal_id,
+        role=role,
+        resource_scope_type=resource_scope_type,
+        resource_id=resource_id,
+        created_by=context.principal_id,
     )
+
+    try:
+        async with session.begin_nested():
+            assignment = await repository.create_role_assignment(session, assignment)
+    except IntegrityError:
+        # A concurrent request inserted an equivalent active assignment between
+        # our pre-check and our insert; the partial unique index rejected ours.
+        # Resolve idempotently by re-reading the winner. If no equivalent
+        # exists, the IntegrityError was for an unrelated constraint, so it is
+        # re-raised rather than swallowed.
+        winner = await repository.find_active_equivalent_assignment(
+            session, principal_id, role, resource_scope_type, resource_id
+        )
+        if winner is not None:
+            return winner
+        raise
+
     await _write_audit(
         session,
         actor_principal_id=context.principal_id,

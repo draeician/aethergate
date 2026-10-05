@@ -86,6 +86,11 @@ resolves any target; `project_admin`/`project_viewer` resolve only their authori
 `project_viewer` only within its own project; `project_viewer` cannot mutate roles; no caller may grant
 a role/scope broader than its own authority (enforced centrally in the service, not the router).
 
+A duplicate active-equivalent role assignment is idempotent and concurrency-safe: a concurrent
+duplicate that races past the application pre-check is translated back to the canonical winner via the
+partial unique index (savepoint + `IntegrityError` recovery), producing exactly one active row and one
+`role_assignment.created` audit event. Unrelated `IntegrityError`s are re-raised rather than swallowed.
+
 ### Generic credential management
 
 `/admin/v1/credentials` administers client credentials of either audience. `admin:credentials:write`

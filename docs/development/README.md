@@ -51,6 +51,9 @@ scripts/dev/v2 <command>
   content encryption) and `AETHERGATE_BOOTSTRAP_TOKEN` (the one-use admin bootstrap secret) if
   absent. All are required and never committed/logged; the bootstrap token should be removed after
   the initial admin bootstrap.
+- The bootstrap token has a minimum-length floor (32 characters) and rejects placeholders; empty/unset
+  disables bootstrap. The floor is **not** an entropy proof — the dev helper generates strong random
+  material (`agb_ + secrets.token_urlsafe(32)`), and operators must supply high-entropy secrets.
 
 ## Endpoints
 
@@ -81,7 +84,9 @@ role assignment granting the needed `admin:*` permission (`system_admin` deploym
 `project_admin`/`project_viewer` scoped to one project). Admin errors use
 `{"error":{"code","message","request_id"}}`; auth/authorization/bootstrap failures are fixed and
 indistinguishable. Opaque-ID read/mutate operations are non-enumerating across project boundaries: a
-nonexistent ID and a cross-project ID both return `404 not_found`.
+nonexistent ID and a cross-project ID both return `404 not_found`. Duplicate active-equivalent role
+assignments are idempotent and concurrency-safe (a concurrent duplicate resolves to the same
+canonical assignment with exactly one `role_assignment.created` audit event).
 
 Inference is authenticated with an AetherGate-issued Bearer API key
 (`Authorization: Bearer agk_...`). A missing/invalid/wrong-scheme/malformed header returns a

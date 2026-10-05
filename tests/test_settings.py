@@ -21,6 +21,7 @@ def _clear_db_env(monkeypatch):
         "AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS",
         "AETHERGATE_UPSTREAM_ALLOWLIST",
         "AETHERGATE_QUEUE_KEY",
+        "AETHERGATE_BOOTSTRAP_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -131,3 +132,43 @@ def test_heartbeat_and_lease_must_be_positive():
 def test_default_scheduler_timing_is_valid():
     settings = Settings(database_url="postgresql://x")
     assert settings.worker_heartbeat_seconds < settings.worker_lease_seconds
+
+
+# --- bootstrap token strength guard -------------------------------------------
+
+
+def test_bootstrap_token_unset_disables_bootstrap():
+    settings = Settings(database_url="postgresql://x")
+    assert settings.bootstrap_token is None
+
+
+def test_bootstrap_token_generated_dev_format_accepted():
+    import secrets
+
+    token = "agb_" + secrets.token_urlsafe(32)
+    settings = Settings(database_url="postgresql://x", bootstrap_token=token)
+    assert settings.bootstrap_token is not None
+    assert settings.bootstrap_token.get_secret_value() == token
+
+
+def test_bootstrap_token_short_arbitrary_rejected():
+    with pytest.raises(ValidationError):
+        Settings(database_url="postgresql://x", bootstrap_token="short")
+
+
+def test_bootstrap_token_placeholder_rejected():
+    for placeholder in ("changeme", "CHANGE-ME", "replaceme", "bootstrap"):
+        with pytest.raises(ValidationError):
+            Settings(database_url="postgresql://x", bootstrap_token=placeholder)
+
+
+def test_bootstrap_token_never_appears_in_output():
+    token = "agb_" + "x" * 32
+    settings = Settings(database_url="postgresql://x", bootstrap_token=token)
+    assert token not in repr(settings)
+    assert token not in str(settings)
+
+
+def test_bootstrap_token_whitespace_only_disables():
+    settings = Settings(database_url="postgresql://x", bootstrap_token="   ")
+    assert settings.bootstrap_token is None

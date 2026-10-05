@@ -7,6 +7,7 @@ import asyncio
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from aethergate.config import Settings
@@ -44,7 +45,7 @@ pytestmark = pytest.mark.skipif(
     TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set"
 )
 
-BOOTSTRAP_TOKEN = "test-bootstrap-secret"
+BOOTSTRAP_TOKEN = "test-bootstrap-secret-0123456789abcdefghij"
 ADMIN_SCOPES = rbac.ADMIN_PERMISSIONS
 
 
@@ -263,6 +264,134 @@ async def test_duplicate_active_assignment_prevented(admin_engine, admin_factory
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
             )
             assert first.id == second.id
+
+
+async def test_concurrent_duplicate_assignment_idempotent(
+    admin_engine, admin_factory, monkeypatch
+):
+    await reset_schema(admin_engine)
+    monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
+    sa_ctx = await _system_admin_context(admin_factory)
+    async with admin_factory() as s:
+        async with s.begin():
+            proj = await repository.create_project(
+                s, domain.Project(id=ProjectId("proj-conc"), name="proj-conc")
+            )
+            principal = await repository.create_principal(
+                s, domain.Principal(
+                    id=PrincipalId("pconc"), project_id=proj.id,
+                    kind=PrincipalKind.SERVICE_ACCOUNT, name="pconc",
+                )
+            )
+
+    async def attempt() -> domain.RoleAssignment:
+        async with admin_factory() as s:
+            async with s.begin():
+                return await admin_service.create_role_assignment(
+                    s, context=sa_ctx, principal_id=principal.id,
+                    role=Role.PROJECT_ADMIN,
+                    resource_scope_type=ResourceScopeType.PROJECT,
+                    resource_id=proj.id,
+                )
+
+    results = await asyncio.gather(*(attempt() for _ in range(6)))
+    ids = {r.id for r in results}
+    assert len(ids) == 1
+
+    async with admin_factory() as s:
+        async with s.begin():
+            active = await repository.list_active_role_assignments(s, principal.id)
+            events = await repository.list_audit_events(s)
+    assert len(active) == 1
+    created = [e for e in events if e.action == "role_assignment.created"]
+    assert len(created) == 1
+    assert created[0].resource_id == str(next(iter(ids)))
+
+
+async def test_duplicate_insert_recovers_via_integrity_translation(
+    admin_engine, admin_factory, monkeypatch
+):
+    """A duplicate that races past the pre-check is translated idempotently."""
+    await reset_schema(admin_engine)
+    monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
+    sa_ctx = await _system_admin_context(admin_factory)
+    async with admin_factory() as s:
+        async with s.begin():
+            proj = await repository.create_project(
+                s, domain.Project(id=ProjectId("proj-dup2"), name="proj-dup2")
+            )
+            principal = await repository.create_principal(
+                s, domain.Principal(
+                    id=PrincipalId("pdup2"), project_id=proj.id,
+                    kind=PrincipalKind.SERVICE_ACCOUNT, name="pdup2",
+                )
+            )
+    async with admin_factory() as s:
+        async with s.begin():
+            winner = await admin_service.create_role_assignment(
+                s, context=sa_ctx, principal_id=principal.id, role=Role.PROJECT_ADMIN,
+                resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
+            )
+
+    real_find = repository.find_active_equivalent_assignment
+    forced = {"miss": True}
+
+    async def _fake_find(session, principal_id, role, scope, resource_id):
+        if forced["miss"]:
+            forced["miss"] = False
+            return None
+        return await real_find(session, principal_id, role, scope, resource_id)
+
+    monkeypatch.setattr(repository, "find_active_equivalent_assignment", _fake_find)
+
+    async with admin_factory() as s:
+        async with s.begin():
+            result = await admin_service.create_role_assignment(
+                s, context=sa_ctx, principal_id=principal.id, role=Role.PROJECT_ADMIN,
+                resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
+            )
+    assert result.id == winner.id
+
+    async with admin_factory() as s:
+        async with s.begin():
+            active = await repository.list_active_role_assignments(s, principal.id)
+            events = await repository.list_audit_events(s)
+    assert len(active) == 1
+    assert len([e for e in events if e.action == "role_assignment.created"]) == 1
+
+
+async def test_unrelated_assignment_integrity_error_not_swallowed(
+    admin_engine, admin_factory, monkeypatch
+):
+    await reset_schema(admin_engine)
+    monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
+    sa_ctx = await _system_admin_context(admin_factory)
+    async with admin_factory() as s:
+        async with s.begin():
+            proj = await repository.create_project(
+                s, domain.Project(id=ProjectId("proj-fk"), name="proj-fk")
+            )
+
+    ghost = domain.Principal(
+        id=PrincipalId("ghost-principal"), project_id=proj.id,
+        kind=PrincipalKind.SERVICE_ACCOUNT, name="ghost",
+    )
+    real_get_principal = repository.get_principal
+
+    async def _fake_get_principal(session, principal_id):
+        if str(principal_id) == "ghost-principal":
+            return ghost
+        return await real_get_principal(session, principal_id)
+
+    monkeypatch.setattr(repository, "get_principal", _fake_get_principal)
+
+    async with admin_factory() as s:
+        async with s.begin():
+            with pytest.raises(IntegrityError):
+                await admin_service.create_role_assignment(
+                    s, context=sa_ctx, principal_id=ghost.id, role=Role.PROJECT_ADMIN,
+                    resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
+                )
 
 
 async def test_revoked_assignment_denied(admin_engine, admin_factory, monkeypatch):

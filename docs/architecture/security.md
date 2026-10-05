@@ -123,6 +123,21 @@ principal/RBAC model.
   no project resource ID; `project_admin`/`project_viewer` must be project-scoped — enforced by CHECK
   constraints so direct writes cannot bypass application invariants. (Settled)
 
+## Identity verification hardening — bootstrap strength and RBAC race (AGV2-014V)
+
+- **Bootstrap token strength floor.** `AETHERGATE_BOOTSTRAP_TOKEN` is a `SecretStr` with no default;
+  empty/unset disables bootstrap and placeholder values are rejected. In addition, a configured token
+  shorter than 32 characters is rejected at startup. This is a **floor against trivially short/guessable
+  secrets, not a proof of entropy**; operators must still supply randomly generated high-entropy
+  material. The dev helper (`scripts/dev/v2`) generates `agb_ + secrets.token_urlsafe(32)` and remains
+  valid. The token value never appears in `repr`/validation/log output. (Settled)
+- **Concurrency-safe, idempotent role grant.** A duplicate active-equivalent role assignment is
+  idempotent both sequentially and under concurrency: a concurrent duplicate that races past the
+  application pre-check is caught by the partial unique index and translated back to the canonical
+  winner (savepoint + `IntegrityError` recovery narrowly around the active-equivalent uniqueness
+  constraint). Exactly one active row and one `role_assignment.created` audit event result; unrelated
+  `IntegrityError`s are re-raised, not swallowed. (Settled)
+
 ## Bootstrap and fail-closed startup
 
 - A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled — AGV2-013)
