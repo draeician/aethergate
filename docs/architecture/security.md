@@ -138,6 +138,67 @@ principal/RBAC model.
   constraint). Exactly one active row and one `role_assignment.created` audit event result; unrelated
   `IntegrityError`s are re-raised, not swallowed. (Settled)
 
+## Identity phase 3 — human OIDC sessions and CSRF (AGV2-015)
+
+Human administrators authenticate through an external OpenID Connect provider using the
+Authorization Code flow with PKCE and receive a server-managed browser session. The session
+authenticates a durable `Principal` and authorizes through the **same** `RoleAssignment`/RBAC
+service as service accounts. No provider token or session secret ever reaches browser
+JavaScript storage.
+
+- **OIDC provider configuration** is typed runtime config (`AETHERGATE_OIDC_*`): issuer, client ID,
+  optional client secret (`SecretStr`, never logged, no default), fixed redirect URI, requested
+  scopes (`openid` always enforced and de-duplicated), optional provider name, and an enable flag.
+  Discovery/JWKS URLs are derived **only** from the configured issuer; no user-controlled
+  discovery/JWKS/token URL is honored. The issuer must be `https://` in `prod`; HTTP is permitted
+  only in `dev`/`test` for the local verification IdP. Discovery and JWKS are cached in memory with
+  a bounded TTL and fetched over `httpx` with a short timeout. (Settled)
+- **Authorization Code + PKCE.** Login generates a cryptographically random `state`, `nonce`, and
+  PKCE `code_verifier`/S256 `code_challenge`; they are bound to the initiating browser via a
+  one-time, short-lived `oidc_login_states` transaction. The callback requires an exact `state`
+  match, exchanges the code with a fixed `redirect_uri`, and validates the ID token's `iss`, `aud`
+  (client ID), `exp`/`nbf`, and `nonce`; a missing/empty `sub` is rejected. Only asymmetric
+  algorithms (`RS*/ES*/PS*`) are accepted — `none` and symmetric `HS*` are rejected regardless of
+  provider metadata — and signature verification is delegated to PyJWT against the provider JWKS
+  (keyed by `kid`). The authorization code is consumed once; a replayed callback fails. (Settled)
+- **Durable external identity link.** `ExternalIdentity` stores a stable ID, `principal_id`,
+  `issuer`, opaque case-sensitive `subject`, optional safe display claims (`email`, `display_name`),
+  `created_at`, `last_login_at`, and `is_active`. `(issuer, subject)` is unique and is the identity
+  key; **email is never the identity key**. No ID/access/refresh token is ever persisted. (Settled)
+- **No automatic privilege from IdP claims.** A known identity resolves to its linked, active
+  principal. An unknown identity is denied unless an explicit `AETHERGATE_OIDC_JIT_PROVISIONING`
+  flag enables just-in-time provisioning, which creates an **unprivileged** `user` principal with
+  zero roles (a `system_admin` must still grant roles). No role is ever derived from email domain,
+  group, username, or arbitrary claims. (Settled)
+- **Server-managed browser sessions.** `BrowserSession` persists the authoritative session in
+  PostgreSQL: stable ID, principal ID, a **one-way SHA-256 verifier** of the raw cookie (the raw
+  value is returned only in `Set-Cookie` and never stored), `created_at`, `last_seen_at`,
+  idle/absolute expiry, `revoked_at`, and a one-way CSRF verifier. The cookie is cryptographically
+  random (>=256 bits), `HttpOnly`, `SameSite=Lax`, `Secure` in `prod`, `Path=/admin`, and never
+  appears in a URL or JSON. Idle/absolute lifetimes are configurable with safe defaults
+  (3600s / 43200s). `last_seen_at` is slid on a **throttled** basis (not per request) to avoid a hot
+  row. (Settled)
+- **Session revalidation on every request.** Resolving a session re-checks revocation, absolute and
+  idle expiry, active principal, and active project, so role revocation, principal deactivation,
+  and project deactivation all take effect on the **next** request without re-login (and without
+  destroying the session). (Settled)
+- **CSRF protection.** Cookie-authenticated `POST/PUT/PATCH/DELETE` requests require an
+  `X-CSRF-Token` header compared in constant time against a one-way verifier stored with the
+  session. `GET`/`HEAD` do not require CSRF, and Bearer-authenticated service-account requests do
+  not require CSRF (they carry no ambient cookie authority). A missing/invalid token returns a
+  fixed `403`. The CSRF token is delivered exactly once at session establishment. (Settled)
+- **Bearer-vs-cookie precedence.** A supplied `Authorization` header is authoritative: it must
+  authenticate successfully; an invalid header never falls through to a cookie. CSRF applies only
+  when the selected mechanism is the browser session. (Settled)
+- **Session fixation prevention.** No authenticated session exists before a successful callback;
+  the callback creates a fresh random session and replaces any previous cookie; a failed callback
+  creates no session; the login transaction is one-time and expires. (Settled)
+- **Audit.** Immutable events record `human.login_success`, `human.login_failed` (fixed failure
+  category only), `session.logout`, and `external_identity.linked`. Login success identifies the
+  resulting principal; pre-auth failures have no actor. Authorization code, ID/access/refresh
+  tokens, state, nonce, PKCE verifier, raw session cookie, and raw CSRF token are never logged or
+  persisted. (Settled)
+
 ## Bootstrap and fail-closed startup
 
 - A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled — AGV2-013)

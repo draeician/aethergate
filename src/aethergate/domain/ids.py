@@ -142,6 +142,18 @@ class BudgetReservationId(ResourceId):
     __slots__ = ()
 
 
+class ExternalIdentityId(ResourceId):
+    __slots__ = ()
+
+
+class BrowserSessionId(ResourceId):
+    __slots__ = ()
+
+
+class OidcLoginStateId(ResourceId):
+    __slots__ = ()
+
+
 __all__ = [
     "ResourceId",
     "ProjectId",
@@ -167,4 +179,7 @@ __all__ = [
     "BudgetPolicyId",
     "BudgetWindowId",
     "BudgetReservationId",
+    "ExternalIdentityId",
+    "BrowserSessionId",
+    "OidcLoginStateId",
 ]

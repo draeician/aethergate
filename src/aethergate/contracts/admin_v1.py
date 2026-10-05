@@ -18,6 +18,7 @@ from pydantic import Field, model_validator
 
 from aethergate.contracts.common import ContractModel
 from aethergate.domain.enums import (
+    AdminAuthenticationKind,
     BillingUnit,
     Capability,
     CredentialAudience,
@@ -30,10 +31,12 @@ from aethergate.domain.enums import (
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
+    BrowserSessionId,
     BudgetPolicyId,
     BudgetReservationId,
     EndpointId,
     ExecutionAttemptId,
+    ExternalIdentityId,
     LedgerEntryId,
     ModelAliasId,
     PricePolicyId,
@@ -181,14 +184,70 @@ class RoleAssignmentRevokeRequest(ContractModel):
 
 
 class WhoamiRead(ContractModel):
-    """Safe admin identity metadata; never includes the raw key or hash."""
+    """Safe admin identity metadata; never includes the raw key or hash.
+
+    Service-credential callers populate ``api_credential_id``/``audience``/
+    ``scopes``; browser-session callers populate ``browser_session_id`` with
+    ``authentication_kind=browser_session`` and empty/absent credential fields.
+    """
 
     principal_id: PrincipalId
     project_id: ProjectId
-    api_credential_id: ApiCredentialId
-    audience: CredentialAudience
-    scopes: tuple[CredentialScope, ...]
+    authentication_kind: AdminAuthenticationKind
+    api_credential_id: ApiCredentialId | None = None
+    browser_session_id: BrowserSessionId | None = None
+    audience: CredentialAudience | None = None
+    scopes: tuple[CredentialScope, ...] = ()
     roles: tuple[Role, ...]
+
+
+# --- Human OIDC sessions -----------------------------------------------------
+
+
+class SessionRead(ContractModel):
+    """Current human session metadata. Never includes session/csrf/oidc secrets."""
+
+    principal_id: PrincipalId
+    project_id: ProjectId
+    authentication_kind: AdminAuthenticationKind
+    browser_session_id: BrowserSessionId
+    roles: tuple[Role, ...]
+    issuer: str | None = None
+    subject: str | None = None
+
+
+class SessionEstablished(ContractModel):
+    """Result of a successful OIDC callback: session metadata plus the CSRF token.
+
+    The CSRF token is delivered exactly once here (for the in-memory web client)
+    and must be sent back in the ``X-CSRF-Token`` header on mutating requests.
+    """
+
+    session: SessionRead
+    csrf_token: str = Field(min_length=1)
+    csrf_header: str = "X-CSRF-Token"
+
+
+class LogoutResult(ContractModel):
+    revoked: bool
+
+
+class ExternalIdentityCreate(ContractModel):
+    principal_id: PrincipalId
+    issuer: str = Field(min_length=1)
+    subject: str = Field(min_length=1)
+
+
+class ExternalIdentityRead(ContractModel):
+    id: ExternalIdentityId
+    principal_id: PrincipalId
+    issuer: str
+    subject: str
+    email: str | None = None
+    display_name: str | None = None
+    created_at: datetime | None = None
+    last_login_at: datetime | None = None
+    is_active: bool
 
 
 # --- Providers --------------------------------------------------------------
@@ -553,6 +612,11 @@ __all__ = [
     "RoleAssignmentCreate",
     "RoleAssignmentRevokeRequest",
     "WhoamiRead",
+    "SessionRead",
+    "SessionEstablished",
+    "LogoutResult",
+    "ExternalIdentityCreate",
+    "ExternalIdentityRead",
     "ProviderCreate",
     "ProviderRead",
     "ProviderUpdate",

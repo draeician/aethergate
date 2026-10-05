@@ -102,6 +102,31 @@ is required; the shared identity service validates audience/scope coherence; aud
 List endpoints return `{"items":[...],"limit":N,"offset":N,"total":N}` with `limit` bounded
 `1..200` (default 50) and stable sort (created_at, id).
 
+## Human OIDC/session auth surface (AGV2-015)
+
+Human administrators authenticate with an OIDC Authorization Code + PKCE flow and receive a
+server-managed browser session that authorizes through the same RBAC engine as service accounts:
+
+- `GET /admin/v1/auth/oidc/login` — start login; `302` redirects to the configured provider's
+  authorization endpoint (state/nonce/PKCE generated server-side). `503 oidc_unavailable` if OIDC is
+  not configured/enabled.
+- `GET /admin/v1/auth/oidc/callback` — complete login (exact `state`, one-time code exchange, ID-token
+  validation). On success returns session metadata plus the one-time `csrf_token` and sets the session
+  cookie; on failure returns a fixed `401 oidc_authentication_failed` / `400 invalid_login_state` with
+  no session created.
+- `GET /admin/v1/auth/session` — resolve the current browser session (`SessionRead`).
+- `POST /admin/v1/auth/logout` — revoke the session and clear the cookie (CSRF-protected; idempotent,
+  `revoked: true/false`).
+- `POST /admin/v1/oidc/identities` — link an external identity (`principal_id`, `issuer`, `subject`) to
+  a principal (`admin:principals:write`).
+
+All protected `/admin/v1` endpoints accept either a valid `admin`-audience Bearer credential or a valid
+browser session cookie; the resulting `AdminRequestContext` flows into the same centralized
+authorization service. A supplied `Authorization` header is authoritative and never falls through to a
+cookie. Cookie-authenticated `POST/PUT/PATCH/DELETE` requests require `X-CSRF-Token`; Bearer requests
+and `GET`/`HEAD` do not. `whoami` reports `authentication_kind` (`service_credential` | `browser_session`)
+and populates `api_credential_id` or `browser_session_id` accordingly.
+
 ## Deferred
 
 - Concrete schema/OpenAPI layout for `/admin/v1` (owned by the `contracts` workstream, established first).

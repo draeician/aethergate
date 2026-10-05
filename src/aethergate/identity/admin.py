@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aethergate.config import get_settings
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import (
+    AdminAuthenticationKind,
     CredentialAudience,
     CredentialScope,
     PrincipalKind,
@@ -48,6 +49,7 @@ from aethergate.errors import (
 )
 from aethergate.identity import rbac
 from aethergate.identity import service as identity_service
+from aethergate.identity import session as session_service
 from aethergate.identity.authorization import (
     RESOURCE_CREDENTIAL,
     RESOURCE_DEPLOYMENT,
@@ -74,6 +76,7 @@ AUDIT_PROJECT_CREATED = "project.created"
 AUDIT_PROJECT_UPDATED = "project.updated"
 AUDIT_PRINCIPAL_CREATED = "principal.created"
 AUDIT_PRINCIPAL_UPDATED = "principal.updated"
+AUDIT_EXTERNAL_IDENTITY_LINKED = "external_identity.linked"
 
 INITIAL_PROJECT_NAME = "default"
 INITIAL_PRINCIPAL_NAME = "bootstrap-admin"
@@ -142,11 +145,44 @@ async def authenticate_admin(
     return domain.AdminRequestContext(
         project_id=project.id,
         principal_id=principal.id,
+        authentication_kind=AdminAuthenticationKind.SERVICE_CREDENTIAL,
         api_credential_id=credential.id,
         audience=credential.audience,
         scopes=credential.scopes,
         roles=tuple(a.role for a in assignments),
         assignments=tuple(assignments),
+    )
+
+
+async def authenticate_browser_session(
+    session: AsyncSession, raw_cookie: str
+) -> tuple[domain.AdminRequestContext, domain.BrowserSession]:
+    """Resolve a raw session cookie to a browser-session ``AdminRequestContext``.
+
+    The context has ``authentication_kind=BROWSER_SESSION``, a
+    ``browser_session_id``, empty ``scopes``/``audience``/``api_credential_id``
+    (no fake credential), and the principal's active role assignments so the
+    same centralized RBAC engine authorizes it. Returns the resolved session
+    entity so the API layer can enforce CSRF. Any failure raises
+    ``SessionInvalid`` (indistinguishable).
+    """
+    session_entity, principal = await session_service.resolve_browser_session(
+        session, raw_cookie, utcnow()
+    )
+    assignments = await repository.list_active_role_assignments(session, principal.id)
+    return (
+        domain.AdminRequestContext(
+            project_id=principal.project_id,
+            principal_id=principal.id,
+            authentication_kind=AdminAuthenticationKind.BROWSER_SESSION,
+            browser_session_id=session_entity.id,
+            api_credential_id=None,
+            audience=None,
+            scopes=(),
+            roles=tuple(a.role for a in assignments),
+            assignments=tuple(assignments),
+        ),
+        session_entity,
     )
 
 
@@ -615,8 +651,49 @@ async def revoke_credential(
     return credential
 
 
+async def link_external_identity(
+    session: AsyncSession,
+    *,
+    context: domain.AdminRequestContext,
+    principal_id: PrincipalId,
+    issuer: str,
+    subject: str,
+) -> domain.ExternalIdentity:
+    """Link an OIDC ``(issuer, subject)`` identity to a USER principal.
+
+    Authorizes the caller for principal-write over the target principal's
+    project scope (non-enumerating), then creates the durable link and writes an
+    audit event. Only a USER principal may be linked.
+    """
+    await resolve_admin_resource(
+        session,
+        context,
+        CredentialScope.ADMIN_PRINCIPALS_WRITE,
+        RESOURCE_PRINCIPAL,
+        str(principal_id),
+    )
+    identity = await session_service.link_external_identity(
+        session,
+        principal_id=principal_id,
+        issuer=issuer,
+        subject=subject,
+        now=utcnow(),
+    )
+    await _write_audit(
+        session,
+        actor_principal_id=context.principal_id,
+        action=AUDIT_EXTERNAL_IDENTITY_LINKED,
+        resource_type="external_identity",
+        resource_id=str(identity.id),
+        project_id=context.project_id,
+        metadata={"issuer": issuer, "subject": subject},
+    )
+    return identity
+
+
 __all__ = [
     "authenticate_admin",
+    "authenticate_browser_session",
     "authorize_admin",
     "bootstrap",
     "get_bootstrap_status",
@@ -629,5 +706,6 @@ __all__ = [
     "create_credential",
     "rotate_credential",
     "revoke_credential",
+    "link_external_identity",
     "utcnow",
 ]

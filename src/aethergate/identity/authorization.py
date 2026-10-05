@@ -22,7 +22,12 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import CredentialScope, ResourceScopeType, Role
+from aethergate.domain.enums import (
+    AdminAuthenticationKind,
+    CredentialScope,
+    ResourceScopeType,
+    Role,
+)
 from aethergate.domain.ids import (
     ApiCredentialId,
     PrincipalId,
@@ -53,12 +58,17 @@ def authorize_admin(
 ) -> None:
     """Authorize a protected admin action against a resolved context.
 
-    Both layers must hold: the credential must carry ``permission``, and at least
-    one active role assignment must grant the permission for the requested scope.
-    ``system_admin`` grants deployment-wide; a project-scoped role grants only
-    for its assigned project. Failures are a fixed ``AdminAuthorizationError``.
+    A service credential must carry ``permission`` in its scopes; a human browser
+    session has no credential scopes and is authorized by role assignment alone.
+    In both cases at least one active role assignment must grant the permission
+    for the requested scope. ``system_admin`` grants deployment-wide; a
+    project-scoped role grants only for its assigned project. Failures are a
+    fixed ``AdminAuthorizationError``.
     """
-    if permission not in context.scopes:
+    if (
+        context.authentication_kind is AdminAuthenticationKind.SERVICE_CREDENTIAL
+        and permission not in context.scopes
+    ):
         raise AdminAuthorizationError()
     for assignment in context.assignments:
         if not rbac.role_grants_permission(assignment.role, permission):

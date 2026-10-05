@@ -60,6 +60,21 @@ Admin CRUD DTOs (AGV2-014):
 These DTOs now back the full `/admin/v1` identity CRUD surface (project/principal/role-assignment/
 credential list/create/read/update/revoke) introduced in AGV2-014.
 
+Human OIDC/session DTOs (AGV2-015):
+
+- `SessionRead` — safe current-session metadata: `principal_id`, `project_id`,
+  `authentication_kind` (`browser_session`), `browser_session_id`, `roles`, and optional safe
+  `issuer`/`subject` display fields. Never the session cookie, CSRF token, or any OIDC token.
+- `SessionEstablished` — the successful-callback result: `session` (`SessionRead`) plus the one-time
+  `csrf_token` and the `csrf_header` name (`X-CSRF-Token`). The CSRF token is revealed exactly once
+  here for the in-memory web client and never re-exposed.
+- `LogoutResult` — `revoked: bool` (idempotent; repeated logout is safe).
+- `ExternalIdentityCreate` — `principal_id`, `issuer`, `subject` (the linking request).
+- `ExternalIdentityRead` — safe metadata: `id`, `principal_id`, `issuer`, `subject`, optional
+  `email`/`display_name`, `created_at`, `last_login_at`, `is_active`. Never raw tokens.
+- `WhoamiRead` gains `authentication_kind` and optional `browser_session_id`, distinguishing
+  service-credential vs browser-session callers (credential fields are absent for browser sessions).
+
 Quota DTOs (scheduler phase 2):
 
 - `QuotaGroupCreate` requires `provider_account_id`; `QuotaGroupRead` exposes it.

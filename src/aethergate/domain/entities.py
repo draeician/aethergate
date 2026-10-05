@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aethergate.domain.enums import (
+    AdminAuthenticationKind,
     BillingUnit,
     BudgetReservationState,
     Capability,
@@ -30,13 +31,16 @@ from aethergate.domain.enums import (
 from aethergate.domain.ids import (
     ApiCredentialId,
     AuditEventId,
+    BrowserSessionId,
     BudgetPolicyId,
     BudgetReservationId,
     BudgetWindowId,
     EndpointId,
     ExecutionAttemptId,
+    ExternalIdentityId,
     LedgerEntryId,
     ModelAliasId,
+    OidcLoginStateId,
     PricePolicyId,
     PriceSnapshotId,
     PrincipalId,
@@ -148,18 +152,82 @@ class RoleAssignment(Entity):
 class AdminRequestContext:
     """The durable context resolved from an authenticated admin request.
 
-    Carries the credential audience/scopes and the effective (active) role
-    assignments for the authenticated principal so the authorization service can
-    answer ``authorize_admin`` without re-resolving identity.
+    Carries the effective (active) role assignments for the authenticated
+    principal so the authorization service can answer ``authorize_admin``
+    without re-resolving identity. The actor may be authenticated by an admin
+    service credential (``api_credential_id`` + ``audience`` + ``scopes``) or by
+    a human browser session (``browser_session_id``, no credential). The
+    ``authentication_kind`` disambiguates the two; authorization always flows
+    through the same centralized RBAC engine.
     """
 
     project_id: ProjectId
     principal_id: PrincipalId
-    api_credential_id: ApiCredentialId
-    audience: CredentialAudience
-    scopes: tuple[CredentialScope, ...]
+    authentication_kind: AdminAuthenticationKind
     roles: tuple[Role, ...]
     assignments: tuple[RoleAssignment, ...]
+    api_credential_id: ApiCredentialId | None = None
+    browser_session_id: BrowserSessionId | None = None
+    audience: CredentialAudience | None = None
+    scopes: tuple[CredentialScope, ...] = ()
+
+
+class ExternalIdentity(Entity):
+    """A durable link from an OIDC provider identity to a Principal.
+
+    ``(issuer, subject)`` is the stable, case-sensitive identity key; email is a
+    non-authoritative display claim only. No raw ID/access/refresh token is ever
+    stored here.
+    """
+
+    id: ExternalIdentityId
+    principal_id: PrincipalId
+    issuer: str
+    subject: str
+    email: str | None = None
+    display_name: str | None = None
+    created_at: datetime | None = None
+    last_login_at: datetime | None = None
+    is_active: bool = True
+
+
+class BrowserSession(Entity):
+    """An authoritative server-managed browser session.
+
+    Only one-way verifiers (SHA-256 of the raw cookie and raw CSRF token) are
+    persisted; the raw values are returned only in ``Set-Cookie`` / the session
+    response and are never stored or logged.
+    """
+
+    id: BrowserSessionId
+    principal_id: PrincipalId
+    session_hash: str
+    csrf_token_hash: str
+    created_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    idle_expires_at: datetime
+    absolute_expires_at: datetime
+    revoked_at: datetime | None = None
+    is_active: bool = True
+
+
+class OidcLoginState(Entity):
+    """A one-time OIDC authorization-code login transaction.
+
+    Binds the random ``state``, ``nonce``, and S256 PKCE material to the
+    initiating browser. It is short-lived and consumed exactly once; the PKCE
+    verifier is required only to exchange the authorization code and is never
+    written to the audit log.
+    """
+
+    id: OidcLoginStateId
+    state: str
+    nonce: str
+    code_verifier: str
+    code_challenge: str
+    created_at: datetime | None = None
+    expires_at: datetime
+    consumed_at: datetime | None = None
 
 
 class BootstrapState(Entity):
@@ -525,6 +593,9 @@ __all__ = [
     "RequestContext",
     "RoleAssignment",
     "AdminRequestContext",
+    "ExternalIdentity",
+    "BrowserSession",
+    "OidcLoginState",
     "BootstrapState",
     "Provider",
     "SecretRef",

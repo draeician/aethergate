@@ -56,6 +56,37 @@ class Settings(BaseSettings):
         default=120.0, validation_alias="AETHERGATE_INFERENCE_TIMEOUT_SECONDS"
     )
 
+    # OIDC human identity (admin browser sessions).
+    oidc_enabled: bool = Field(default=False, validation_alias="AETHERGATE_OIDC_ENABLED")
+    oidc_issuer: str | None = Field(default=None, validation_alias="AETHERGATE_OIDC_ISSUER")
+    oidc_client_id: str | None = Field(default=None, validation_alias="AETHERGATE_OIDC_CLIENT_ID")
+    oidc_client_secret: SecretStr | None = Field(
+        default=None, validation_alias="AETHERGATE_OIDC_CLIENT_SECRET"
+    )
+    oidc_redirect_uri: str | None = Field(
+        default=None, validation_alias="AETHERGATE_OIDC_REDIRECT_URI"
+    )
+    oidc_scopes: str = Field(default="openid", validation_alias="AETHERGATE_OIDC_SCOPES")
+    oidc_provider_name: str = Field(
+        default="OIDC", validation_alias="AETHERGATE_OIDC_PROVIDER_NAME"
+    )
+    # Just-in-time provisioning of unknown external identities into a principal.
+    oidc_jit_provisioning: bool = Field(
+        default=False, validation_alias="AETHERGATE_OIDC_JIT_PROVISIONING"
+    )
+    oidc_jit_project_name: str = Field(
+        default="default", validation_alias="AETHERGATE_OIDC_JIT_PROJECT_NAME"
+    )
+    oidc_session_idle_seconds: int = Field(
+        default=3600, validation_alias="AETHERGATE_OIDC_SESSION_IDLE_SECONDS"
+    )
+    oidc_session_absolute_seconds: int = Field(
+        default=43200, validation_alias="AETHERGATE_OIDC_SESSION_ABSOLUTE_SECONDS"
+    )
+    oidc_login_ttl_seconds: int = Field(
+        default=600, validation_alias="AETHERGATE_OIDC_LOGIN_TTL_SECONDS"
+    )
+
     # Scheduler queue encryption key (Fernet). Outside PostgreSQL, never committed.
     queue_key: SecretStr | None = Field(default=None, validation_alias="AETHERGATE_QUEUE_KEY")
     # Scheduler bounds / timing.
@@ -91,6 +122,63 @@ class Settings(BaseSettings):
             for host in self.upstream_allowlist.split(",")
             if host.strip()
         }
+
+    @property
+    def oidc_scope_list(self) -> list[str]:
+        """Parsed, deduplicated requested OIDC scopes (``openid`` always first).
+
+        Accepts comma- and/or whitespace-separated input so both ``"openid,profile"``
+        and ``"openid profile email"`` work.
+        """
+        import re
+
+        scopes = [s for s in re.split(r"[\s,]+", self.oidc_scopes) if s]
+        if "openid" not in scopes:
+            scopes.insert(0, "openid")
+        return list(dict.fromkeys(scopes))
+
+    @field_validator(
+        "oidc_issuer",
+        "oidc_client_id",
+        "oidc_redirect_uri",
+        "oidc_client_secret",
+        mode="before",
+    )
+    @classmethod
+    def _empty_oidc_is_none(cls, value: object) -> object:
+        """Treat an empty env value (e.g. ``${VAR:-}`` from compose) as unset."""
+        if value is None or value == "":
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _validate_oidc(self) -> Settings:
+        if not self.oidc_enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("AETHERGATE_OIDC_ISSUER", self.oidc_issuer),
+                ("AETHERGATE_OIDC_CLIENT_ID", self.oidc_client_id),
+                ("AETHERGATE_OIDC_REDIRECT_URI", self.oidc_redirect_uri),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError("oidc enabled but missing " + ", ".join(missing))
+        if self.oidc_client_secret is not None and not self.oidc_client_secret.get_secret_value():
+            raise ValueError("oidc_client_secret must not be empty")
+        if self.oidc_session_absolute_seconds <= self.oidc_session_idle_seconds:
+            raise ValueError(
+                "oidc_session_absolute_seconds must exceed oidc_session_idle_seconds"
+            )
+        if self.oidc_login_ttl_seconds <= 0:
+            raise ValueError("oidc_login_ttl_seconds must be positive")
+        # An HTTP issuer is allowed only in dev/test; production requires HTTPS.
+        if self.app_env == "prod" and self.oidc_issuer is not None:
+            if not self.oidc_issuer.startswith("https://"):
+                raise ValueError("oidc_issuer must use https:// in production mode")
+        return self
 
     @field_validator("bootstrap_token", mode="after")
     @classmethod

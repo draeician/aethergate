@@ -139,6 +139,47 @@ class BootstrapAlreadyCompleted(DomainError):
     """Bootstrap has already been completed and cannot be run again."""
 
 
+class OidcConfigurationError(DomainError):
+    """The OIDC provider is missing, unreachable, or misconfigured.
+
+    Raised when discovery/JWKS cannot be fetched or validated. The message never
+    includes secrets (client secret, tokens, verifier material).
+    """
+
+
+class OidcAuthenticationFailed(DomainError):
+    """An OIDC login/callback failed validation (fixed, indistinguishable).
+
+    Covers discovery issuer mismatch, ID-token issuer/audience/expiry/nonce
+    validation, unsafe algorithms, and token exchange failures. The message is
+    deliberately fixed so a client cannot probe which validation failed.
+    """
+
+
+class OidcLoginStateInvalid(DomainError):
+    """An OIDC login transaction is missing, expired, consumed, or mismatched.
+
+    Covers state/nonce/PKCE verifier mismatches and one-time consumption
+    violations. The message is fixed and never echoes the supplied material.
+    """
+
+
+class SessionInvalid(DomainError):
+    """A browser session cookie is missing, invalid, expired, or revoked.
+
+    Raised by the admin context resolver; mapped to a fixed 401. The message is
+    deliberately indistinguishable from a nonexistent session.
+    """
+
+
+class CsrfValidationError(DomainError):
+    """A CSRF token is missing or invalid for a cookie-authenticated mutation.
+
+    Raised only for browser-session authentication on mutating methods. Mapped to
+    a fixed 403; the message never reveals the expected token.
+    """
+
+
 class CredentialLifecycleError(DomainError):
     """A credential create/rotate request violates a lifecycle invariant.
 

@@ -34,6 +34,9 @@ EXPECTED_TABLES = {
     "role_assignments",
     "bootstrap_state",
     "audit_events",
+    "external_identities",
+    "browser_sessions",
+    "oidc_login_states",
     "providers",
     "provider_accounts",
     "endpoints",
@@ -348,6 +351,39 @@ def test_migration_0010_to_0011() -> None:
         )
         assert "ck_role_assignments_project_role_project_scope" in _check_constraints(
             url, "role_assignments"
+        )
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0011_to_0012() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1112")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0011", env=env)
+        assert "external_identities" not in asyncio.run(_table_names(url))
+        assert "browser_sessions" not in asyncio.run(_table_names(url))
+        assert "oidc_login_states" not in asyncio.run(_table_names(url))
+
+        _run_alembic("upgrade", "head", env=env)
+        tables = asyncio.run(_table_names(url))
+        assert {
+            "external_identities",
+            "browser_sessions",
+            "oidc_login_states",
+        } <= tables
+        assert "uq_external_identities_issuer_subject" in _indexes(
+            url, "external_identities"
+        )
+        assert "uq_browser_sessions_session_hash" in _indexes(url, "browser_sessions")
+        assert "uq_oidc_login_states_state" in _indexes(url, "oidc_login_states")
+        assert "ck_browser_sessions_expiry_order" in _check_constraints(
+            url, "browser_sessions"
         )
     finally:
         asyncio.run(drop_database(url))

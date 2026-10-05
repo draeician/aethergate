@@ -115,6 +115,27 @@ floating point (`float`) is rejected for money and pricing. There is no
   project scope (with a project resource ID). These mirror the application invariants so direct DB
   writes cannot bypass them.
 
+### Human identity: external identities, sessions, and login transactions (AGV2-015)
+
+- `AdminAuthenticationKind` (`service_credential` | `browser_session`) — how an admin request was
+  authenticated. Both kinds resolve to the same `AdminRequestContext` and RBAC engine; a browser
+  session carries no `ApiCredential` and populates `browser_session_id` instead of
+  `api_credential_id`/`audience`/`scopes`.
+- `ExternalIdentity` — durable link from a human OIDC identity to a `Principal`: stable
+  `ExternalIdentityId`, `principal_id`, `issuer`, opaque case-sensitive `subject`, optional
+  `email`/`display_name` (safe display claims), `created_at`, `last_login_at`, `is_active`.
+  `(issuer, subject)` is unique; email is **not** an identity key. One external identity maps to
+  exactly one principal. No ID/access/refresh token is stored.
+- `BrowserSession` — server-authoritative human session: stable `BrowserSessionId`, `principal_id`,
+  one-way SHA-256 `session_hash` of the raw cookie (the raw value is never persisted), `created_at`,
+  `last_seen_at`, `idle_expires_at`, `absolute_expires_at`, `revoked_at`, and a one-way
+  `csrf_token_hash`.
+- `OidcLoginState` — one-time login transaction: stable `OidcLoginStateId`, `state`, `nonce`,
+  PKCE `code_challenge`/`code_verifier`, `issuer`, `created_at`, `expires_at`, `consumed_at`. It
+  binds state/nonce/PKCE to the initiating browser and is consumed exactly once.
+- `AdminRequestContext` gains `authentication_kind`, optional `browser_session_id`, and keeps
+  `api_credential_id`/`audience`/`scopes` populated only for the service-credential kind.
+
 ### Accounting entities (AGV2-010)
 
 - `PricePolicy` — mutable pricing configuration associated with a `RouteBinding` (request or token

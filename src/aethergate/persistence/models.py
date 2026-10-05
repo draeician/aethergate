@@ -205,6 +205,92 @@ class BootstrapState(Base, TimestampMixin):
     )
 
 
+class ExternalIdentity(Base, TimestampMixin):
+    """A durable link from an OIDC provider identity to a Principal.
+
+    ``(issuer, subject)`` is the stable, case-sensitive identity key; ``email``
+    is a non-authoritative display claim only. No raw ID/access/refresh token is
+    ever stored here.
+    """
+
+    __tablename__ = "external_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="uq_external_identities_issuer_subject"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    principal_id: Mapped[str] = mapped_column(
+        ForeignKey("principals.id"), nullable=False, index=True
+    )
+    issuer: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class BrowserSession(Base, TimestampMixin):
+    """A server-managed browser session.
+
+    Only one-way verifiers (SHA-256 of the raw cookie and raw CSRF token) are
+    persisted; the raw values are returned only in ``Set-Cookie`` / the session
+    response and never stored or logged.
+    """
+
+    __tablename__ = "browser_sessions"
+    __table_args__ = (
+        Index("uq_browser_sessions_session_hash", "session_hash", unique=True),
+        CheckConstraint(
+            "idle_expires_at < absolute_expires_at",
+            name="ck_browser_sessions_expiry_order",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    principal_id: Mapped[str] = mapped_column(
+        ForeignKey("principals.id"), nullable=False, index=True
+    )
+    session_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    idle_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    absolute_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class OidcLoginState(Base, TimestampMixin):
+    """A one-time OIDC authorization-code login transaction."""
+
+    __tablename__ = "oidc_login_states"
+    __table_args__ = (
+        Index("uq_oidc_login_states_state", "state", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    state: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class AuditEvent(Base, TimestampMixin):
     """Immutable administrative audit event (safe metadata only).
 
@@ -869,6 +955,9 @@ __all__ = [
     "ApiCredential",
     "RoleAssignment",
     "BootstrapState",
+    "ExternalIdentity",
+    "BrowserSession",
+    "OidcLoginState",
     "AuditEvent",
     "Provider",
     "ProviderAccount",

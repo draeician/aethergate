@@ -79,6 +79,16 @@ Admin control-plane endpoints (AGV2-013/014):
 - Credentials: `POST /admin/v1/credentials`, `GET /admin/v1/projects/{project_id}/credentials`
   (paginated), `GET /admin/v1/credentials/{id}`, `POST /admin/v1/credentials/{id}/rotate` and `/revoke`.
 
+Human OIDC/session endpoints (AGV2-015):
+
+- `GET /admin/v1/auth/oidc/login` — start an OIDC Authorization Code + PKCE login (302 to the
+  configured provider).
+- `GET /admin/v1/auth/oidc/callback` — complete login; on success returns session metadata plus the
+  one-time `csrf_token` and sets the session cookie.
+- `GET /admin/v1/auth/session` — resolve the current browser session.
+- `POST /admin/v1/auth/logout` — revoke the session and clear the cookie (CSRF-protected, idempotent).
+- `POST /admin/v1/oidc/identities` — link an external identity (`issuer` + `subject`) to a principal.
+
 Admin auth requires an `admin`-audience credential (`Authorization: Bearer agk_...`) plus an active
 role assignment granting the needed `admin:*` permission (`system_admin` deployment-wide;
 `project_admin`/`project_viewer` scoped to one project). Admin errors use
@@ -181,6 +191,47 @@ curl -sS "$BASE/admin/v1/whoami" -H "Authorization: Bearer <admin-raw-key>"
 After bootstrap the token can never be reused (further calls return `409`), and it should be removed
 from the environment.
 
+## OIDC human login (AGV2-015)
+
+Human administrators authenticate with an OIDC Authorization Code + PKCE flow and a server-managed
+browser session. Configure the provider in `deploy/v2/.env` (or the environment):
+
+```
+AETHERGATE_OIDC_ENABLED=true
+AETHERGATE_OIDC_ISSUER=https://idp.example.com
+AETHERGATE_OIDC_CLIENT_ID=<client-id>
+AETHERGATE_OIDC_CLIENT_SECRET=<client-secret>   # optional (public clients omit it)
+AETHERGATE_OIDC_REDIRECT_URI=https://<gateway>/admin/v1/auth/oidc/callback
+AETHERGATE_OIDC_SCOPES=openid profile email      # openid always enforced
+AETHERGATE_OIDC_PROVIDER_NAME=Example            # optional display name
+AETHERGATE_OIDC_JIT_PROVISIONING=false           # unprivileged self-provisioning (optional)
+AETHERGATE_OIDC_JIT_PROJECT_NAME=default
+AETHERGATE_OIDC_SESSION_IDLE_SECONDS=3600
+AETHERGATE_OIDC_SESSION_ABSOLUTE_SECONDS=43200
+AETHERGATE_OIDC_LOGIN_TTL_SECONDS=600
+```
+
+The issuer must be `https://` in `prod`; `dev`/`test` allow HTTP for the local verification IdP.
+`openid` is always included; scopes may be comma- or whitespace-separated. The session cookie is
+`HttpOnly`, `SameSite=Lax`, `Secure` in `prod`, `Path=/admin`, and never carries the raw token in JSON
+or the URL. Mutating cookie-authenticated admin requests require the `X-CSRF-Token` header returned
+once at login; Bearer service-account requests and `GET`/`HEAD` do not.
+
+A known identity maps to a linked, active principal. A `system_admin` links an identity by
+`issuer`+`subject` via `POST /admin/v1/oidc/identities`; unknown identities are denied unless JIT is
+enabled (which creates an unprivileged `user` principal with zero roles). No role is derived from IdP
+claims.
+
+### Local test IdP
+
+For offline/controlled verification there is a deterministic local OIDC provider
+(`src/aethergate/dev_oidc_idp.py`, `aethergate.dev_oidc_idp.DevOidcIdp`) that implements discovery,
+JWKS (RS256), an auto-approving authorize endpoint, and a PKCE S256 token endpoint that returns a
+signed ID token. It is **not** production identity infrastructure. Serve it locally (for example, as a
+one-off container on the host network) and point `AETHERGATE_OIDC_ISSUER` at it. It generates its key
+in memory, so restarting it changes the signing key (restart the API to clear its in-memory JWKS
+cache).
+
 ## Tests
 
 ```bash
@@ -212,6 +263,8 @@ and a nullable `budget_reservations.price_snapshot_id` for the snapshot lifecycl
 `0010` adds admin identity — `role_assignments` (with a partial-unique index preventing duplicate
 active equivalent assignments), the singleton `bootstrap_state`, and `audit_events`; `0011` enforces
 the role/scope coherence shape — `system_admin` must be deployment-scoped, project roles must be
-project-scoped).
+project-scoped; `0012` adds human identity — `external_identities` (unique `issuer`+`subject`),
+`browser_sessions` (one-way session/CSRF verifiers), and `oidc_login_states` (one-time PKCE
+transactions)).
 Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

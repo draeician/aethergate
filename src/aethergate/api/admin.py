@@ -30,6 +30,8 @@ from aethergate.contracts.admin_v1 import (
     ApiCredentialRead,
     ApiCredentialRevokeResult,
     BootstrapResult,
+    ExternalIdentityCreate,
+    ExternalIdentityRead,
     PrincipalCreate,
     PrincipalRead,
     PrincipalUpdate,
@@ -42,7 +44,7 @@ from aethergate.contracts.admin_v1 import (
 )
 from aethergate.contracts.common import Page
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import CredentialScope
+from aethergate.domain.enums import AdminAuthenticationKind, CredentialScope
 from aethergate.domain.ids import ApiCredentialId, PrincipalId, ProjectId, RoleAssignmentId
 from aethergate.errors import (
     AdminAuthenticationRequired,
@@ -52,6 +54,7 @@ from aethergate.errors import (
 )
 from aethergate.identity import admin as admin_service
 from aethergate.identity import service as identity_service
+from aethergate.identity import session as session_service
 from aethergate.identity.authorization import (
     RESOURCE_CREDENTIAL,
     RESOURCE_PRINCIPAL,
@@ -76,13 +79,30 @@ OffsetQuery = Annotated[int, Query(ge=0)]
 
 async def _admin_context(request: Request) -> domain.AdminRequestContext:
     auth_values = request.headers.getlist("authorization")
-    try:
-        token = identity_service.parse_bearer_token(auth_values)
-    except AuthenticationRequired:
-        raise AdminAuthenticationRequired() from None
+    if auth_values:
+        # A supplied Authorization header is authoritative: parse and authenticate
+        # it strictly; an invalid header never falls through to a cookie.
+        try:
+            token = identity_service.parse_bearer_token(auth_values)
+        except AuthenticationRequired:
+            raise AdminAuthenticationRequired() from None
+        async with get_session_factory()() as session:
+            async with session.begin():
+                return await admin_service.authenticate_admin(session, token)
+
+    raw_cookie = request.cookies.get(session_service.SESSION_COOKIE_NAME)
+    if not raw_cookie:
+        raise AdminAuthenticationRequired()
     async with get_session_factory()() as session:
         async with session.begin():
-            return await admin_service.authenticate_admin(session, token)
+            context, session_entity = await admin_service.authenticate_browser_session(
+                session, raw_cookie
+            )
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                session_service.validate_csrf(
+                    session_entity, request.headers.get(session_service.CSRF_HEADER_NAME)
+                )
+    return context
 
 
 AdminContextDep = Annotated[domain.AdminRequestContext, Depends(_admin_context)]
@@ -136,8 +156,15 @@ def _to_assignment(assignment: domain.RoleAssignment) -> RoleAssignmentRead:
 
 
 def _require_scope(context: domain.AdminRequestContext, permission: CredentialScope) -> None:
-    """Enforce that the credential carries ``permission`` (for list endpoints)."""
-    if permission not in context.scopes:
+    """Enforce that a service credential carries ``permission`` (list endpoints).
+
+    A human browser session has no credential scopes and is authorized by role
+    assignment alone, so this check is skipped for ``BROWSER_SESSION``.
+    """
+    if (
+        context.authentication_kind is AdminAuthenticationKind.SERVICE_CREDENTIAL
+        and permission not in context.scopes
+    ):
         raise AdminAuthorizationError()
 
 
@@ -166,7 +193,9 @@ async def whoami(context: AdminContextDep) -> WhoamiRead:
     return WhoamiRead(
         principal_id=context.principal_id,
         project_id=context.project_id,
+        authentication_kind=context.authentication_kind,
         api_credential_id=context.api_credential_id,
+        browser_session_id=context.browser_session_id,
         audience=context.audience,
         scopes=context.scopes,
         roles=context.roles,
@@ -439,6 +468,38 @@ async def revoke_credential(
             session, context=context, credential_id=credential_id
         )
     return ApiCredentialRevokeResult(credential=_to_read(credential))
+
+
+# --- OIDC external identity linking --------------------------------------------
+
+
+def _to_external_identity(identity: domain.ExternalIdentity) -> ExternalIdentityRead:
+    return ExternalIdentityRead(
+        id=identity.id,
+        principal_id=identity.principal_id,
+        issuer=identity.issuer,
+        subject=identity.subject,
+        email=identity.email,
+        display_name=identity.display_name,
+        created_at=identity.created_at,
+        last_login_at=identity.last_login_at,
+        is_active=identity.is_active,
+    )
+
+
+@router.post("/oidc/identities", response_model=ExternalIdentityRead, status_code=201)
+async def link_oidc_identity(
+    body: ExternalIdentityCreate, context: AdminContextDep, session: SessionDep
+) -> ExternalIdentityRead:
+    async with session.begin():
+        identity = await admin_service.link_external_identity(
+            session,
+            context=context,
+            principal_id=body.principal_id,
+            issuer=body.issuer,
+            subject=body.subject,
+        )
+    return _to_external_identity(identity)
 
 
 __all__ = ["router"]

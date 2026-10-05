@@ -26,9 +26,12 @@ from aethergate.domain.enums import (
 from aethergate.domain.ids import (
     ApiCredentialId,
     AuditEventId,
+    BrowserSessionId,
     BudgetPolicyId,
     EndpointId,
+    ExternalIdentityId,
     ModelAliasId,
+    OidcLoginStateId,
     PricePolicyId,
     PrincipalId,
     ProjectId,
@@ -900,6 +903,221 @@ async def mark_bootstrap_completed(
     row.initial_admin_credential_id = str(credential_id)
     await session.flush()
     return _bootstrap_state_to_domain(row)
+
+
+# ---------------------------------------------------------------------------
+# Human OIDC identity: external identities, browser sessions, login states
+# ---------------------------------------------------------------------------
+
+
+def _external_identity_to_domain(
+    row: models.ExternalIdentity,
+) -> domain.ExternalIdentity:
+    return domain.ExternalIdentity(
+        id=ExternalIdentityId(row.id),
+        principal_id=PrincipalId(row.principal_id),
+        issuer=row.issuer,
+        subject=row.subject,
+        email=row.email,
+        display_name=row.display_name,
+        created_at=row.created_at,
+        last_login_at=row.last_login_at,
+        is_active=row.is_active,
+    )
+
+
+async def create_external_identity(
+    session: AsyncSession, entity: domain.ExternalIdentity
+) -> domain.ExternalIdentity:
+    row = models.ExternalIdentity(
+        id=str(entity.id),
+        principal_id=str(entity.principal_id),
+        issuer=entity.issuer,
+        subject=entity.subject,
+        email=entity.email,
+        display_name=entity.display_name,
+        last_login_at=entity.last_login_at,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _external_identity_to_domain(row)
+
+
+async def get_external_identity(
+    session: AsyncSession, issuer: str, subject: str
+) -> domain.ExternalIdentity | None:
+    result = await session.execute(
+        select(models.ExternalIdentity).where(
+            models.ExternalIdentity.issuer == issuer,
+            models.ExternalIdentity.subject == subject,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _external_identity_to_domain(row) if row else None
+
+
+async def get_external_identity_by_id(
+    session: AsyncSession, identity_id: ExternalIdentityId
+) -> domain.ExternalIdentity | None:
+    row = await session.get(models.ExternalIdentity, str(identity_id))
+    return _external_identity_to_domain(row) if row else None
+
+
+async def touch_external_identity_login(
+    session: AsyncSession, identity_id: ExternalIdentityId, at: datetime
+) -> domain.ExternalIdentity | None:
+    row = await session.get(models.ExternalIdentity, str(identity_id))
+    if row is None:
+        return None
+    row.last_login_at = at
+    await session.flush()
+    return _external_identity_to_domain(row)
+
+
+def _browser_session_to_domain(row: models.BrowserSession) -> domain.BrowserSession:
+    return domain.BrowserSession(
+        id=BrowserSessionId(row.id),
+        principal_id=PrincipalId(row.principal_id),
+        session_hash=row.session_hash,
+        csrf_token_hash=row.csrf_token_hash,
+        created_at=row.created_at,
+        last_seen_at=row.last_seen_at,
+        idle_expires_at=row.idle_expires_at,
+        absolute_expires_at=row.absolute_expires_at,
+        revoked_at=row.revoked_at,
+        is_active=row.is_active,
+    )
+
+
+async def create_browser_session(
+    session: AsyncSession, entity: domain.BrowserSession
+) -> domain.BrowserSession:
+    row = models.BrowserSession(
+        id=str(entity.id),
+        principal_id=str(entity.principal_id),
+        session_hash=entity.session_hash,
+        csrf_token_hash=entity.csrf_token_hash,
+        last_seen_at=entity.last_seen_at,
+        idle_expires_at=entity.idle_expires_at,
+        absolute_expires_at=entity.absolute_expires_at,
+        revoked_at=entity.revoked_at,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _browser_session_to_domain(row)
+
+
+async def get_browser_session_by_hash(
+    session: AsyncSession, session_hash: str
+) -> domain.BrowserSession | None:
+    result = await session.execute(
+        select(models.BrowserSession).where(
+            models.BrowserSession.session_hash == session_hash
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _browser_session_to_domain(row) if row else None
+
+
+async def get_browser_session(
+    session: AsyncSession, session_id: BrowserSessionId
+) -> domain.BrowserSession | None:
+    row = await session.get(models.BrowserSession, str(session_id))
+    return _browser_session_to_domain(row) if row else None
+
+
+async def touch_browser_session(
+    session: AsyncSession,
+    session_id: BrowserSessionId,
+    last_seen_at: datetime,
+    idle_expires_at: datetime,
+) -> domain.BrowserSession | None:
+    row = await session.get(models.BrowserSession, str(session_id))
+    if row is None:
+        return None
+    row.last_seen_at = last_seen_at
+    row.idle_expires_at = idle_expires_at
+    await session.flush()
+    return _browser_session_to_domain(row)
+
+
+async def revoke_browser_session(
+    session: AsyncSession, session_id: BrowserSessionId, revoked_at: datetime
+) -> domain.BrowserSession | None:
+    row = await session.get(models.BrowserSession, str(session_id))
+    if row is None:
+        return None
+    if row.revoked_at is None:
+        row.revoked_at = revoked_at
+    row.is_active = False
+    await session.flush()
+    return _browser_session_to_domain(row)
+
+
+def _oidc_login_state_to_domain(row: models.OidcLoginState) -> domain.OidcLoginState:
+    return domain.OidcLoginState(
+        id=OidcLoginStateId(row.id),
+        state=row.state,
+        nonce=row.nonce,
+        code_verifier=row.code_verifier,
+        code_challenge=row.code_challenge,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        consumed_at=row.consumed_at,
+    )
+
+
+async def create_oidc_login_state(
+    session: AsyncSession, entity: domain.OidcLoginState
+) -> domain.OidcLoginState:
+    row = models.OidcLoginState(
+        id=str(entity.id),
+        state=entity.state,
+        nonce=entity.nonce,
+        code_verifier=entity.code_verifier,
+        code_challenge=entity.code_challenge,
+        expires_at=entity.expires_at,
+        consumed_at=entity.consumed_at,
+    )
+    session.add(row)
+    await session.flush()
+    return _oidc_login_state_to_domain(row)
+
+
+async def get_oidc_login_state(
+    session: AsyncSession, state: str
+) -> domain.OidcLoginState | None:
+    result = await session.execute(
+        select(models.OidcLoginState).where(models.OidcLoginState.state == state)
+    )
+    row = result.scalar_one_or_none()
+    return _oidc_login_state_to_domain(row) if row else None
+
+
+async def get_oidc_login_state_for_update(
+    session: AsyncSession, state: str
+) -> domain.OidcLoginState | None:
+    result = await session.execute(
+        select(models.OidcLoginState)
+        .where(models.OidcLoginState.state == state)
+        .with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    return _oidc_login_state_to_domain(row) if row else None
+
+
+async def consume_oidc_login_state(
+    session: AsyncSession, state_id: OidcLoginStateId, consumed_at: datetime
+) -> domain.OidcLoginState | None:
+    row = await session.get(models.OidcLoginState, str(state_id))
+    if row is None:
+        return None
+    if row.consumed_at is None:
+        row.consumed_at = consumed_at
+    await session.flush()
+    return _oidc_login_state_to_domain(row)
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,11 @@ from aethergate.errors import (
     BootstrapAlreadyCompleted,
     BootstrapTokenRejected,
     CredentialLifecycleError,
+    CsrfValidationError,
+    OidcAuthenticationFailed,
+    OidcConfigurationError,
+    OidcLoginStateInvalid,
+    SessionInvalid,
 )
 
 
@@ -116,6 +121,61 @@ async def admin_validation_error_handler(
     )
 
 
+async def oidc_configuration_error_handler(
+    request: Request, exc: OidcConfigurationError
+) -> JSONResponse:
+    return _admin_error(
+        503,
+        "oidc_unavailable",
+        "The identity provider is unavailable or misconfigured.",
+        get_gateway_request_id(request),
+    )
+
+
+async def oidc_authentication_failed_handler(
+    request: Request, exc: OidcAuthenticationFailed
+) -> JSONResponse:
+    return _admin_error(
+        401,
+        "oidc_authentication_failed",
+        "OIDC authentication failed.",
+        get_gateway_request_id(request),
+    )
+
+
+async def oidc_login_state_invalid_handler(
+    request: Request, exc: OidcLoginStateInvalid
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "invalid_login_state",
+        "The login attempt is invalid or expired.",
+        get_gateway_request_id(request),
+    )
+
+
+async def session_invalid_handler(
+    request: Request, exc: SessionInvalid
+) -> JSONResponse:
+    return _admin_error(
+        401,
+        "not_authenticated",
+        "Authentication is required for the admin API.",
+        get_gateway_request_id(request),
+    )
+
+
+async def csrf_validation_error_handler(
+    request: Request, exc: CsrfValidationError
+) -> JSONResponse:
+    return _admin_error(
+        403,
+        "invalid_csrf_token",
+        "The CSRF token is missing or invalid.",
+        get_gateway_request_id(request),
+    )
+
+
 __all__ = [
     "admin_auth_error_handler",
     "admin_authorization_error_handler",
@@ -124,4 +184,9 @@ __all__ = [
     "credential_lifecycle_error_handler",
     "admin_resource_not_found_handler",
     "admin_validation_error_handler",
+    "oidc_configuration_error_handler",
+    "oidc_authentication_failed_handler",
+    "oidc_login_state_invalid_handler",
+    "session_invalid_handler",
+    "csrf_validation_error_handler",
 ]
