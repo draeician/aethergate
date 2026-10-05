@@ -3,9 +3,37 @@
 ## Current State
 - Branch: v2
 - AGV2-015 implementation commit: `805c403` (`feat(identity): add OIDC human sessions and CSRF
-  protection`), pushed to `origin/v2` (this session).
+  protection`), pushed to `origin/v2`.
+- AGV2-015 hardening follow-up commit: `d8f9298` (login transaction cookie binding, audit
+  state-redaction fix, login-state cleanup), pushed to `origin/v2` (this session).
 - Prior commits remain: `d7842c9` (AGV2-014V), `d283fd2` (AGV2-014), `5a81425` (AGV2-013). This
   handoff supersedes the AGV2-014V handoff.
+
+## Hardening follow-up (this session)
+Three scoped fixes on top of AGV2-015, all around the OIDC login transaction:
+
+1. **Login transaction cookie binding (login-CSRF / state-injection defense).** `/auth/oidc/login`
+   now sets a dedicated short-lived `ag_oidc_txn` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` in
+   prod, `Path=/admin/v1/auth/oidc`, `Max-Age` = login TTL). `OidcLoginState` persists only the
+   one-way SHA-256 `txn_cookie_hash` of the raw cookie (new `txn_cookie_hash` column, migration
+   `0013`). `/auth/oidc/callback` requires the cookie to match in constant time; a missing, wrong,
+   or cross-browser cookie fails with `400 invalid_login_state`. The raw transaction cookie value is
+   never persisted or logged.
+2. **Raw OIDC state removed from audit.** `_record_login_failed` previously wrote the raw `state` as
+   `resource_id` under `resource_type=session`; it now records an opaque transaction id under
+   `resource_type=oidc_login` (metadata carries only the failure `reason`). Raw `state`/`nonce`/PKCE
+   verifier never appear in audit.
+3. **Login-state cleanup.** The login transaction is now **deleted on consumption** (instead of
+   marking `consumed_at`), and expired transactions are **deleted when a new transaction is
+   created**. `consumed_at` is retained on the entity/table but is no longer used for consumption
+   semantics; rows do not accumulate.
+
+Live nomnom verification (host-network IdP `http://192.168.22.50:8490`, pinned API port `44777`,
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`): happy path still `200` + `system_admin` + `whoami`
+via cookie; cross-browser callback with no/forged transaction cookie → `400`; genuine browser still
+completes; replay → `400`; forged code → `401` and the resulting `human.login_failed` audit row used
+`resource_type=oidc_login` with an opaque id (no raw state); `oidc_login_states` empty after logins.
+
 
 ## Task Completed
 AGV2-015 — Human identity phase: OIDC authorization-code flow and secure admin browser sessions.
@@ -94,16 +122,21 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
 - New migration `0012` adds `external_identities` (unique `(issuer, subject)`), `browser_sessions`
   (one-way session/CSRF verifiers, expiry), and `oidc_login_states` (one-time PKCE transactions).
   `0001`–`0011` untouched; `0011 -> 0012` and empty-DB -> latest both succeeded live.
+- New migration `0013` adds the one-way `txn_cookie_hash` column to `oidc_login_states`
+  (`NOT NULL`, server default dropped after backfill). Live `0012 -> 0013` succeeded.
 
 ## Automated tests
-- `scripts/dev/v2 test` -> **348 passed** (was 315; +33). New coverage includes OIDC config validation,
-  HTTPS-in-prod enforcement, discovery issuer mismatch, login-state entropy/expiry, nonce/PKCE/state
-  one-time consumption, callback replay, ID-token issuer/audience/expiry/subject validation, unsafe
-  algorithm rejection, unique `(issuer,subject)`, email-not-key, JIT-off denial, JIT unprivileged,
-  inactive principal denial, service-credential vs browser-session `AdminRequestContext`, raw cookie
-  never persisted, idle/absolute expiry, revoked session, cookie attributes, CSRF missing/wrong/correct,
-  Bearer-no-CSRF, invalid-header-no-cookie-fallback, role revocation and project/principal deactivation
-  on next request, logout idempotency, and audit secret redaction.
+- `scripts/dev/v2 test` -> **353 passed** (was 348; +5 for the hardening follow-up). New coverage
+  includes OIDC config validation, HTTPS-in-prod enforcement, discovery issuer mismatch, login-state
+  entropy/expiry, nonce/PKCE/state one-time consumption, callback replay, ID-token
+  issuer/audience/expiry/subject validation, unsafe algorithm rejection, unique `(issuer,subject)`,
+  email-not-key, JIT-off denial, JIT unprivileged, inactive principal denial, service-credential vs
+  browser-session `AdminRequestContext`, raw cookie never persisted, idle/absolute expiry, revoked
+  session, cookie attributes, CSRF missing/wrong/correct, Bearer-no-CSRF,
+  invalid-header-no-cookie-fallback, role revocation and project/principal deactivation on next
+  request, logout idempotency, audit secret redaction, login transaction cookie binding
+  (missing/forged/cross-browser), login-state delete-on-consume, login-state expiry cleanup, failed
+  login audit raw-state redaction, and migration `0012 -> 0013`.
 - `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean.
 
 ## Key files
@@ -114,7 +147,10 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
 - `src/aethergate/api/admin.py` / `identity/admin.py` / `identity/authorization.py` — kind-aware admin auth.
 - `src/aethergate/dev_oidc_idp.py` — local deterministic OIDC provider.
 - `src/aethergate/migrations/versions/0012_human_oidc_sessions.py` — migration 0012.
-- `tests/test_oidc_session.py` — new test suite.
+- `src/aethergate/migrations/versions/0013_login_transaction_cookie_binding.py` — migration 0013
+  (`txn_cookie_hash`).
+- `tests/test_oidc_session.py` — new test suite (login/session/CSRF/binding/cleanup/audit).
+- `tests/test_migrations.py` — migration round-trip tests incl. `0012 -> 0013`.
 
 ## Decisions
 - External identity key is `(issuer, subject)`; email is display-only. JIT provisioning is off by
@@ -123,6 +159,9 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
   session never fabricates an `ApiCredential`; scope checks apply only to service credentials.
 - The session cookie and CSRF token are stored only as one-way SHA-256 verifiers (high-entropy
   random tokens, so SHA-256 — not a password hash — is appropriate).
+- The login transaction is bound to the initiating browser via a dedicated short-lived `ag_oidc_txn`
+  cookie (persisted only as `txn_cookie_hash`), and consumed transactions are deleted rather than
+  marked, so replay and cross-browser state theft fail closed.
 - `last_seen_at` is slid on a throttled basis (not per request) to avoid a hot-row write.
 
 ## Issues / Risks
