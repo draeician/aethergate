@@ -101,6 +101,20 @@ floating point (`float`) is rejected for money and pricing. There is no
 - `Principal` + `RoleAssignment` are the same model later human OIDC principals receive; no code
   encodes service-account == admin role.
 
+### Admin resource-scope resolution and role/scope coherence (AGV2-014)
+
+- `identity/authorization.py` centralizes resource-scope resolution: a project resource authorizes
+  against that project; a principal/credential resolves to `principal.project_id` /
+  `credential.project_id`; a role assignment resolves to its project scope or to `deployment` for
+  `system_admin`. Routers/services never compare opaque resource IDs directly to project IDs.
+- `resolve_admin_resource` returns a resource only when it exists and is within the caller's scope; a
+  nonexistent ID and a cross-project ID are indistinguishable (`404`), while an in-scope resource
+  denied by a specific read/write permission is `403`.
+- Migration `0011` adds database CHECK constraints enforcing the role/scope shape:
+  `system_admin` => deployment scope and empty resource ID; `project_admin`/`project_viewer` =>
+  project scope (with a project resource ID). These mirror the application invariants so direct DB
+  writes cannot bypass them.
+
 ### Accounting entities (AGV2-010)
 
 - `PricePolicy` — mutable pricing configuration associated with a `RouteBinding` (request or token

@@ -72,6 +72,15 @@ def admin_factory(admin_engine):
     return async_sessionmaker(admin_engine, expire_on_commit=False)
 
 
+async def _system_admin_context(factory) -> domain.AdminRequestContext:
+    """Bootstrap and authenticate, returning a durable system_admin context."""
+    async with factory() as s:
+        _, raw = await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
+    async with factory() as s:
+        async with s.begin():
+            return await admin_service.authenticate_admin(s, raw)
+
+
 # --- audience/scope coherence -------------------------------------------------
 
 
@@ -146,11 +155,7 @@ async def test_admin_audience_defaults_to_no_scopes(admin_engine, admin_factory)
 async def test_authorize_system_admin_deployment_wide(admin_engine, admin_factory, monkeypatch):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
-    async with admin_factory() as s:
-        _, raw = await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
-    async with admin_factory() as s:
-        async with s.begin():
-            ctx = await admin_service.authenticate_admin(s, raw)
+    ctx = await _system_admin_context(admin_factory)
     assert Role.SYSTEM_ADMIN in ctx.roles
     admin_service.authorize_admin(
         ctx, CredentialScope.ADMIN_CREDENTIALS_READ, "project", ProjectId("any")
@@ -163,8 +168,7 @@ async def test_authorize_system_admin_deployment_wide(admin_engine, admin_factor
 async def test_project_admin_isolated_to_own_project(admin_engine, admin_factory, monkeypatch):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
-    async with admin_factory() as s:
-        await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
+    sa_ctx = await _system_admin_context(admin_factory)
     async with admin_factory() as s:
         async with s.begin():
             proj_a = await repository.create_project(
@@ -180,14 +184,13 @@ async def test_project_admin_isolated_to_own_project(admin_engine, admin_factory
                 )
             )
             await admin_service.create_role_assignment(
-                s, actor_principal_id=PrincipalId("sa"),
-                principal_id=pa.id, role=Role.PROJECT_ADMIN,
+                s, context=sa_ctx, principal_id=pa.id, role=Role.PROJECT_ADMIN,
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj_a.id,
             )
-            _, pa_raw = await admin_service.create_admin_credential(
-                s, actor_principal_id=PrincipalId("sa"),
-                project_id=proj_a.id, principal_id=pa.id, name="pa-cred",
-                audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES, expires_at=None,
+            _, pa_raw = await admin_service.create_credential(
+                s, context=sa_ctx, project_id=proj_a.id, principal_id=pa.id,
+                name="pa-cred", audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES,
+                expires_at=None,
             )
     async with admin_factory() as s:
         async with s.begin():
@@ -205,8 +208,7 @@ async def test_project_admin_isolated_to_own_project(admin_engine, admin_factory
 async def test_project_viewer_read_only(admin_engine, admin_factory, monkeypatch):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
-    async with admin_factory() as s:
-        await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
+    sa_ctx = await _system_admin_context(admin_factory)
     async with admin_factory() as s:
         async with s.begin():
             proj_a = await repository.create_project(
@@ -219,14 +221,13 @@ async def test_project_viewer_read_only(admin_engine, admin_factory, monkeypatch
                 )
             )
             await admin_service.create_role_assignment(
-                s, actor_principal_id=PrincipalId("sa"), principal_id=pv.id,
-                role=Role.PROJECT_VIEWER,
+                s, context=sa_ctx, principal_id=pv.id, role=Role.PROJECT_VIEWER,
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj_a.id,
             )
-            _, pv_raw = await admin_service.create_admin_credential(
-                s, actor_principal_id=PrincipalId("sa"),
-                project_id=proj_a.id, principal_id=pv.id, name="pv-cred",
-                audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES, expires_at=None,
+            _, pv_raw = await admin_service.create_credential(
+                s, context=sa_ctx, project_id=proj_a.id, principal_id=pv.id,
+                name="pv-cred", audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES,
+                expires_at=None,
             )
     async with admin_factory() as s:
         async with s.begin():
@@ -241,8 +242,7 @@ async def test_project_viewer_read_only(admin_engine, admin_factory, monkeypatch
 async def test_duplicate_active_assignment_prevented(admin_engine, admin_factory, monkeypatch):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
-    async with admin_factory() as s:
-        await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
+    sa_ctx = await _system_admin_context(admin_factory)
     async with admin_factory() as s:
         async with s.begin():
             proj = await repository.create_project(
@@ -255,13 +255,11 @@ async def test_duplicate_active_assignment_prevented(admin_engine, admin_factory
                 )
             )
             first = await admin_service.create_role_assignment(
-                s, actor_principal_id=PrincipalId("sa"), principal_id=principal.id,
-                role=Role.PROJECT_ADMIN,
+                s, context=sa_ctx, principal_id=principal.id, role=Role.PROJECT_ADMIN,
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
             )
             second = await admin_service.create_role_assignment(
-                s, actor_principal_id=PrincipalId("sa"), principal_id=principal.id,
-                role=Role.PROJECT_ADMIN,
+                s, context=sa_ctx, principal_id=principal.id, role=Role.PROJECT_ADMIN,
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
             )
             assert first.id == second.id
@@ -270,8 +268,7 @@ async def test_duplicate_active_assignment_prevented(admin_engine, admin_factory
 async def test_revoked_assignment_denied(admin_engine, admin_factory, monkeypatch):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
-    async with admin_factory() as s:
-        await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
+    sa_ctx = await _system_admin_context(admin_factory)
     async with admin_factory() as s:
         async with s.begin():
             proj = await repository.create_project(
@@ -284,14 +281,13 @@ async def test_revoked_assignment_denied(admin_engine, admin_factory, monkeypatc
                 )
             )
             assignment = await admin_service.create_role_assignment(
-                s, actor_principal_id=PrincipalId("sa"), principal_id=principal.id,
-                role=Role.PROJECT_ADMIN,
+                s, context=sa_ctx, principal_id=principal.id, role=Role.PROJECT_ADMIN,
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
             )
-            _, raw = await admin_service.create_admin_credential(
-                s, actor_principal_id=PrincipalId("sa"),
-                project_id=proj.id, principal_id=principal.id, name="py-cred",
-                audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES, expires_at=None,
+            _, raw = await admin_service.create_credential(
+                s, context=sa_ctx, project_id=proj.id, principal_id=principal.id,
+                name="py-cred", audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES,
+                expires_at=None,
             )
     async with admin_factory() as s:
         async with s.begin():
@@ -300,7 +296,7 @@ async def test_revoked_assignment_denied(admin_engine, admin_factory, monkeypatc
     async with admin_factory() as s:
         async with s.begin():
             await admin_service.revoke_role_assignment(
-                s, actor_principal_id=PrincipalId("sa"), assignment_id=assignment.id
+                s, context=sa_ctx, assignment_id=assignment.id
             )
     async with admin_factory() as s:
         async with s.begin():
@@ -438,9 +434,7 @@ async def test_audit_events_for_bootstrap_role_credential(
 ):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
-    async with admin_factory() as s:
-        cred, _ = await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
-    sa_principal = cred.principal_id
+    sa_ctx = await _system_admin_context(admin_factory)
     async with admin_factory() as s:
         async with s.begin():
             proj = await repository.create_project(
@@ -453,23 +447,22 @@ async def test_audit_events_for_bootstrap_role_credential(
                 )
             )
             assignment = await admin_service.create_role_assignment(
-                s, actor_principal_id=sa_principal, principal_id=principal.id,
-                role=Role.PROJECT_ADMIN,
+                s, context=sa_ctx, principal_id=principal.id, role=Role.PROJECT_ADMIN,
                 resource_scope_type=ResourceScopeType.PROJECT, resource_id=proj.id,
             )
-            cred2, _ = await admin_service.create_admin_credential(
-                s, actor_principal_id=sa_principal, project_id=proj.id,
-                principal_id=principal.id, name="aud-cred",
-                audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES, expires_at=None,
+            cred2, raw = await admin_service.create_credential(
+                s, context=sa_ctx, project_id=proj.id, principal_id=principal.id,
+                name="aud-cred", audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES,
+                expires_at=None,
             )
-            await admin_service.rotate_admin_credential(
-                s, actor_principal_id=sa_principal, credential_id=cred2.id
+            rotated, _ = await admin_service.rotate_credential(
+                s, context=sa_ctx, credential_id=cred2.id
             )
-            await admin_service.revoke_admin_credential(
-                s, actor_principal_id=sa_principal, credential_id=cred2.id
+            await admin_service.revoke_credential(
+                s, context=sa_ctx, credential_id=rotated.id
             )
             await admin_service.revoke_role_assignment(
-                s, actor_principal_id=sa_principal, assignment_id=assignment.id
+                s, context=sa_ctx, assignment_id=assignment.id
             )
     async with admin_factory() as s:
         async with s.begin():
@@ -478,12 +471,13 @@ async def test_audit_events_for_bootstrap_role_credential(
     assert "bootstrap.completed" in actions
     assert "role_assignment.created" in actions
     assert "role_assignment.revoked" in actions
-    assert "admin_credential.created" in actions
-    assert "admin_credential.rotated" in actions
-    assert "admin_credential.revoked" in actions
+    assert "credential.created" in actions
+    assert "credential.rotated" in actions
+    assert "credential.revoked" in actions
     for e in events:
         blob = str(e.metadata) + e.resource_id + e.action
         assert BOOTSTRAP_TOKEN not in blob
+        assert raw not in blob
 
 
 # --- HTTP surface --------------------------------------------------------------
@@ -575,7 +569,6 @@ async def test_http_credential_lifecycle_and_rbac(admin_http):
     client, factory = admin_http
     async with factory() as s:
         sa_cred, sa_raw = await admin_service.bootstrap(s, BOOTSTRAP_TOKEN)
-    sa_principal = sa_cred.principal_id
     default_project = sa_cred.project_id
     async with factory() as s:
         async with s.begin():
@@ -588,16 +581,16 @@ async def test_http_credential_lifecycle_and_rbac(admin_http):
                     kind=PrincipalKind.SERVICE_ACCOUNT, name="pa-h",
                 )
             )
+            sa_ctx = await admin_service.authenticate_admin(s, sa_raw)
             await admin_service.create_role_assignment(
-                s, actor_principal_id=sa_principal, principal_id=pa.id,
-                role=Role.PROJECT_ADMIN,
+                s, context=sa_ctx, principal_id=pa.id, role=Role.PROJECT_ADMIN,
                 resource_scope_type=ResourceScopeType.PROJECT,
                 resource_id=default_project,
             )
-            _, pa_raw = await admin_service.create_admin_credential(
-                s, actor_principal_id=sa_principal, project_id=default_project,
-                principal_id=pa.id, name="pa-h-cred",
-                audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES, expires_at=None,
+            _, pa_raw = await admin_service.create_credential(
+                s, context=sa_ctx, project_id=default_project, principal_id=pa.id,
+                name="pa-h-cred", audience=CredentialAudience.ADMIN, scopes=ADMIN_SCOPES,
+                expires_at=None,
             )
 
     hdr = {"Authorization": f"Bearer {sa_raw}"}
@@ -615,5 +608,5 @@ async def test_http_credential_lifecycle_and_rbac(admin_http):
     resp = await client.get(
         f"/admin/v1/projects/{proj_b.id}/credentials", headers=pa_hdr
     )
-    assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "forbidden"
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"

@@ -17,6 +17,8 @@ from aethergate.api.openai_models import router as models_router
 from aethergate.errors import (
     AdminAuthenticationRequired,
     AdminAuthorizationError,
+    AdminResourceNotFound,
+    AdminValidationError,
     BootstrapAlreadyCompleted,
     BootstrapTokenRejected,
     CredentialLifecycleError,
@@ -44,6 +46,12 @@ app.add_exception_handler(
 )
 app.add_exception_handler(
     CredentialLifecycleError, admin_errors.credential_lifecycle_error_handler
+)
+app.add_exception_handler(
+    AdminResourceNotFound, admin_errors.admin_resource_not_found_handler
+)
+app.add_exception_handler(
+    AdminValidationError, admin_errors.admin_validation_error_handler
 )
 
 

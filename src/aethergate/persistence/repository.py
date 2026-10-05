@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,6 +88,56 @@ async def set_project_active(
     row.is_active = is_active
     await session.flush()
     return _project_to_domain(row)
+
+
+async def update_project(
+    session: AsyncSession,
+    project_id: ProjectId,
+    *,
+    name: str | None = None,
+    is_active: bool | None = None,
+) -> domain.Project | None:
+    row = await session.get(models.Project, str(project_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if is_active is not None:
+        row.is_active = is_active
+    await session.flush()
+    return _project_to_domain(row)
+
+
+async def list_projects(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.Project]:
+    stmt = select(models.Project)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.where(models.Project.id.in_([str(p) for p in project_ids]))
+    stmt = (
+        stmt.order_by(models.Project.created_at.asc(), models.Project.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_project_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_projects(
+    session: AsyncSession, *, project_ids: set[ProjectId] | None = None
+) -> int:
+    stmt = select(func.count()).select_from(models.Project)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.where(models.Project.id.in_([str(p) for p in project_ids]))
+    return (await session.execute(stmt)).scalar_one()
 
 
 def _secret_ref_to_domain(row: models.SecretRef) -> domain.SecretRef:
@@ -474,6 +524,49 @@ async def set_principal_active(
     return _principal_to_domain(row)
 
 
+async def update_principal(
+    session: AsyncSession,
+    principal_id: PrincipalId,
+    *,
+    name: str | None = None,
+    is_active: bool | None = None,
+) -> domain.Principal | None:
+    row = await session.get(models.Principal, str(principal_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if is_active is not None:
+        row.is_active = is_active
+    await session.flush()
+    return _principal_to_domain(row)
+
+
+async def list_principals(
+    session: AsyncSession,
+    project_id: ProjectId,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.Principal]:
+    stmt = (
+        select(models.Principal)
+        .where(models.Principal.project_id == str(project_id))
+        .order_by(models.Principal.created_at.asc(), models.Principal.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_principal_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_principals(session: AsyncSession, project_id: ProjectId) -> int:
+    stmt = select(func.count()).select_from(models.Principal).where(
+        models.Principal.project_id == str(project_id)
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
 def _api_credential_to_domain(row: models.ApiCredential) -> domain.ApiCredential:
     return domain.ApiCredential(
         id=ApiCredentialId(row.id),
@@ -554,6 +647,31 @@ async def list_api_credentials(
         .order_by(models.ApiCredential.created_at.asc())
     )
     return [_api_credential_to_domain(r) for r in result.scalars().all()]
+
+
+async def list_api_credentials_paged(
+    session: AsyncSession,
+    project_id: ProjectId,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.ApiCredential]:
+    stmt = (
+        select(models.ApiCredential)
+        .where(models.ApiCredential.project_id == str(project_id))
+        .order_by(models.ApiCredential.created_at.asc(), models.ApiCredential.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_api_credential_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_api_credentials(session: AsyncSession, project_id: ProjectId) -> int:
+    stmt = select(func.count()).select_from(models.ApiCredential).where(
+        models.ApiCredential.project_id == str(project_id)
+    )
+    return (await session.execute(stmt)).scalar_one()
 
 
 async def revoke_api_credential(
@@ -669,6 +787,52 @@ async def revoke_role_assignment(
     row.is_active = False
     await session.flush()
     return _role_assignment_to_domain(row)
+
+
+async def list_role_assignments(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.RoleAssignment]:
+    """List role assignments, filtered to ``project_ids`` when non-None.
+
+    ``None`` means the caller is deployment-wide and sees all assignments; a
+    project-scoped caller sees only project-scoped assignments within its
+    authorized projects (deployment-scoped assignments are not discoverable).
+    """
+    stmt = select(models.RoleAssignment)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.where(
+            models.RoleAssignment.resource_scope_type == ResourceScopeType.PROJECT.value,
+            models.RoleAssignment.resource_id.in_([str(p) for p in project_ids]),
+        )
+    stmt = (
+        stmt.order_by(
+            models.RoleAssignment.created_at.asc(), models.RoleAssignment.id.asc()
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_role_assignment_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_role_assignments(
+    session: AsyncSession, *, project_ids: set[ProjectId] | None = None
+) -> int:
+    stmt = select(func.count()).select_from(models.RoleAssignment)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.where(
+            models.RoleAssignment.resource_scope_type == ResourceScopeType.PROJECT.value,
+            models.RoleAssignment.resource_id.in_([str(p) for p in project_ids]),
+        )
+    return (await session.execute(stmt)).scalar_one()
 
 
 # ---------------------------------------------------------------------------

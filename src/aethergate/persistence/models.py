@@ -147,6 +147,15 @@ class RoleAssignment(Base, TimestampMixin):
             "resource_scope_type <> 'project' OR resource_id <> ''",
             name="ck_role_assignments_project_scope_requires_resource",
         ),
+        CheckConstraint(
+            "role <> 'system_admin' OR "
+            "(resource_scope_type = 'deployment' AND resource_id = '')",
+            name="ck_role_assignments_system_admin_deployment",
+        ),
+        CheckConstraint(
+            "role = 'system_admin' OR resource_scope_type = 'project'",
+            name="ck_role_assignments_project_role_project_scope",
+        ),
         Index(
             "uq_role_assignments_active_equivalent",
             "principal_id",

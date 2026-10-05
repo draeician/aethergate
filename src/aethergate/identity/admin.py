@@ -1,10 +1,15 @@
-"""Admin control-plane identity: authentication, authorization, bootstrap, RBAC.
+"""Admin control-plane identity: authentication, authorization, bootstrap, CRUD.
 
 The control plane has its own identity boundary, separate from the inference
 data plane. Authentication (a Bearer ``agk_...`` admin-audience credential) and
 RBAC authorization (durable role assignments) are distinct steps, and both must
-succeed before any protected admin action. The bootstrap endpoint is the single
-one-use path to establish the first ``system_admin`` service account.
+succeed before any protected admin action.
+
+Administrative mutation services accept a typed :class:`AdminRequestContext` and
+perform their own authorization internally, so a caller cannot bypass RBAC by
+invoking a service method with a forged actor ID. Resource resolution goes
+through the centralized, non-enumerating resolver in
+:mod:`aethergate.identity.authorization`.
 
 No raw key, hash, bootstrap token, or Authorization header is ever logged or
 written to the audit log.
@@ -37,22 +42,38 @@ from aethergate.domain.ids import (
 )
 from aethergate.errors import (
     AdminAuthenticationRequired,
-    AdminAuthorizationError,
+    AdminResourceNotFound,
     BootstrapAlreadyCompleted,
     BootstrapTokenRejected,
 )
 from aethergate.identity import rbac
 from aethergate.identity import service as identity_service
+from aethergate.identity.authorization import (
+    RESOURCE_CREDENTIAL,
+    RESOURCE_DEPLOYMENT,
+    RESOURCE_PRINCIPAL,
+    RESOURCE_PROJECT,
+    RESOURCE_ROLE_ASSIGNMENT,
+    authorize_admin,
+    authorize_role_grant,
+    resolve_admin_resource,
+)
 from aethergate.identity.keys import hash_raw_key
 from aethergate.persistence import repository
 
-# Audit action names (stable strings; safe metadata only).
+# Audit action names (stable strings; safe metadata only). Credential actions
+# are audience-neutral: /admin/v1/credentials manages client credentials of
+# either audience, and the audience is recorded in safe metadata.
 AUDIT_BOOTSTRAP_COMPLETED = "bootstrap.completed"
 AUDIT_ROLE_ASSIGNMENT_CREATED = "role_assignment.created"
 AUDIT_ROLE_ASSIGNMENT_REVOKED = "role_assignment.revoked"
-AUDIT_ADMIN_CREDENTIAL_CREATED = "admin_credential.created"
-AUDIT_ADMIN_CREDENTIAL_ROTATED = "admin_credential.rotated"
-AUDIT_ADMIN_CREDENTIAL_REVOKED = "admin_credential.revoked"
+AUDIT_CREDENTIAL_CREATED = "credential.created"
+AUDIT_CREDENTIAL_ROTATED = "credential.rotated"
+AUDIT_CREDENTIAL_REVOKED = "credential.revoked"
+AUDIT_PROJECT_CREATED = "project.created"
+AUDIT_PROJECT_UPDATED = "project.updated"
+AUDIT_PRINCIPAL_CREATED = "principal.created"
+AUDIT_PRINCIPAL_UPDATED = "principal.updated"
 
 INITIAL_PROJECT_NAME = "default"
 INITIAL_PRINCIPAL_NAME = "bootstrap-admin"
@@ -127,32 +148,6 @@ async def authenticate_admin(
         roles=tuple(a.role for a in assignments),
         assignments=tuple(assignments),
     )
-
-
-def authorize_admin(
-    context: domain.AdminRequestContext,
-    permission: CredentialScope,
-    resource_type: str | None = None,
-    resource_id: ProjectId | None = None,
-) -> None:
-    """Authorize a protected admin action against the resolved context.
-
-    Both layers must hold: the credential must carry the ``permission`` scope,
-    and at least one active role assignment must grant the permission for the
-    requested resource scope. ``system_admin`` grants deployment-wide; a
-    project-scoped role grants only for its assigned project. Failures are a
-    fixed, indistinguishable ``AdminAuthorizationError``.
-    """
-    if permission not in context.scopes:
-        raise AdminAuthorizationError()
-    for assignment in context.assignments:
-        if not rbac.role_grants_permission(assignment.role, permission):
-            continue
-        if assignment.resource_scope_type is ResourceScopeType.DEPLOYMENT:
-            return
-        if resource_id is not None and assignment.resource_id == resource_id:
-            return
-    raise AdminAuthorizationError()
 
 
 async def _write_audit(
@@ -272,22 +267,161 @@ async def get_bootstrap_status(session: AsyncSession) -> domain.BootstrapState |
     return await repository.get_bootstrap_state(session)
 
 
+# ---------------------------------------------------------------------------
+# Project CRUD
+# ---------------------------------------------------------------------------
+
+
+async def create_project(
+    session: AsyncSession, *, context: domain.AdminRequestContext, name: str
+) -> domain.Project:
+    """Create a project (deployment-level / system_admin authority only)."""
+    authorize_admin(context, CredentialScope.ADMIN_PROJECTS_WRITE, RESOURCE_DEPLOYMENT, None)
+    project = await repository.create_project(
+        session, domain.Project(id=ProjectId(_new_id()), name=name)
+    )
+    await _write_audit(
+        session,
+        actor_principal_id=context.principal_id,
+        action=AUDIT_PROJECT_CREATED,
+        resource_type="project",
+        resource_id=str(project.id),
+        project_id=project.id,
+    )
+    return project
+
+
+async def update_project(
+    session: AsyncSession,
+    *,
+    context: domain.AdminRequestContext,
+    project_id: ProjectId,
+    name: str | None,
+    is_active: bool | None,
+) -> domain.Project:
+    """Update a project name/active state (authorized project scope)."""
+    existing = await resolve_admin_resource(
+        session, context, CredentialScope.ADMIN_PROJECTS_WRITE, RESOURCE_PROJECT, str(project_id)
+    )
+    assert isinstance(existing, domain.Project)
+    updated = await repository.update_project(
+        session, project_id, name=name, is_active=is_active
+    )
+    assert updated is not None
+    name_changed = name is not None and name != existing.name
+    active_changed = is_active is not None and is_active != existing.is_active
+    if name_changed or active_changed:
+        await _write_audit(
+            session,
+            actor_principal_id=context.principal_id,
+            action=AUDIT_PROJECT_UPDATED,
+            resource_type="project",
+            resource_id=str(updated.id),
+            project_id=updated.id,
+            metadata={"name": name is not None, "is_active": is_active is not None},
+        )
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# Principal CRUD
+# ---------------------------------------------------------------------------
+
+
+async def create_principal(
+    session: AsyncSession,
+    *,
+    context: domain.AdminRequestContext,
+    project_id: ProjectId,
+    kind: PrincipalKind,
+    name: str,
+) -> domain.Principal:
+    """Create a principal in a project the caller may administer."""
+    authorize_admin(context, CredentialScope.ADMIN_PRINCIPALS_WRITE, RESOURCE_PROJECT, project_id)
+    project = await repository.get_project(session, project_id)
+    if project is None:
+        raise AdminResourceNotFound()
+    principal = await repository.create_principal(
+        session,
+        domain.Principal(
+            id=PrincipalId(_new_id()), project_id=project_id, kind=kind, name=name
+        ),
+    )
+    await _write_audit(
+        session,
+        actor_principal_id=context.principal_id,
+        action=AUDIT_PRINCIPAL_CREATED,
+        resource_type="principal",
+        resource_id=str(principal.id),
+        project_id=project_id,
+        metadata={"kind": kind.value},
+    )
+    return principal
+
+
+async def update_principal(
+    session: AsyncSession,
+    *,
+    context: domain.AdminRequestContext,
+    principal_id: PrincipalId,
+    name: str | None,
+    is_active: bool | None,
+) -> domain.Principal:
+    """Update a principal name/active state (authorized project scope)."""
+    existing = await resolve_admin_resource(
+        session,
+        context,
+        CredentialScope.ADMIN_PRINCIPALS_WRITE,
+        RESOURCE_PRINCIPAL,
+        str(principal_id),
+    )
+    assert isinstance(existing, domain.Principal)
+    updated = await repository.update_principal(
+        session, principal_id, name=name, is_active=is_active
+    )
+    assert updated is not None
+    name_changed = name is not None and name != existing.name
+    active_changed = is_active is not None and is_active != existing.is_active
+    if name_changed or active_changed:
+        await _write_audit(
+            session,
+            actor_principal_id=context.principal_id,
+            action=AUDIT_PRINCIPAL_UPDATED,
+            resource_type="principal",
+            resource_id=str(updated.id),
+            project_id=updated.project_id,
+            metadata={"name": name is not None, "is_active": is_active is not None},
+        )
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# Role assignment
+# ---------------------------------------------------------------------------
+
+
 async def create_role_assignment(
     session: AsyncSession,
     *,
-    actor_principal_id: PrincipalId,
+    context: domain.AdminRequestContext,
     principal_id: PrincipalId,
     role: Role,
     resource_scope_type: ResourceScopeType,
     resource_id: ProjectId | None,
 ) -> domain.RoleAssignment:
-    """Create a role assignment, preventing duplicate active equivalents."""
-    if role is Role.SYSTEM_ADMIN and resource_scope_type is not ResourceScopeType.DEPLOYMENT:
-        raise ValueError("system_admin must be deployment-scoped")
-    if role in (Role.PROJECT_ADMIN, Role.PROJECT_VIEWER) and (
-        resource_scope_type is not ResourceScopeType.PROJECT or resource_id is None
-    ):
-        raise ValueError("project-scoped roles require a project resource scope")
+    """Create a role assignment, centrally preventing privilege escalation.
+
+    The caller may never grant a role/scope broader than its own authority
+    (enforced by ``authorize_role_grant``). Duplicate active equivalents are
+    idempotent and emit no second audit event.
+    """
+    authorize_role_grant(context, role, resource_scope_type, resource_id)
+
+    if role in (Role.PROJECT_ADMIN, Role.PROJECT_VIEWER):
+        target = await repository.get_project(session, resource_id)
+        if target is None:
+            raise AdminResourceNotFound()
+
     existing = await repository.find_active_equivalent_assignment(
         session, principal_id, role, resource_scope_type, resource_id
     )
@@ -296,7 +430,7 @@ async def create_role_assignment(
 
     principal = await repository.get_principal(session, principal_id)
     if principal is None or not principal.is_active:
-        raise ValueError("principal does not exist or is inactive")
+        raise AdminResourceNotFound()
 
     assignment = await repository.create_role_assignment(
         session,
@@ -306,12 +440,12 @@ async def create_role_assignment(
             role=role,
             resource_scope_type=resource_scope_type,
             resource_id=resource_id,
-            created_by=actor_principal_id,
+            created_by=context.principal_id,
         ),
     )
     await _write_audit(
         session,
-        actor_principal_id=actor_principal_id,
+        actor_principal_id=context.principal_id,
         action=AUDIT_ROLE_ASSIGNMENT_CREATED,
         resource_type="role_assignment",
         resource_id=str(assignment.id),
@@ -327,17 +461,31 @@ async def create_role_assignment(
 async def revoke_role_assignment(
     session: AsyncSession,
     *,
-    actor_principal_id: PrincipalId,
+    context: domain.AdminRequestContext,
     assignment_id: RoleAssignmentId,
-) -> domain.RoleAssignment | None:
-    """Revoke a role assignment (idempotent), recording an audit event."""
+) -> domain.RoleAssignment:
+    """Revoke a role assignment (idempotent, actor-attributed audit).
+
+    A cross-project assignment resolves as not-found (non-enumerating). A repeat
+    revoke of an already-revoked assignment emits no second audit event.
+    """
+    existing = await resolve_admin_resource(
+        session,
+        context,
+        CredentialScope.ADMIN_PRINCIPALS_WRITE,
+        RESOURCE_ROLE_ASSIGNMENT,
+        str(assignment_id),
+    )
+    assert isinstance(existing, domain.RoleAssignment)
+    changed = existing.is_active and existing.revoked_at is None
     assignment = await repository.revoke_role_assignment(
         session, assignment_id, utcnow()
     )
-    if assignment is not None:
+    assert assignment is not None
+    if changed:
         await _write_audit(
             session,
-            actor_principal_id=actor_principal_id,
+            actor_principal_id=context.principal_id,
             action=AUDIT_ROLE_ASSIGNMENT_REVOKED,
             resource_type="role_assignment",
             resource_id=str(assignment.id),
@@ -349,10 +497,15 @@ async def revoke_role_assignment(
     return assignment
 
 
-async def create_admin_credential(
+# ---------------------------------------------------------------------------
+# Credential lifecycle (generic: manages either audience)
+# ---------------------------------------------------------------------------
+
+
+async def create_credential(
     session: AsyncSession,
     *,
-    actor_principal_id: PrincipalId,
+    context: domain.AdminRequestContext,
     project_id: ProjectId,
     principal_id: PrincipalId,
     name: str,
@@ -360,6 +513,11 @@ async def create_admin_credential(
     scopes: tuple[CredentialScope, ...] | None,
     expires_at: datetime | None,
 ) -> tuple[domain.ApiCredential, str]:
+    """Create a client credential of either audience (authorized scope).
+
+    Audience/scope coherence is enforced by the shared identity service.
+    """
+    authorize_admin(context, CredentialScope.ADMIN_CREDENTIALS_WRITE, RESOURCE_PROJECT, project_id)
     credential, raw_key = await identity_service.create_credential(
         session,
         project_id=project_id,
@@ -371,8 +529,8 @@ async def create_admin_credential(
     )
     await _write_audit(
         session,
-        actor_principal_id=actor_principal_id,
-        action=AUDIT_ADMIN_CREDENTIAL_CREATED,
+        actor_principal_id=context.principal_id,
+        action=AUDIT_CREDENTIAL_CREATED,
         resource_type="api_credential",
         resource_id=str(credential.id),
         project_id=project_id,
@@ -381,41 +539,61 @@ async def create_admin_credential(
     return credential, raw_key
 
 
-async def rotate_admin_credential(
+async def rotate_credential(
     session: AsyncSession,
     *,
-    actor_principal_id: PrincipalId,
+    context: domain.AdminRequestContext,
     credential_id: ApiCredentialId,
 ) -> tuple[domain.ApiCredential, str]:
-    credential, raw_key = await identity_service.rotate_credential(
-        session, credential_id
+    """Rotate a credential (authorized scope; cross-project resolves not-found)."""
+    existing = await resolve_admin_resource(
+        session,
+        context,
+        CredentialScope.ADMIN_CREDENTIALS_WRITE,
+        RESOURCE_CREDENTIAL,
+        str(credential_id),
     )
+    assert isinstance(existing, domain.ApiCredential)
+    credential, raw_key = await identity_service.rotate_credential(session, credential_id)
     await _write_audit(
         session,
-        actor_principal_id=actor_principal_id,
-        action=AUDIT_ADMIN_CREDENTIAL_ROTATED,
+        actor_principal_id=context.principal_id,
+        action=AUDIT_CREDENTIAL_ROTATED,
         resource_type="api_credential",
         resource_id=str(credential.id),
         project_id=credential.project_id,
+        metadata={"audience": credential.audience.value},
     )
     return credential, raw_key
 
 
-async def revoke_admin_credential(
+async def revoke_credential(
     session: AsyncSession,
     *,
-    actor_principal_id: PrincipalId,
+    context: domain.AdminRequestContext,
     credential_id: ApiCredentialId,
-) -> domain.ApiCredential | None:
+) -> domain.ApiCredential:
+    """Revoke a credential (idempotent; cross-project resolves not-found)."""
+    existing = await resolve_admin_resource(
+        session,
+        context,
+        CredentialScope.ADMIN_CREDENTIALS_WRITE,
+        RESOURCE_CREDENTIAL,
+        str(credential_id),
+    )
+    assert isinstance(existing, domain.ApiCredential)
+    changed = existing.is_active and existing.revoked_at is None
     credential = await identity_service.revoke_credential(session, credential_id)
-    if credential is not None:
+    assert credential is not None
+    if changed:
         await _write_audit(
             session,
-            actor_principal_id=actor_principal_id,
-            action=AUDIT_ADMIN_CREDENTIAL_REVOKED,
+            actor_principal_id=context.principal_id,
+            action=AUDIT_CREDENTIAL_REVOKED,
             resource_type="api_credential",
             resource_id=str(credential.id),
             project_id=credential.project_id,
+            metadata={"audience": credential.audience.value},
         )
     return credential
 
@@ -425,10 +603,14 @@ __all__ = [
     "authorize_admin",
     "bootstrap",
     "get_bootstrap_status",
+    "create_project",
+    "update_project",
+    "create_principal",
+    "update_principal",
     "create_role_assignment",
     "revoke_role_assignment",
-    "create_admin_credential",
-    "rotate_admin_credential",
-    "revoke_admin_credential",
+    "create_credential",
+    "rotate_credential",
+    "revoke_credential",
     "utcnow",
 ]

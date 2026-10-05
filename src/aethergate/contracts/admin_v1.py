@@ -80,7 +80,6 @@ class ProjectUpdate(ContractModel):
 
 
 class PrincipalCreate(ContractModel):
-    project_id: ProjectId
     kind: PrincipalKind
     name: str = Field(min_length=1)
     is_active: bool = True
@@ -168,6 +167,17 @@ class RoleAssignmentRead(ContractModel):
     created_by: PrincipalId | None = None
     revoked_at: datetime | None = None
     is_active: bool
+
+
+class RoleAssignmentCreate(ContractModel):
+    principal_id: PrincipalId
+    role: Role
+    resource_scope_type: ResourceScopeType
+    resource_id: ProjectId | None = None
+
+
+class RoleAssignmentRevokeRequest(ContractModel):
+    reason: str | None = Field(default=None, min_length=1)
 
 
 class WhoamiRead(ContractModel):
@@ -540,6 +550,8 @@ __all__ = [
     "ApiCredentialUpdate",
     "BootstrapResult",
     "RoleAssignmentRead",
+    "RoleAssignmentCreate",
+    "RoleAssignmentRevokeRequest",
     "WhoamiRead",
     "ProviderCreate",
     "ProviderRead",

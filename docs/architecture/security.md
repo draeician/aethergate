@@ -98,6 +98,31 @@ principal/RBAC model.
 - **Authorization failures are indistinguishable.** Admin auth/authorization/bootstrap failures are
   fixed messages that do not leak bootstrap state or whether a target resource exists. (Settled)
 
+## Identity phase 2 hardening — admin CRUD and cross-project non-enumeration (AGV2-014)
+
+- **Cross-project resource non-enumeration.** Opaque-ID read/mutate operations (project/principal/
+  credential/role-assignment) resolve through a centralized resource-scope resolver
+  (`resolve_admin_resource`). A nonexistent ID and a cross-project ID are indistinguishable (`404
+  not_found` via `AdminResourceNotFound`); a resource inside the caller's scope but denied by the
+  specific read/write permission returns `403`. `system_admin` resolves any target; project-scoped
+  callers resolve only their authorized project. (Settled)
+- **Centralized privilege-escalation defense.** `authorize_role_grant` rejects incoherent role/scope
+  shapes (`system_admin` must be deployment-scoped; project roles must be project-scoped) as `400`,
+  and rejects any grant broader than the caller's own authority as `403`. `project_viewer` can never
+  mutate roles. (Settled)
+- **Service-layer authorization boundaries.** Administrative mutation services take a typed
+  `AdminRequestContext` and authorize internally; an internal caller cannot bypass RBAC by passing a
+  forged actor ID. Routers remain thin. (Settled)
+- **Generic credential administration.** `/admin/v1/credentials` manages client credentials of either
+  audience; service/audit actions are neutral (`credential.*`), audience is recorded in safe metadata,
+  and audience/scope coherence is enforced by the shared identity service. (Settled)
+- **Audit idempotency.** Repeated credential/role-assignment revoke emits no second `revoked` event;
+  duplicate active role-assignment create emits no second `created` event. Audit metadata never
+  contains raw keys, hashes, tokens, or Authorization headers. (Settled)
+- **Database role/scope invariants (migration 0011).** `system_admin` must be deployment-scoped with
+  no project resource ID; `project_admin`/`project_viewer` must be project-scoped — enforced by CHECK
+  constraints so direct writes cannot bypass application invariants. (Settled)
+
 ## Bootstrap and fail-closed startup
 
 - A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled — AGV2-013)

@@ -46,8 +46,19 @@ Admin identity DTOs (AGV2-013):
   the DTO persistence- and audience-neutral; inference resolves to `inference:invoke` and admin to
   none.
 
-These DTOs now back a minimal protected admin HTTP surface (bootstrap, whoami, credential
-list/create/rotate/revoke); full admin resource CRUD routes remain deferred.
+Admin CRUD DTOs (AGV2-014):
+
+- `RoleAssignmentCreate` — `principal_id`, `role`, `resource_scope_type`, optional `resource_id`
+  (required for project-scoped roles; absent for deployment). `RoleAssignmentRevokeRequest` carries an
+  optional `reason`. Role/scope coherence and privilege-escalation are enforced centrally in the
+  service, not the DTO.
+- `PrincipalCreate` no longer carries `project_id`: the project is the path segment
+  (`POST /admin/v1/projects/{project_id}/principals`); it carries `kind`, `name`, `is_active`.
+- List endpoints return a shared `Page[T]` shape (`items`, `limit`, `offset`, `total`) with `limit`
+  bounded `1..200` (default 50) and stable sort.
+
+These DTOs now back the full `/admin/v1` identity CRUD surface (project/principal/role-assignment/
+credential list/create/read/update/revoke) introduced in AGV2-014.
 
 Quota DTOs (scheduler phase 2):
 

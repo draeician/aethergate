@@ -108,6 +108,25 @@ class AdminAuthorizationError(DomainError):
     """
 
 
+class AdminResourceNotFound(DomainError):
+    """A target resource is not visible to the caller.
+
+    Raised by the authorization-aware resource resolver when a resource does not
+    exist **or** exists outside the caller's authorized project scope. The two
+    cases are deliberately indistinguishable so a project-scoped caller cannot
+    enumerate resources in other projects by opaque ID.
+    """
+
+
+class AdminValidationError(DomainError):
+    """An admin mutation is semantically invalid (not an authorization failure).
+
+    Used for role/scope coherence and other request-shape violations that are
+    not about the caller's authority, so they surface as a clear 4xx rather than
+    a misleading authorization failure.
+    """
+
+
 class BootstrapTokenRejected(DomainError):
     """The bootstrap secret was missing or did not match the configured value.
 

@@ -323,3 +323,31 @@ def test_migration_0009_to_0010() -> None:
         assert "details" in _columns(url, "audit_events")
     finally:
         asyncio.run(drop_database(url))
+
+
+def test_migration_0010_to_0011() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1011")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0010", env=env)
+        assert "ck_role_assignments_system_admin_deployment" not in _check_constraints(
+            url, "role_assignments"
+        )
+        assert "ck_role_assignments_project_role_project_scope" not in _check_constraints(
+            url, "role_assignments"
+        )
+
+        _run_alembic("upgrade", "head", env=env)
+        assert "ck_role_assignments_system_admin_deployment" in _check_constraints(
+            url, "role_assignments"
+        )
+        assert "ck_role_assignments_project_role_project_scope" in _check_constraints(
+            url, "role_assignments"
+        )
+    finally:
+        asyncio.run(drop_database(url))

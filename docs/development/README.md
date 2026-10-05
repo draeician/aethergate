@@ -61,20 +61,27 @@ scripts/dev/v2 <command>
 - `GET /v1/models/{model}` — retrieve a public model alias.
 - `POST /v1/chat/completions` — Chat Completions (non-streaming + SSE `stream=true`).
 
-Admin control-plane endpoints (minimal surface, AGV2-013):
+Admin control-plane endpoints (AGV2-013/014):
 
 - `POST /admin/v1/bootstrap` — one-use admin bootstrap (bearer = `AETHERGATE_BOOTSTRAP_TOKEN`);
   returns the initial `system_admin` credential's raw key once.
 - `GET /admin/v1/whoami` — safe metadata for an authenticated admin key.
-- `GET /admin/v1/projects/{project_id}/credentials` — protected read (list, metadata only).
-- `POST /admin/v1/credentials` — protected create (raw key returned once).
-- `POST /admin/v1/credentials/{id}/rotate` / `.../revoke` — protected lifecycle.
+- Projects: `POST /admin/v1/projects`, `GET /admin/v1/projects` (paginated),
+  `GET /admin/v1/projects/{id}`, `PATCH /admin/v1/projects/{id}`.
+- Principals: `POST /admin/v1/projects/{project_id}/principals`,
+  `GET /admin/v1/projects/{project_id}/principals` (paginated), `GET /admin/v1/principals/{id}`,
+  `PATCH /admin/v1/principals/{id}`.
+- Role assignments: `POST /admin/v1/role-assignments`, `GET /admin/v1/role-assignments` (paginated),
+  `GET /admin/v1/role-assignments/{id}`, `POST /admin/v1/role-assignments/{id}/revoke`.
+- Credentials: `POST /admin/v1/credentials`, `GET /admin/v1/projects/{project_id}/credentials`
+  (paginated), `GET /admin/v1/credentials/{id}`, `POST /admin/v1/credentials/{id}/rotate` and `/revoke`.
 
 Admin auth requires an `admin`-audience credential (`Authorization: Bearer agk_...`) plus an active
 role assignment granting the needed `admin:*` permission (`system_admin` deployment-wide;
 `project_admin`/`project_viewer` scoped to one project). Admin errors use
 `{"error":{"code","message","request_id"}}`; auth/authorization/bootstrap failures are fixed and
-indistinguishable.
+indistinguishable. Opaque-ID read/mutate operations are non-enumerating across project boundaries: a
+nonexistent ID and a cross-project ID both return `404 not_found`.
 
 Inference is authenticated with an AetherGate-issued Bearer API key
 (`Authorization: Bearer agk_...`). A missing/invalid/wrong-scheme/malformed header returns a
@@ -198,6 +205,8 @@ and a nullable `budget_reservations.price_snapshot_id` for the snapshot lifecycl
 `api_credentials` into one-way-verifiable scoped client credentials — `key_prefix`, `key_hash`
 (unique), `audience`, `scopes`, `expires_at`/`revoked_at`/`last_used_at`, dropping `secret_ref_id`;
 `0010` adds admin identity — `role_assignments` (with a partial-unique index preventing duplicate
-active equivalent assignments), the singleton `bootstrap_state`, and `audit_events`).
+active equivalent assignments), the singleton `bootstrap_state`, and `audit_events`; `0011` enforces
+the role/scope coherence shape — `system_admin` must be deployment-scoped, project roles must be
+project-scoped).
 Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

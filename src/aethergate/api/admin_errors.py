@@ -15,6 +15,8 @@ from aethergate.api.deps import get_gateway_request_id
 from aethergate.errors import (
     AdminAuthenticationRequired,
     AdminAuthorizationError,
+    AdminResourceNotFound,
+    AdminValidationError,
     BootstrapAlreadyCompleted,
     BootstrapTokenRejected,
     CredentialLifecycleError,
@@ -92,10 +94,34 @@ async def credential_lifecycle_error_handler(
     )
 
 
+async def admin_resource_not_found_handler(
+    request: Request, exc: AdminResourceNotFound
+) -> JSONResponse:
+    return _admin_error(
+        404,
+        "not_found",
+        "Resource not found.",
+        get_gateway_request_id(request),
+    )
+
+
+async def admin_validation_error_handler(
+    request: Request, exc: AdminValidationError
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "invalid_request",
+        str(exc),
+        get_gateway_request_id(request),
+    )
+
+
 __all__ = [
     "admin_auth_error_handler",
     "admin_authorization_error_handler",
     "bootstrap_token_rejected_handler",
     "bootstrap_already_completed_handler",
     "credential_lifecycle_error_handler",
+    "admin_resource_not_found_handler",
+    "admin_validation_error_handler",
 ]

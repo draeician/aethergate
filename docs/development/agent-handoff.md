@@ -2,119 +2,132 @@
 
 ## Current State
 - Branch: v2
-- AGV2-013 implementation commit: `feat(identity): add admin RBAC and one-use bootstrap`
-  (created this session), pushed to `origin/v2`.
-- Prior commits remain: `fca2359` (AGV2-012V lifecycle hardening), `68a8844` (AGV2-012V handoff),
-  `2c8af13` (task queue doc). This handoff supersedes the AGV2-012V handoff.
+- AGV2-014 implementation commit: `feat(admin): complete identity management and authorization boundaries`
+  (this session), pushed to `origin/v2`.
+- Prior commits remain: `1ddfcbb` (AGV2-014 queued), `5a81425` (AGV2-013),
+  `fca2359`/`68a8844` (AGV2-012V). This handoff supersedes the AGV2-013 handoff.
 
 ## Task Completed
-AGV2-013 — Identity phase 2: admin service authentication, RBAC, and one-use bootstrap.
+AGV2-014 — Admin identity CRUD and cross-project authorization hardening.
 
-### Admin audience / scopes
-- New typed admin permissions on `CredentialScope`: `admin:credentials:read|write`,
-  `admin:projects:read|write`, `admin:principals:read|write`, `admin:catalog:read|write`,
-  `admin:accounting:read|write`, `admin:queue:read|write`, `admin:audit:read`.
-- Audience/scope coherence is now enforced **both ways**: inference-audience credentials may carry
-  only `inference:invoke`; admin-audience credentials may carry only `admin:*`. Cross-audience scope
-  is rejected at create/rotate and at authentication.
+### Anti-enumeration (cross-project resource visibility)
+- `src/aethergate/identity/authorization.py` is the single resource-scope resolver. Opaque-ID
+  read/mutate operations (project/principal/credential/role-assignment GET/PATCH/rotate/revoke) go
+  through `resolve_admin_resource`, which maps a resource to its authorization scope
+  (`project` -> its `id`, `principal`/`credential` -> `project_id`, role assignment -> project or
+  deployment) and returns it only when it exists **and** is within the caller's scope.
+- A nonexistent ID and a cross-project ID are indistinguishable (`404 not_found` via
+  `AdminResourceNotFound`). A resource inside the caller's scope but denied by the specific
+  read/write permission still returns `403` (it is already visible via read).
+- Live proof: `project_admin(A)` GET/rotate/revoke on B's credential vs a nonexistent ID both `404
+  not_found`; B's credential remained `is_active: true`.
 
-### RBAC model
-- `Role` (`system_admin` | `project_admin` | `project_viewer`) and `ResourceScopeType`
-  (`deployment` | `project`). Durable `RoleAssignment` entity + `role_assignments` table with a
-  partial unique index `uq_role_assignments_active_equivalent` preventing duplicate active equivalent
-  assignments. `system_admin` is deployment-scoped; project roles require a project scope.
-- Centralized `authorize_admin(context, permission, resource_type, resource_id)` in
-  `src/aethergate/identity/rbac.py` + `admin.py` — not scattered router checks. Authentication
-  (`authenticate_admin` -> `AdminRequestContext`) and authorization are separate steps; active role
-  assignments are re-checked on every protected request.
+### Generic credential management
+- `/admin/v1/credentials` is now the administrative surface for client credentials of **either**
+  audience. Service methods renamed to neutral `create_credential` / `rotate_credential` /
+  `revoke_credential`; audit actions are `credential.created` / `credential.rotated` /
+  `credential.revoked`, with the safe `audience` value recorded in audit metadata. No name implies a
+  managed credential is itself an admin credential.
 
-### Bootstrap
-- `AETHERGATE_BOOTSTRAP_TOKEN` is a `SecretStr`, no default, empty/unset disables bootstrap,
-  placeholders rejected, never logged. `POST /admin/v1/bootstrap` transactionally establishes the
-  initial project/principal, grants `system_admin`, creates the admin credential, marks
-  `bootstrap_state` complete, and returns the raw admin key once. `SELECT ... FOR UPDATE` + the
-  singleton state make concurrent bootstrap exactly-one-wins; restart does not reopen bootstrap.
+### Project / principal / role-assignment CRUD
+- New HTTP endpoints (see admin-api doc): project list/create/read/patch, principal
+  list/create/read/patch, role-assignment create/list/read/revoke, credential read, plus paginated
+  credential list. All `system_admin`/`project_admin`/`project_viewer` scope rules are enforced
+  centrally; project creation is deployment-level (`system_admin`) only; no delete (inactive state).
 
-### Admin HTTP surface (minimal)
-- `POST /admin/v1/bootstrap`, `GET /admin/v1/whoami`, `GET /admin/v1/projects/{id}/credentials`,
-  `POST /admin/v1/credentials`, `POST /admin/v1/credentials/{id}/rotate` and `/revoke`.
-- Admin error envelope `{"error":{"code","message","request_id"}}`; auth/authorization/bootstrap
-  failures are fixed and indistinguishable. No query-string credentials; raw key never logged.
+### Service-layer authorization hardening
+- Mutation services now take a typed `AdminRequestContext` and authorize internally
+  (`authorize_admin` / `authorize_role_grant` / `resolve_admin_resource`), so an internal caller
+  cannot bypass RBAC by passing a forged actor ID. Routers stay thin.
 
-### Audit
-- `audit_events` table (JSON column `details`, avoiding the SQLAlchemy-reserved `metadata`). Records
-  `bootstrap.completed` (NULL actor), `role_assignment.created`/`revoked`,
-  `admin_credential.created`/`rotated`/`revoked` with actor principal ID, action, resource
-  type/ID, timestamp, safe metadata only.
+### Delegation / escalation defense
+- `authorize_role_grant` centrally rejects (a) incoherent role/scope shapes (`system_admin` must be
+  deployment-scoped; project roles must be project-scoped) as `400 invalid_request`, and (b) any grant
+  broader than the caller's own authority as `403` (e.g. `project_admin(A)` cannot grant
+  `system_admin` or any role for project B; `project_viewer` cannot mutate roles).
+
+### Resource-scope resolution
+- Centralized mapping in `authorization.py`: `_scope_of` + `_in_scope` + `resolve_admin_resource` +
+  `authorized_project_ids`. Routers/services never compare opaque resource IDs to project IDs.
+
+### Audit idempotency
+- Repeated credential/role-assignment revoke emits no second `revoked` event; duplicate active
+  role-assignment create emits no second `created` event. Audit metadata contains no raw key, hash,
+  token, or Authorization header (proven by test + live SQL grep = 0).
+
+### Pagination / list safety
+- Shared `Page[T]` (`items`, `limit`, `offset`, `total`) contract across
+  projects/principals/credentials/role-assignments; `limit` bounded `1..200`, default 50, stable sort
+  (created_at, id). Counts use `SELECT count(*)`.
 
 ## Migration
-- New revision `0010` (identity phase 2): `role_assignments`, `bootstrap_state`, `audit_events`.
-  `0009 -> 0010` succeeded on the live DB and is green in the suite; empty-DB -> latest is green;
-  `0001`–`0009` untouched; old inference credentials remain valid (proven live).
+- New revision `0011` adds two role/scope coherence CHECK constraints on `role_assignments`:
+  `ck_role_assignments_system_admin_deployment` (`system_admin` => deployment scope + empty resource
+  ID) and `ck_role_assignments_project_role_project_scope` (`project_admin`/`project_viewer` =>
+  project scope). `0010 -> 0011` and empty-DB -> latest are green; `0001`–`0010` untouched.
 
-## Real nomnom verification (dynamic port 36299; backend ollama `qwen3.8-2b-distill:Q6_K`)
-- **A. Bootstrap** — missing token `401 bootstrap_token_rejected`; wrong token `401`; correct token
-  `201` (raw key once); second use `409 bootstrap_already_completed`; API restart keeps it closed and
-  the admin key valid; DB holds only completion state, role assignment, credential metadata; raw
-  admin key and bootstrap token absent from all tables (SQL grep = 0).
-- **B. Concurrent bootstrap** — 5 concurrent calls: exactly one `201`, four `409`.
-- **C. whoami** — admin key `200` (safe principal/role/audience, no secret); inference key `401`.
-- **D. Project RBAC** — `system_admin` lists A and B; `project_admin(A)` lists/writes A (200/201),
-  `403` on B (list + write); `project_viewer(A)` lists A (200) but write `403` and `403` on B.
-- **E. Role revocation** — revoked the viewer assignment; its next protected request `403` while the
-  credential stayed active; the project_admin still worked.
-- **F. Credential lifecycle** — create/list/rotate/revoke over HTTP; list carries no raw key/hash;
-  rotate -> old key `401`/new key `200`; revoke -> `401`; audit events for create/rotate/revoke with
-  the real actor principal ID.
-- **G. Audience separation** — inference key `401` on `/admin/v1/whoami`; admin key `401` on
-  `/v1/models` and `/v1/chat/completions`.
-- **H. Regression** — official OpenAI SDK non-stream and stream both succeeded on a fresh inference
-  key; scheduler/quota/accounting/migration suites green in the full containerized suite.
+## Real nomnom verification (dynamic port 38359)
+- **A. Anti-enumeration** — `project_admin(A)` get/rotate/revoke of B's credential and of a
+  nonexistent ID both `404 not_found`; B's credential untouched (`is_active: true`). Repeated for
+  principal and role-assignment IDs.
+- **B. Project CRUD** — `system_admin` created A and B; `project_admin(A)` read/patch A (`200`),
+  read B (`404`), read nonexistent (`404`), create project (`403`); `project_viewer(A)` read A (`200`),
+  patch A (`403`).
+- **C. Principal CRUD** — `project_admin(A)` listed A principals (`total: 2`), read B principal
+  (`404`) and nonexistent (`404`); deactivating the project invalidated the admin credential (`401`)
+  and reactivation restored it (`200`).
+- **D. Escalation** — `project_admin(A)` grant `system_admin` `403`, grant role for B `403`;
+  `project_viewer` grant `403`.
+- **E. Audience separation** — inference key `401` on `/admin/v1/whoami`; admin key `401` on
+  `/v1/models`; inference key `200` on `/v1/models`.
+- **F. Audit** — neutral action names (`bootstrap.completed`, `project.created`,
+  `principal.created`, `role_assignment.created`, `credential.created`, ...); no `agk_`/`agb_`/
+  `key_hash` in `details` (SQL grep = 0).
+- **G. Regression** — bootstrap one-use (`201` then `409`) after restart; admin whoami `200`; the full
+  containerized suite (306 tests) covers scheduler/quota/accounting/identity/migrations. Real SDK
+  non-stream/stream inference was exercised in AGV2-013 and is unchanged by this admin-surface task;
+  it requires a seeded provider backend (`scripts/dev/v2 devseed`) not part of this task.
 
 ## Automated tests
-`scripts/dev/v2 test` -> **290 passed** (was 268; +22). `ruff check src tests` clean;
-`git diff --check` clean; staged-content secret scan clean. New coverage: audience coherence both
-ways, system_admin deployment-wide, project_admin/project_viewer isolation + read-only, revoked
-assignment denied, duplicate active assignment prevented, admin request context, cross-audience
-rejection both directions, bootstrap missing/wrong/correct/second-use/concurrent/restart-survival/
-raw-secret-absence, whoami safety, role-revocation immediate block, admin credential lifecycle
-authorization, audit events, migration `0009 -> 0010`.
+`scripts/dev/v2 test` -> **306 passed** (was 290; +16). `ruff check src tests` clean;
+`git diff --check` clean; staged-content secret scan clean. New coverage: cross-project
+non-enumeration (credential/principal/role-assignment), resource-scope resolver mapping, service-layer
+escalation defense, project/principal CRUD + pagination/bounds, project/principal deactivation auth
+impact, role-assignment CRUD + delegation, generic credential audience separation, idempotent
+revoke/duplicate-assignment audit, audit metadata secret absence, migration `0010 -> 0011`.
 
 ## Key files
-- `src/aethergate/identity/admin.py` — authenticate/authorize/bootstrap/RBAC/audit service.
-- `src/aethergate/identity/rbac.py` — centralized role->permission policy.
+- `src/aethergate/identity/authorization.py` — centralized `authorize_admin`,
+  `authorize_role_grant`, `resolve_admin_resource`, `authorized_project_ids`.
+- `src/aethergate/identity/admin.py` — authenticate/bootstrap + project/principal/role/credential
+  services (context-driven, internal authorization, neutral credential audit actions).
 - `src/aethergate/identity/service.py` — shared create/rotate/revoke + audience coherence.
-- `src/aethergate/api/admin.py` + `api/admin_errors.py` — minimal admin HTTP surface + envelope.
-- `src/aethergate/persistence/models.py` / `repository.py` — role/bootstrap/audit persistence.
-- `src/aethergate/migrations/versions/0010_admin_identity.py` — new migration.
-- `src/aethergate/config.py` — `bootstrap_token` (`AETHERGATE_BOOTSTRAP_TOKEN`).
-- `deploy/v2/compose.yaml` + `scripts/dev/v2` — bootstrap-token env + `ensure_bootstrap_token`.
-- `tests/test_admin_auth.py`, `tests/test_migrations.py` — new/updated tests.
+- `src/aethergate/api/admin.py` + `api/admin_errors.py` — full admin CRUD surface + error envelope.
+- `src/aethergate/contracts/admin_v1.py` — `RoleAssignmentCreate`, `RoleAssignmentRevokeRequest`,
+  `PrincipalCreate` (project_id dropped; it is in the path).
+- `src/aethergate/persistence/models.py` / `repository.py` — role/scope constraints + list/count
+  functions.
+- `src/aethergate/migrations/versions/0011_role_scope_coherence.py` — new migration.
+- `tests/test_admin_auth.py`, `tests/test_admin_crud.py`, `tests/test_migrations.py`.
 
 ## Decisions
-- Authorization is centralized in `authorize_admin` with role assignments as the single gate; a
-  credential carrying an `admin:*` scope alone does not grant access — the active role assignment
-  does. This keeps the design open to later custom roles without a rewrite (custom-role CRUD is out
-  of scope).
-- `AuditEvent` ORM maps its JSON column to `details` (SQLAlchemy reserves `metadata`); the domain
-  entity field stays `metadata`.
-- `AETHERGATE_BOOTSTRAP_TOKEN` empty/unset disables bootstrap (safe), rather than failing startup, so
-  the token can be removed after bootstrap; placeholder strings are still rejected.
-- Bootstrap's actor is `NULL` in audit (no authenticated actor yet), not a synthetic principal.
+- `resolve_admin_resource` returns `404` only for out-of-scope or nonexistent resources, and `403` for
+  in-scope-but-insufficient-permission, so a project_viewer's write attempt on its own project is
+  `403` (not misleading `404`), while cross-project enumeration stays impossible.
+- Generic credential endpoint (section 2 "preferred" model): neutral service/audit names, audience in
+  metadata, coherence enforced by the shared identity service.
+- Migration `0011` adds DB backstops for role/scope coherence so direct writes cannot bypass the
+  application invariants; both models and migration carry the same constraints.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
-  `--no-deps`. Dynamic host port changes every `up`; re-run `scripts/dev/v2 url` (this session: 36299).
+  `--no-deps`. Dynamic host port changes every `up`; re-run `scripts/dev/v2 url` (this session: 38359).
 - litellm 1.104.0 has no trusted token estimator, so token-quota/budget routes fail closed
   (`quota_token_estimator_unavailable`); live inference smoke used request-only quota.
-- `qwen3.8-2b-distill:Q6_K` emits `</think>` reasoning content; gateway timings don't reflect
-  upstream parallelism.
-- Admin role-assignment/credential creation is currently exercised via the service layer (no HTTP
-  endpoint yet for role assignment or project/principal create) — expected for the minimal surface.
-- The dev DB volume retains leftover inference credentials/model aliases from AGV2-012V smoke tests;
-  not committed.
+- The dev DB was reset for a clean live-verification slate; the prior AGV2-013 smoke data is gone.
+- Project creation requires `system_admin`; project_admin/project_viewer cannot create projects.
 
 ## Recommended Next Step
-Expose the remaining admin identity CRUD (role-assignment create/revoke, project/principal create)
-over `/admin/v1` reusing the centralized `authorize_admin`/service layer, then proceed to the human
-OIDC authorization-code flow plugged into the same principal/RoleAssignment model.
+Introduce human OIDC authorization-code flow plugged into the same `Principal`/`RoleAssignment`
+model, then extend the remaining catalog/accounting/queue admin CRUD over `/admin/v1` reusing the
+centralized authorization and pagination foundations.
