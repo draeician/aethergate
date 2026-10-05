@@ -2,91 +2,141 @@
 
 ## Current State
 - Branch: v2
-- AGV2-014V implementation commit: `fix(admin): close identity verification and RBAC race gaps`
-  (this session), pushed to `origin/v2`.
-- Prior commits remain: `312210d` (AGV2-014V queued), `d283fd2` (AGV2-014), `1ddfcbb`
-  (AGV2-014 queued), `5a81425` (AGV2-013). This handoff supersedes the AGV2-014 handoff.
+- AGV2-015 implementation commit: `805c403` (`feat(identity): add OIDC human sessions and CSRF
+  protection`), pushed to `origin/v2` (this session).
+- Prior commits remain: `d7842c9` (AGV2-014V), `d283fd2` (AGV2-014), `5a81425` (AGV2-013). This
+  handoff supersedes the AGV2-014V handoff.
 
 ## Task Completed
-AGV2-014V — Close admin CRUD verification gaps and harden bootstrap/RBAC races.
+AGV2-015 — Human identity phase: OIDC authorization-code flow and secure admin browser sessions.
 
-### Bootstrap secret strength guard (no migration)
-- `src/aethergate/config.py` now rejects a configured `AETHERGATE_BOOTSTRAP_TOKEN` shorter than
-  `MIN_BOOTSTRAP_TOKEN_LENGTH` (32 chars) in addition to the existing placeholder rejection.
-  Empty/unset still disables bootstrap; the token remains a `SecretStr` and never appears in
-  `repr`/validation/log output. This is a **floor against short/guessable secrets, not an entropy
-  proof** — the dev helper (`agb_ + secrets.token_urlsafe(32)`, 47 chars) remains valid and operators
-  must still supply high-entropy material.
+### OIDC library / validation approach
+- Added `PyJWT>=2.8,<3` and `httpx>=0.27,<1` to runtime dependencies. ID-token signature verification
+  is delegated to PyJWT against the provider JWKS; only asymmetric algorithms (`RS256/384/512`,
+  `ES256/384/512`, `PS256/384/512`) are accepted — `none` and symmetric `HS*` are rejected regardless
+  of provider metadata. `iss`, `aud` (client ID), `exp`/`nbf`, and `nonce` are validated (nonce in
+  constant time); a missing/empty `sub` is rejected. Discovery/JWKS are derived only from the
+  configured issuer, fetched over `httpx`, and cached in memory with a bounded TTL; signing keys are
+  selected by `kid` (single-key fallback).
 
-### Concurrent duplicate role assignment is idempotent
-- `src/aethergate/identity/admin.py::create_role_assignment` now inserts through
-  `session.begin_nested()` (savepoint) and translates a duplicate-race `IntegrityError` back to the
-  canonical winner via `find_active_equivalent_assignment`. Unrelated `IntegrityError`s (e.g. FK
-  violations) are re-raised, not swallowed. Exactly one active row and one `role_assignment.created`
-  audit event result under concurrency.
+### External identity model
+- `ExternalIdentity`: stable ID, `principal_id`, `issuer`, opaque case-sensitive `subject`, optional
+  safe display claims (`email`, `display_name`), `created_at`, `last_login_at`, `is_active`.
+  `(issuer, subject)` is unique and is the identity key; **email is never the identity key**; one
+  external identity maps to exactly one principal; no ID/access/refresh token is persisted.
 
-### Real nomnom verification (dynamic port 45435)
-- **Bootstrap strength (live).** Short arbitrary token -> `ValidationError`; placeholder -> rejected;
-  generated `agb_` token accepted; token hidden in `repr`; unset (env cleared) disables bootstrap.
-- **Principal deactivation.** Created project/principal/project_admin credential; `whoami` `200`;
-  `PATCH /principals/{id} {"is_active":false}`; next `whoami` with that credential `401` immediately
-  (no restart).
-- **Role revocation.** Created project-scoped project_admin credential; `GET
-  /projects/{id}/credentials` `200`; `POST /role-assignments/{id}/revoke`; next
-  `GET /projects/{id}/credentials` `404` (no roles -> non-enumerating); credential `is_active: true`;
-  `whoami` still `200` with `roles: []`.
-- **Real SDK inference** (`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, Ollama
-  `qwen3.8-2b-distill:Q6_K` at `http://192.168.22.50:11434`, alias `gpt-4`): official OpenAI Python
-  SDK non-stream chat completion succeeded; SDK streaming chat completion succeeded; admin key `401`
-  on `/v1/models` and `/v1/chat/completions`; inference key `401` on `/admin/v1/whoami`.
-- **Attribution.** Both inference requests recorded `project_id`/`principal_id`/`api_credential_id`
-  matching the inference credential, state `succeeded`.
+### Session model and cookie properties
+- `BrowserSession` persists the authoritative session in PostgreSQL: stable ID, principal ID, one-way
+  SHA-256 `session_hash` (raw cookie never persisted), `created_at`, `last_seen_at` (throttled idle
+  slide), idle/absolute expiry, `revoked_at`, and a one-way `csrf_token_hash`.
+- Cookie: cryptographically random (>=256 bits), `HttpOnly`, `SameSite=Lax`, `Secure` in `prod`,
+  `Path=/admin`, `Max-Age` = absolute lifetime (43200s default; idle 3600s). No raw token in JSON or
+  URL.
+
+### CSRF model
+- `X-CSRF-Token` header required for `POST/PUT/PATCH/DELETE` when authenticated by browser session;
+  compared in constant time against the one-way verifier. `GET`/`HEAD` and Bearer service-account
+  requests are exempt. Missing/invalid => fixed `403 invalid_csrf_token`. The raw token is delivered
+  exactly once in the callback response.
+
+### Authentication precedence
+- A supplied `Authorization` header is authoritative and must authenticate successfully; an invalid
+  header never falls through to a cookie. CSRF applies only when the selected mechanism is browser
+  session. `AdminRequestContext` carries `authentication_kind`
+  (`service_credential`|`browser_session`) and `browser_session_id` vs `api_credential_id`.
+
+### Human provisioning / linking policy
+- A known `(issuer, subject)` resolves to its linked, active principal. A `system_admin` links an
+  identity via `POST /admin/v1/oidc/identities`. Unknown identities are denied unless
+  `AETHERGATE_OIDC_JIT_PROVISIONING=true`, which creates an unprivileged `user` principal with zero
+  roles. No role is derived from email domain, group, username, or claims.
+
+### Local test IdP strategy
+- `aethergate.dev_oidc_idp.DevOidcIdp` implements discovery, JWKS (RS256), an auto-approving
+  authorize endpoint, and a PKCE S256 token endpoint that returns a signed ID token. It is
+  deterministic and offline; not production identity infrastructure. It generates its RSA key in
+  memory, so restarting it changes the signing key (restart the API to clear its in-memory JWKS cache).
+
+### Real nomnom verification (dynamic host port 44777)
+Live via a one-off host-network IdP container (`http://192.168.22.50:8490`) and a pinned API host
+port (uncommitted compose override) so the redirect URI was stable; backend Ollama
+`http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`.
+
+- **A happy path.** Linked USER principal + `system_admin` role; `/auth/oidc/login` -> IdP authorize
+  (S256 PKCE) -> callback `200`, `SessionEstablished` with `roles:["system_admin"]` + `csrf_token`,
+  session cookie set; `GET /admin/v1/whoami` `200` via cookie only (`authentication_kind:
+  browser_session`, `api_credential_id: null`).
+- **B cookie properties.** `Set-Cookie: ag_session=...; HttpOnly; Max-Age=43200; Path=/admin;
+  SameSite=lax` (no `Secure` in dev). No raw token in response JSON or URL.
+- **C state/nonce/PKCE failures.** Wrong state -> `400 invalid_login_state`; replayed callback ->
+  `400 invalid_login_state` (no session); forged code (real state) -> `401 oidc_authentication_failed`
+  (no session, exchange failed). Nonce/PKCE-verifier mismatches are covered by offline unit tests.
+- **D unknown identity.** JIT off: valid but unlinked IdP identity -> `401`, no session. JIT on: same
+  identity provisions a `user` principal in the JIT project with zero roles; `whoami` `roles:[]` and a
+  protected list returns an empty page.
+- **E RBAC continuity.** `system_admin` human listed projects; revoking the role via a Bearer admin
+  made the next `whoami` report `roles:[]` and the next protected list return an empty page — no
+  re-login, immediate effect.
+- **F principal/project deactivation.** Deactivating the human principal (or its project) made the
+  next session-authenticated `whoami` return `401`; reactivation restored access — revalidated on
+  every request.
+- **G CSRF.** Cookie POST without token -> `403`; wrong token -> `403`; correct token -> `201`;
+  Bearer admin POST without token -> `201`.
+- **H logout.** Correct CSRF -> `revoked:true`; next session read -> `401`; repeated logout ->
+  `revoked:false` (idempotent).
+- **I audience regression.** Inference key on `/admin/v1/whoami` -> `401`; admin key on `/v1/models` ->
+  `401`; OIDC session cookie on `/v1/models` -> `401`; inference key on `/v1/models` -> `200`.
+- **J real SDK inference** (`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`): official OpenAI Python
+  SDK non-stream and stream chat completions succeeded against `gpt-4`; both requests recorded
+  `succeeded` with `project_id`/`principal_id`/`api_credential_id` matching the inference credential.
 
 ## Migration
-- No new migration. The bootstrap guard is runtime config validation; concurrent duplicate handling
-  reuses the existing `uq_role_assignments_active_equivalent` partial unique index (migration 0010).
-  `0001`–`0011` untouched; `0010 -> 0011` and empty-DB -> latest remain green.
+- New migration `0012` adds `external_identities` (unique `(issuer, subject)`), `browser_sessions`
+  (one-way session/CSRF verifiers, expiry), and `oidc_login_states` (one-time PKCE transactions).
+  `0001`–`0011` untouched; `0011 -> 0012` and empty-DB -> latest both succeeded live.
 
 ## Automated tests
-- `scripts/dev/v2 test` -> **315 passed** (was 306; +9). New coverage: bootstrap token strength guard
-  (unset/short/placeholder/generated/hidden/whitespace), concurrent duplicate role assignment
-  (one active row, one audit event, no IntegrityError), deterministic duplicate-insert recovery,
-  unrelated IntegrityError not swallowed. Existing principal-deactivation and role-revocation tests
-  remain green.
-- `ruff check src tests` clean; `git diff --check` clean; staged-content secret scan clean.
+- `scripts/dev/v2 test` -> **348 passed** (was 315; +33). New coverage includes OIDC config validation,
+  HTTPS-in-prod enforcement, discovery issuer mismatch, login-state entropy/expiry, nonce/PKCE/state
+  one-time consumption, callback replay, ID-token issuer/audience/expiry/subject validation, unsafe
+  algorithm rejection, unique `(issuer,subject)`, email-not-key, JIT-off denial, JIT unprivileged,
+  inactive principal denial, service-credential vs browser-session `AdminRequestContext`, raw cookie
+  never persisted, idle/absolute expiry, revoked session, cookie attributes, CSRF missing/wrong/correct,
+  Bearer-no-CSRF, invalid-header-no-cookie-fallback, role revocation and project/principal deactivation
+  on next request, logout idempotency, and audit secret redaction.
+- `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean.
 
 ## Key files
-- `src/aethergate/config.py` — `MIN_BOOTSTRAP_TOKEN_LENGTH` + `_validate_bootstrap_token`.
-- `src/aethergate/identity/admin.py` — savepoint + `IntegrityError` recovery in
-  `create_role_assignment`.
-- `tests/test_settings.py` — bootstrap strength guard tests.
-- `tests/test_admin_auth.py` — concurrent/duplicate/not-swallowed role-assignment tests (bootstrap
-  token now >= 32 chars).
-- `tests/test_admin_crud.py` — bootstrap token updated to >= 32 chars.
-- `docs/architecture/security.md`, `docs/architecture/admin-api.md`,
-  `docs/development/README.md` — AGV2-014V documentation.
+- `src/aethergate/config.py` — OIDC/session settings, `_validate_oidc`, empty-env handling, scope parsing.
+- `src/aethergate/identity/oidc.py` — `OidcProvider` (discovery/JWKS/PKCE/token exchange/ID-token validation).
+- `src/aethergate/identity/session.py` — session service (login transactions, sessions, CSRF, linking, JIT).
+- `src/aethergate/api/session_auth.py` — login/callback/session/logout endpoints.
+- `src/aethergate/api/admin.py` / `identity/admin.py` / `identity/authorization.py` — kind-aware admin auth.
+- `src/aethergate/dev_oidc_idp.py` — local deterministic OIDC provider.
+- `src/aethergate/migrations/versions/0012_human_oidc_sessions.py` — migration 0012.
+- `tests/test_oidc_session.py` — new test suite.
 
 ## Decisions
-- Bootstrap strength guard is a config-time minimum length only; docs explicitly disclaim it as an
-  entropy proof.
-- Concurrency safety uses a savepoint + `IntegrityError` translation narrow around the
-  active-equivalent uniqueness constraint; the recovery re-fetches the winner and re-raises when no
-  equivalent exists (unrelated failure not swallowed).
-- Live role-revocation protected action returns `404` (not `403`) because a credential with zero roles
-  has no project visibility; this is the correct non-enumerating behavior, distinct from the
-  in-scope-but-insufficient-permission `403`.
+- External identity key is `(issuer, subject)`; email is display-only. JIT provisioning is off by
+  default and creates zero-role users; roles are never derived from claims.
+- `AdminAuthenticationKind` distinguishes `service_credential` from `browser_session` so a browser
+  session never fabricates an `ApiCredential`; scope checks apply only to service credentials.
+- The session cookie and CSRF token are stored only as one-way SHA-256 verifiers (high-entropy
+  random tokens, so SHA-256 — not a password hash — is appropriate).
+- `last_seen_at` is slid on a throttled basis (not per request) to avoid a hot-row write.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
-  `--no-deps`. Dynamic host port changes every `up`; this session: **45435**.
-- litellm 1.104.0 has no trusted token estimator, so token-quota routes fail closed
-  (`quota_token_estimator_unavailable`). The inference smoke therefore seeded a **request-only** quota
-  (no `--token-limit`) and a request-priced budget; token-priced quotas/budgets will need a token
-  estimator before they are exercised live.
-- The dev DB was reset for a clean live-verification slate; re-bootstrap and re-seed were performed
-  this session.
+  `--no-deps`.
+- The local IdP's RSA key is generated in memory, so restarting it changes the key; the API's 300s
+  in-memory JWKS cache must be cleared (API restart) when the IdP is restarted.
+- The committed `deploy/v2/compose.yaml` does not wire OIDC env passthrough (kept out to avoid leaking
+  `.env` OIDC settings into `scripts/dev/v2 test`); live OIDC verification used an uncommitted compose
+  override to pin the host port and inject `AETHERGATE_OIDC_*`.
+- litellm still has no trusted token estimator, so token-priced quotas/budgets fail closed; the
+  inference smoke used a request-only quota and a request-priced policy.
 
 ## Recommended Next Step
-Introduce human OIDC authorization-code flow plugged into the same `Principal`/`RoleAssignment`
-model, then extend the remaining catalog/accounting/queue admin CRUD over `/admin/v1` reusing the
-centralized authorization and pagination foundations.
+Build the React web console against the new OIDC login/session/CSRF contracts, or extend the remaining
+catalog/accounting/queue admin CRUD over `/admin/v1` reusing the same authorization/pagination
+foundations.
