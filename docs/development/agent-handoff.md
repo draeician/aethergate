@@ -3,10 +3,11 @@
 ## Current State
 - Branch: `v2`.
 - AGV2-016 implementation commit: `3243efc` (`feat(admin): add catalog and routing control plane`),
-  pushed to `origin/v2` this session. This handoff supersedes the AGV2-015C handoff.
-- Migration head: `0014`.
+  pushed to `origin/v2`. AGV2-016V (live browser-session catalog RBAC/CSRF verification) is now
+  complete and pushed to `origin/v2`; this handoff supersedes the AGV2-015C handoff.
+- Migration head: `0014` (no new migration; empty -> `0014` re-verified live).
 - Full containerized suite: **386 passed** (was 364; +22: 21 new `tests/test_catalog_admin.py` +
-  1 new migration test).
+  1 new migration test). Re-confirmed green this session.
 
 ## Task Completed
 AGV2-016 — Catalog and routing admin API with configuration invariants.
@@ -105,10 +106,52 @@ upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_A
   request #2 observed `wait_reason=quota_window_exhausted` in the DB then auto-dispatched on the
   fixed-window reset; `enabled` toggled false/true; limit restored. Historical reservation/window rows
   remained coherent.
-- **H RBAC/CSRF (browser session) not re-run live.** The host-network IdP
-  (`http://192.168.22.50:8490`) is currently unreachable; browser-session RBAC/CSRF is covered by
-  `tests/test_oidc_session.py` (47 tests) and the prior AGV2-015 live proof. Catalog routers reuse the
-  existing session/CSRF machinery unchanged.
+- **H RBAC/CSRF (browser session) — now proven live.** See the AGV2-016V section below; the live
+  human browser-session catalog read/write, CSRF, and project_admin denial scenarios are now
+  exercised end-to-end against a fresh local IdP (they were previously deferred because the
+  host-network IdP was unreachable).
+
+## AGV2-016V — live browser-session catalog RBAC/CSRF + regressions (complete)
+
+The previously-deferred live scenario H is now closed. Verification ran against a fresh, controlled,
+deterministic local OIDC provider started on the nomnom host (not the unreachable host-network IdP).
+No production code changed; this is verification evidence only.
+
+### Controlled local IdP
+- A `MultiSubjectIdp` (a small `DevOidcIdp` subclass) served by uvicorn on the host, bound
+  `0.0.0.0:8491`, issuer `http://192.168.22.50:8491`, client `aethergate-dev-client`. Two distinct
+  human identities share one issuer: `dev-admin` -> `system_admin` and `dev-padmin` ->
+  `project_admin`, selected per-login via a `login_hint` query parameter on `/authorize`.
+- The API was recreated with `AETHERGATE_OIDC_ISSUER=http://192.168.22.50:8491` and
+  `AETHERGATE_OIDC_REDIRECT_URI=http://127.0.0.1:44777/admin/v1/auth/oidc/callback` via an
+  uncommitted compose override (same mechanism as AGV2-016). Recreating the API also cleared the
+  development JWKS cache.
+
+### Live results (38/38 checks passed)
+- **system_admin browser catalog read/write (A).** Real OIDC Authorization Code + PKCE login for
+  `dev-admin` established a `browser_session` with role `system_admin`; `GET /admin/v1/providers`
+  and `GET /admin/v1/model-aliases` succeeded; a catalog mutation (`POST /admin/v1/model-aliases`)
+  with the correct CSRF token returned `201`.
+- **Browser CSRF (B).** Missing `X-CSRF-Token` -> `403 invalid_csrf_token`; wrong token ->
+  `403 invalid_csrf_token`; correct token -> `201`.
+- **project_admin denial (C).** Real login for `dev-padmin` established a valid `browser_session`
+  (role `project_admin` scoped to `project-a`); `GET /admin/v1/providers` and `/model-aliases` ->
+  `403 forbidden`, and a catalog mutation with correct CSRF -> `403 forbidden`. The denial comes from
+  deployment-scope catalog authorization, not broken session auth (`whoami` showed a healthy session).
+- **Bearer regression (D).** system_admin Bearer `GET /admin/v1/providers` -> `200`; catalog
+  mutation without CSRF -> `201`. CSRF remains specific to ambient browser-session authority.
+- **OIDC + inference regression (E).** OIDC happy path (200), cross-browser forged transaction
+  cookie rejected (400) while the legitimate browser completed, logout revoked the session (200) and
+  the revoked session was denied (401). Official OpenAI Python SDK `models.list()` listed `gpt-4`;
+  non-stream and stream chat completions both succeeded with
+  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
+
+### Ports / backend
+- API host port (dynamic, loopback): `44777`. IdP port: `8491`.
+- Backend: Ollama `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`.
+
+### Migration
+- None. Migration head remains `0014`; empty -> `0014` was re-verified during the clean reset.
 
 ## Migration
 - `0014` (`src/aethergate/migrations/versions/0014_one_active_route_per_alias.py`): partial unique
@@ -157,15 +200,14 @@ upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_A
 - The full suite has pre-existing flaky concurrency tests
   (`test_scheduler_quota.py::test_saturated_quota_group_does_not_block_unrelated_group` and
   `test_accounting.py::test_two_workers_cannot_oversubscribe_budget`) that fail intermittently only
-  under full-suite load; they pass in isolation/targeted runs and are unrelated to AGV2-016.
-- Live scenario H (browser-session RBAC/CSRF) was not re-run because the host-network IdP is
-  unreachable this session.
+  under full-suite load; they pass in isolation/targeted runs and are unrelated to AGV2-016. (Both
+  were green in the AGV2-016V full-suite run.)
 - `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; live verification used an
-  uncommitted compose override to pin the host port (`44777`).
+  uncommitted compose override to pin the host port (`44777`) and set the OIDC issuer/redirect.
 - litellm still has no trusted token estimator; token-priced quotas fail closed (request-only quota used
   in the smoke).
 
 ## Recommended Next Step
 Queue the next workstream task (pricing/budget admin CRUD, usage/ledger admin reads, or the
-queue/operator admin API) and, once the host IdP is reachable again, re-run live scenario H to confirm
-browser-session catalog RBAC/CSRF end-to-end.
+queue/operator admin API). Live scenario H is now closed; no further browser-session catalog
+verification is outstanding.
