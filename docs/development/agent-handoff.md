@@ -4,13 +4,46 @@
 - Branch: v2
 - AGV2-015 implementation commit: `805c403` (`feat(identity): add OIDC human sessions and CSRF
   protection`), pushed to `origin/v2`.
-- AGV2-015V hardening follow-up commits (pushed to `origin/v2` this session):
+- AGV2-015V hardening follow-up commits (pushed to `origin/v2`):
   - `41aefca` `feat(identity): bind OIDC login transaction to initiating browser`
   - `7eea53f` `fix(identity): clear OIDC login transaction cookie on callback completion`
+- AGV2-015C follow-up commit (pushed to `origin/v2` this session):
+  - `1732b28` `fix(identity): clear OIDC transaction cookie on all callback failures`
 - Prior commits remain: `d7842c9` (AGV2-014V), `d283fd2` (AGV2-014), `5a81425` (AGV2-013). This
   handoff supersedes the AGV2-014V handoff.
 
-## Hardening follow-up (AGV2-015V, this session)
+## AGV2-015C follow-up (this session)
+Closed the remaining acceptance gap: pre-consume callback failures did not clear `ag_oidc_txn`.
+
+**Failure paths now clearing the transaction cookie** (all preserve the existing error
+code/status and never set `ag_session`):
+- provider `error` parameter → `401 oidc_authentication_failed`;
+- missing `code` → `401 oidc_authentication_failed`;
+- missing `state` → `401 oidc_authentication_failed`;
+- unknown/wrong `state` → `400 invalid_login_state`;
+- missing browser-binding cookie → `400 invalid_login_state`;
+- wrong browser-binding cookie → `400 invalid_login_state`;
+- callback replay after transaction consumption → `400 invalid_login_state`.
+
+Each is emitted via a single helper (`_oidc_failure_response`) that appends a deletion
+`Set-Cookie` for `ag_oidc_txn` at the exact transaction-cookie path (`/admin/v1/auth/oidc`).
+
+**State semantics.** `consume_login_transaction` verifies the binding (constant-time) *before*
+deleting the row, so a missing/wrong binding or wrong/unknown state does **not** consume or delete
+the legitimate pending login-state row. Successful consumption remains delete-on-consume; expired
+rows are still cleaned up on transaction creation. No migration was added (head remains `0013`);
+migrations `0001`–`0013` are unchanged.
+
+Live nomnom verification (host-network IdP `http://192.168.22.50:8490`, pinned API port `44777`,
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`): Browser B presented A's valid state/code without
+the cookie → `400` with `ag_oidc_txn` deletion and no session, A's pending row still present
+(count=1); Browser B with a forged cookie → `400` (same); Browser A then completed the same pending
+login → `200` + session; A's fresh wrong-state → `400` + cookie cleared + no session; happy path →
+`200` + `system_admin` + `whoami`. Official OpenAI SDK non-stream and stream chat completions both
+succeeded against `gpt-4` (upstream `qwen3.8-2b-distill:Q6_K` at `http://192.168.22.50:11434`)
+using a freshly minted inference credential.
+
+## Hardening follow-up (AGV2-015V)
 Code review of AGV2-015 found the login transaction was not bound to the initiating browser and the
 raw OIDC `state` leaked into failed-login audit rows. Fixed (see `current-task.md` AGV2-015V):
 
@@ -129,9 +162,10 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
   `0001`–`0011` untouched; `0011 -> 0012` and empty-DB -> latest both succeeded live.
 - New migration `0013` adds the one-way `txn_cookie_hash` column to `oidc_login_states`
   (`NOT NULL`, server default dropped after backfill). Live `0012 -> 0013` succeeded.
+- AGV2-015C adds no migration; head remains `0013`.
 
 ## Automated tests
-- `scripts/dev/v2 test` -> **359 passed** (was 348; +11 for the hardening follow-up). New coverage
+- `scripts/dev/v2 test` -> **364 passed** (was 348; +16 across AGV2-015V and AGV2-015C). New coverage
   includes OIDC config validation, HTTPS-in-prod enforcement, discovery issuer mismatch, login-state
   entropy/expiry, nonce/PKCE/state one-time consumption, callback replay, ID-token
   issuer/audience/expiry/subject validation, unsafe algorithm rejection, unique `(issuer,subject)`,
@@ -143,7 +177,10 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
   (missing/forged/cross-browser), login-state delete-on-consume, login-state expiry cleanup, failed
   login audit raw-state redaction, transaction-cookie attributes (dev + prod `Secure`),
   clear-on-success and clear-on-failure, raw binding never persisted, session fixation replacement,
-  and migration `0012 -> 0013`.
+  migration `0012 -> 0013`, plus the AGV2-015C pre-consume failure paths (provider error / missing
+  code / missing state / wrong state / missing binding / wrong binding / replay all clear the
+  transaction cookie and create no session), no-pre-consume-failure-creates-a-session, and
+  legitimate-browser-completes-after-a-failed-cross-browser-binding.
 - `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean.
 
 ## Key files
