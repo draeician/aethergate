@@ -155,12 +155,17 @@ JavaScript storage.
   a bounded TTL and fetched over `httpx` with a short timeout. (Settled)
 - **Authorization Code + PKCE.** Login generates a cryptographically random `state`, `nonce`, and
   PKCE `code_verifier`/S256 `code_challenge`; they are bound to the initiating browser via a
-  one-time, short-lived `oidc_login_states` transaction. The callback requires an exact `state`
-  match, exchanges the code with a fixed `redirect_uri`, and validates the ID token's `iss`, `aud`
-  (client ID), `exp`/`nbf`, and `nonce`; a missing/empty `sub` is rejected. Only asymmetric
-  algorithms (`RS*/ES*/PS*`) are accepted — `none` and symmetric `HS*` are rejected regardless of
-  provider metadata — and signature verification is delegated to PyJWT against the provider JWKS
-  (keyed by `kid`). The authorization code is consumed once; a replayed callback fails. (Settled)
+  one-time, short-lived `oidc_login_states` transaction **and** a dedicated short-lived `ag_oidc_txn`
+  cookie (only its one-way SHA-256 `txn_cookie_hash` is persisted; the raw cookie value is never
+  stored). The callback requires both an exact `state` match and the matching transaction cookie, so
+  a login state stolen from or injected across another browser cannot be redeemed (login-CSRF /
+  login-state-injection defense). The callback exchanges the code with a fixed `redirect_uri`, and
+  validates the ID token's `iss`, `aud` (client ID), `exp`/`nbf`, and `nonce`; a missing/empty `sub`
+  is rejected. Only asymmetric algorithms (`RS*/ES*/PS*`) are accepted — `none` and symmetric `HS*`
+  are rejected regardless of provider metadata — and signature verification is delegated to PyJWT
+  against the provider JWKS (keyed by `kid`). The authorization code is consumed once; the login
+  transaction is deleted on consumption and expired transactions are deleted on creation, so a
+  replayed callback fails. (Settled)
 - **Durable external identity link.** `ExternalIdentity` stores a stable ID, `principal_id`,
   `issuer`, opaque case-sensitive `subject`, optional safe display claims (`email`, `display_name`),
   `created_at`, `last_login_at`, and `is_active`. `(issuer, subject)` is unique and is the identity

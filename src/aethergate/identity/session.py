@@ -9,8 +9,10 @@ Security invariants:
 - Only one-way SHA-256 verifiers for the raw session cookie and raw CSRF token
   are persisted; the raw values are returned only in ``Set-Cookie`` / the session
   response and are never logged or written to audit.
-- A login transaction binds ``state``/``nonce``/PKCE to the initiating browser,
-  expires quickly, and is consumed exactly once.
+- A login transaction binds ``state``/``nonce``/PKCE to the initiating browser
+  via a dedicated short-lived transaction cookie (only its one-way
+  ``txn_cookie_hash`` is persisted), expires quickly, and is consumed exactly
+  once.
 - External identity linking is by ``(issuer, subject)``; email is never the
   identity key. JIT provisioning (when enabled) creates an unprivileged USER
   principal with zero role assignments.
@@ -49,6 +51,7 @@ from aethergate.persistence import repository
 
 SESSION_COOKIE_NAME = "ag_session"
 CSRF_HEADER_NAME = "X-CSRF-Token"
+LOGIN_TXN_COOKIE_NAME = "ag_oidc_txn"
 
 # Throttle for sliding the idle window / last_seen write. Avoids a hot-row write
 # on every browser request while still enforcing idle expiry on each request.
@@ -85,17 +88,20 @@ def generate_csrf_token() -> str:
 
 async def create_login_transaction(
     session: AsyncSession,
-) -> domain.OidcLoginState:
+) -> tuple[domain.OidcLoginState, str]:
     """Create a one-time login transaction (state/nonce/PKCE) and persist it.
 
-    Returns the entity carrying ``state``, ``nonce``, ``code_verifier``, and
-    ``code_challenge`` for the initiating browser. The raw values are returned
-    only to the caller (the API router), never logged.
+    Returns ``(entity, raw_txn_cookie)``. The raw transaction cookie is a
+    cryptographically random, short-lived value that binds the transaction to the
+    initiating browser; only its one-way ``txn_cookie_hash`` is persisted. The
+    raw ``state``/``nonce``/``code_verifier`` are returned only on the entity
+    (to the API router), never logged.
     """
     settings = get_settings()
     state = oidc_module.generate_state()
     nonce = oidc_module.generate_nonce()
     code_verifier, code_challenge = oidc_module.generate_pkce_pair()
+    raw_txn_cookie = secrets.token_urlsafe(32)
     now = utcnow()
     entity = domain.OidcLoginState(
         id=OidcLoginStateId(_new_id()),
@@ -103,31 +109,37 @@ async def create_login_transaction(
         nonce=nonce,
         code_verifier=code_verifier,
         code_challenge=code_challenge,
+        txn_cookie_hash=hash_verifier(raw_txn_cookie),
         created_at=now,
         expires_at=now + timedelta(seconds=settings.oidc_login_ttl_seconds),
         consumed_at=None,
     )
+    await repository.delete_expired_oidc_login_states(session, now)
     await repository.create_oidc_login_state(session, entity)
-    return entity
+    return entity, raw_txn_cookie
 
 
 async def consume_login_transaction(
-    session: AsyncSession, state: str, now: datetime
+    session: AsyncSession, state: str, txn_cookie: str | None, now: datetime
 ) -> domain.OidcLoginState:
-    """Atomically consume a login transaction by ``state``.
+    """Atomically consume a login transaction by ``state`` and browser binding.
 
-    Raises :class:`OidcLoginStateInvalid` for a missing, expired, or already
-    consumed transaction. The row is locked ``FOR UPDATE`` so a concurrent replay
-    serializes and the second one observes ``consumed_at`` set.
+    The transaction is consumed only when the initiating browser's transaction
+    cookie matches the stored one-way verifier (constant-time). Raises
+    :class:`OidcLoginStateInvalid` for a missing, expired, already-consumed, or
+    mis-bound transaction. The row is locked ``FOR UPDATE`` then deleted, so a
+    concurrent replay serializes and the second one observes the missing row.
     """
     entity = await repository.get_oidc_login_state_for_update(session, state)
     if entity is None:
         raise OidcLoginStateInvalid()
-    if entity.consumed_at is not None:
-        raise OidcLoginStateInvalid()
     if entity.expires_at <= now:
         raise OidcLoginStateInvalid()
-    await repository.consume_oidc_login_state(session, entity.id, now)
+    if txn_cookie is None or not txn_cookie:
+        raise OidcLoginStateInvalid()
+    if not secrets.compare_digest(entity.txn_cookie_hash, hash_verifier(txn_cookie)):
+        raise OidcLoginStateInvalid()
+    await repository.delete_oidc_login_state(session, entity.id)
     return entity
 
 
@@ -383,6 +395,7 @@ async def link_external_identity(
 
 __all__ = [
     "CSRF_HEADER_NAME",
+    "LOGIN_TXN_COOKIE_NAME",
     "SESSION_COOKIE_NAME",
     "consume_login_transaction",
     "create_browser_session",

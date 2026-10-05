@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1063,6 +1063,7 @@ def _oidc_login_state_to_domain(row: models.OidcLoginState) -> domain.OidcLoginS
         nonce=row.nonce,
         code_verifier=row.code_verifier,
         code_challenge=row.code_challenge,
+        txn_cookie_hash=row.txn_cookie_hash,
         created_at=row.created_at,
         expires_at=row.expires_at,
         consumed_at=row.consumed_at,
@@ -1078,6 +1079,7 @@ async def create_oidc_login_state(
         nonce=entity.nonce,
         code_verifier=entity.code_verifier,
         code_challenge=entity.code_challenge,
+        txn_cookie_hash=entity.txn_cookie_hash,
         expires_at=entity.expires_at,
         consumed_at=entity.consumed_at,
     )
@@ -1108,16 +1110,23 @@ async def get_oidc_login_state_for_update(
     return _oidc_login_state_to_domain(row) if row else None
 
 
-async def consume_oidc_login_state(
-    session: AsyncSession, state_id: OidcLoginStateId, consumed_at: datetime
-) -> domain.OidcLoginState | None:
+async def delete_oidc_login_state(
+    session: AsyncSession, state_id: OidcLoginStateId
+) -> None:
     row = await session.get(models.OidcLoginState, str(state_id))
-    if row is None:
-        return None
-    if row.consumed_at is None:
-        row.consumed_at = consumed_at
-    await session.flush()
-    return _oidc_login_state_to_domain(row)
+    if row is not None:
+        await session.delete(row)
+        await session.flush()
+
+
+async def delete_expired_oidc_login_states(
+    session: AsyncSession, now: datetime
+) -> int:
+    """Delete expired login transactions; returns the number of rows removed."""
+    result = await session.execute(
+        delete(models.OidcLoginState).where(models.OidcLoginState.expires_at <= now)
+    )
+    return result.rowcount or 0
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -368,6 +369,8 @@ async def _follow_login(client, idp_client) -> tuple[httpx.Response, str, str]:
     """Drive the full OIDC login; return (callback_response, cookie_value, csrf_token)."""
     login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
     assert login.status_code == 302
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
+    assert txn_cookie
     authorize_url = login.headers["location"]
 
     authorize = await idp_client.get(authorize_url, follow_redirects=False)
@@ -378,6 +381,7 @@ async def _follow_login(client, idp_client) -> tuple[httpx.Response, str, str]:
     callback = await client.get(
         "/admin/v1/auth/oidc/callback",
         params={"code": query["code"][0], "state": query["state"][0]},
+        cookies={session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie},
         follow_redirects=False,
     )
     assert callback.status_code == 200
@@ -406,11 +410,13 @@ async def test_login_happy_path(oidc_http):
 async def test_unknown_identity_denied_jit_off(oidc_http):
     client, idp_client, factory, idp = oidc_http
     login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
     authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
     query = parse_qs(urlsplit(authorize.headers["location"]).query)
     callback = await client.get(
         "/admin/v1/auth/oidc/callback",
         params={"code": query["code"][0], "state": query["state"][0]},
+        cookies={session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie},
     )
     assert callback.status_code == 401
     assert callback.json()["error"]["code"] == "oidc_authentication_failed"
@@ -422,11 +428,13 @@ async def test_wrong_state_fails(oidc_http):
     client, idp_client, factory, idp = oidc_http
     await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
     login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
     authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
     query = parse_qs(urlsplit(authorize.headers["location"]).query)
     callback = await client.get(
         "/admin/v1/auth/oidc/callback",
         params={"code": query["code"][0], "state": "wrong-state"},
+        cookies={session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie},
     )
     assert callback.status_code == 400
     assert callback.json()["error"]["code"] == "invalid_login_state"
@@ -437,13 +445,99 @@ async def test_callback_replay_rejected(oidc_http):
     client, idp_client, factory, idp = oidc_http
     await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
     login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
     authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
     query = parse_qs(urlsplit(authorize.headers["location"]).query)
     params = {"code": query["code"][0], "state": query["state"][0]}
-    first = await client.get("/admin/v1/auth/oidc/callback", params=params)
+    cookies = {session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie}
+    first = await client.get("/admin/v1/auth/oidc/callback", params=params, cookies=cookies)
     assert first.status_code == 200
-    second = await client.get("/admin/v1/auth/oidc/callback", params=params)
+    second = await client.get("/admin/v1/auth/oidc/callback", params=params, cookies=cookies)
     assert second.status_code == 400
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_transaction_cookie_binding(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+    login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
+    query = parse_qs(urlsplit(authorize.headers["location"]).query)
+    params = {"code": query["code"][0], "state": query["state"][0]}
+
+    # A separate client (a different browser with no transaction cookie) must not
+    # be able to complete the login, with or without a forged cookie value.
+    attacker_transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=attacker_transport, base_url="http://test"
+    ) as attacker:
+        missing = await attacker.get("/admin/v1/auth/oidc/callback", params=params)
+        assert missing.status_code == 400
+
+        wrong = await attacker.get(
+            "/admin/v1/auth/oidc/callback",
+            params=params,
+            cookies={session_service.LOGIN_TXN_COOKIE_NAME: "attacker-cookie"},
+        )
+        assert wrong.status_code == 400
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_state_deleted_on_consume(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+    _, cookie, _ = await _follow_login(client, idp_client)
+    async with factory() as s:
+        rows = (await s.execute(select(models.OidcLoginState))).scalars().all()
+        assert rows == []
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_state_expiry_cleanup(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    async with factory() as s:
+        async with s.begin():
+            await session_service.create_login_transaction(s)
+            await session_service.create_login_transaction(s)
+
+    async with factory() as s:
+        async with s.begin():
+            rows = (await s.execute(select(models.OidcLoginState))).scalars().all()
+            assert len(rows) == 2
+            for row in rows:
+                row.expires_at = session_service.utcnow() - timedelta(seconds=1)
+        async with s.begin():
+            await session_service.create_login_transaction(s)
+        rows = (await s.execute(select(models.OidcLoginState))).scalars().all()
+        assert len(rows) == 1
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_audit_failed_login_no_raw_state(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+    login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
+    authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
+    query = parse_qs(urlsplit(authorize.headers["location"]).query)
+    raw_state = query["state"][0]
+
+    callback = await client.get(
+        "/admin/v1/auth/oidc/callback",
+        params={"code": "bogus-code", "state": raw_state},
+        cookies={session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie},
+    )
+    assert callback.status_code == 401
+
+    async with factory() as s:
+        events = (await s.execute(select(models.AuditEvent))).scalars().all()
+        failed = [e for e in events if e.action == "human.login_failed"]
+        assert failed
+        for e in events:
+            blob = str(e.details) + e.resource_id + e.action
+            assert raw_state not in blob
+            assert e.resource_id != raw_state
+            assert txn_cookie not in blob
 
 
 @pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")

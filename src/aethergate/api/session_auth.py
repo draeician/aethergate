@@ -41,6 +41,7 @@ router = APIRouter(prefix="/admin/v1", tags=["admin-auth"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 _COOKIE_PATH = "/admin"
+_TXN_COOKIE_PATH = "/admin/v1/auth/oidc"
 
 LOGIN_FAILED_EXCHANGE = "token_exchange_failed"
 LOGIN_FAILED_ID_TOKEN = "invalid_id_token"
@@ -64,15 +65,34 @@ def _clear_session_cookie(response: JSONResponse) -> None:
     response.delete_cookie(key=session_service.SESSION_COOKIE_NAME, path=_COOKIE_PATH)
 
 
+def _set_txn_cookie(response: RedirectResponse, raw_txn_cookie: str) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key=session_service.LOGIN_TXN_COOKIE_NAME,
+        value=raw_txn_cookie,
+        httponly=True,
+        secure=settings.app_env == "prod",
+        samesite="lax",
+        path=_TXN_COOKIE_PATH,
+        max_age=settings.oidc_login_ttl_seconds,
+    )
+
+
+def _clear_txn_cookie(response: JSONResponse) -> None:
+    response.delete_cookie(
+        key=session_service.LOGIN_TXN_COOKIE_NAME, path=_TXN_COOKIE_PATH
+    )
+
+
 async def _record_login_failed(
-    session: AsyncSession, *, reason: str, state: str
+    session: AsyncSession, *, reason: str, resource_id: str
 ) -> None:
     await session_service.record_audit(
         session,
         actor_principal_id=None,
         action="human.login_failed",
-        resource_type="session",
-        resource_id=state,
+        resource_type="oidc_login",
+        resource_id=resource_id,
         metadata={"reason": reason},
     )
 
@@ -97,18 +117,23 @@ async def oidc_login(session: SessionDep) -> RedirectResponse:
     if not settings.oidc_enabled:
         raise OidcConfigurationError("OIDC is not enabled")
     async with session.begin():
-        transaction = await session_service.create_login_transaction(session)
+        transaction, raw_txn_cookie = await session_service.create_login_transaction(
+            session
+        )
     url = await oidc_module.get_oidc_provider().begin_login(
         state=transaction.state,
         nonce=transaction.nonce,
         code_challenge=transaction.code_challenge,
     )
-    return RedirectResponse(url, status_code=302)
+    response = RedirectResponse(url, status_code=302)
+    _set_txn_cookie(response, raw_txn_cookie)
+    return response
 
 
 @router.get("/auth/oidc/callback")
 async def oidc_callback(
     session: SessionDep,
+    request: Request,
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
@@ -118,11 +143,15 @@ async def oidc_callback(
 
     now = session_service.utcnow()
     settings = get_settings()
+    txn_cookie = request.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
 
     # Consume the one-time login transaction first (committed independently so a
-    # replayed or failed callback cannot be retried with the same state).
+    # replayed or mis-bound callback cannot be retried with the same state).
     async with session.begin():
-        transaction = await session_service.consume_login_transaction(session, state, now)
+        transaction = await session_service.consume_login_transaction(
+            session, state, txn_cookie, now
+        )
+    txn_id = str(transaction.id)
 
     provider = oidc_module.get_oidc_provider()
     try:
@@ -131,20 +160,26 @@ async def oidc_callback(
         )
     except OidcAuthenticationFailed:
         async with session.begin():
-            await _record_login_failed(session, reason=LOGIN_FAILED_EXCHANGE, state=state)
+            await _record_login_failed(
+                session, reason=LOGIN_FAILED_EXCHANGE, resource_id=txn_id
+            )
         raise
 
     id_token = token_response.get("id_token")
     if not isinstance(id_token, str) or not id_token:
         async with session.begin():
-            await _record_login_failed(session, reason=LOGIN_FAILED_ID_TOKEN, state=state)
+            await _record_login_failed(
+                session, reason=LOGIN_FAILED_ID_TOKEN, resource_id=txn_id
+            )
         raise OidcAuthenticationFailed()
 
     try:
         claims = await provider.validate_id_token(id_token, expected_nonce=transaction.nonce)
     except OidcAuthenticationFailed:
         async with session.begin():
-            await _record_login_failed(session, reason=LOGIN_FAILED_ID_TOKEN, state=state)
+            await _record_login_failed(
+                session, reason=LOGIN_FAILED_ID_TOKEN, resource_id=txn_id
+            )
         raise
 
     subject = claims.get("sub")
@@ -176,7 +211,9 @@ async def oidc_callback(
             )
     except OidcAuthenticationFailed:
         async with session.begin():
-            await _record_login_failed(session, reason=LOGIN_FAILED_IDENTITY, state=state)
+            await _record_login_failed(
+                session, reason=LOGIN_FAILED_IDENTITY, resource_id=txn_id
+            )
         raise
 
     body = SessionEstablished(
@@ -187,6 +224,7 @@ async def oidc_callback(
     )
     response = JSONResponse(status_code=200, content=body.model_dump(mode="json"))
     _set_session_cookie(response, raw_cookie)
+    _clear_txn_cookie(response)
     return response
 
 

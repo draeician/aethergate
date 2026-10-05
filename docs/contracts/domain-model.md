@@ -131,8 +131,10 @@ floating point (`float`) is rejected for money and pricing. There is no
   `last_seen_at`, `idle_expires_at`, `absolute_expires_at`, `revoked_at`, and a one-way
   `csrf_token_hash`.
 - `OidcLoginState` — one-time login transaction: stable `OidcLoginStateId`, `state`, `nonce`,
-  PKCE `code_challenge`/`code_verifier`, `issuer`, `created_at`, `expires_at`, `consumed_at`. It
-  binds state/nonce/PKCE to the initiating browser and is consumed exactly once.
+  PKCE `code_challenge`/`code_verifier`, one-way SHA-256 `txn_cookie_hash` of the short-lived
+  transaction cookie, `created_at`, `expires_at`, `consumed_at`. It binds state/nonce/PKCE to the
+  initiating browser via the transaction cookie and is consumed exactly once (the row is deleted on
+  consumption; expired rows are deleted when a new transaction is created).
 - `AdminRequestContext` gains `authentication_kind`, optional `browser_session_id`, and keeps
   `api_credential_id`/`audience`/`scopes` populated only for the service-credential kind.
 

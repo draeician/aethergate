@@ -283,6 +283,7 @@ class OidcLoginState(Base, TimestampMixin):
     nonce: Mapped[str] = mapped_column(String(64), nullable=False)
     code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
     code_challenge: Mapped[str] = mapped_column(String(64), nullable=False)
+    txn_cookie_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

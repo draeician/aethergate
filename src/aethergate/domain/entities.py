@@ -215,9 +215,10 @@ class OidcLoginState(Entity):
     """A one-time OIDC authorization-code login transaction.
 
     Binds the random ``state``, ``nonce``, and S256 PKCE material to the
-    initiating browser. It is short-lived and consumed exactly once; the PKCE
-    verifier is required only to exchange the authorization code and is never
-    written to the audit log.
+    initiating browser via a dedicated short-lived transaction cookie (only its
+    one-way SHA-256 ``txn_cookie_hash`` is persisted). It is short-lived and
+    consumed exactly once; the PKCE verifier is required only to exchange the
+    authorization code and is never written to the audit log.
     """
 
     id: OidcLoginStateId
@@ -225,6 +226,7 @@ class OidcLoginState(Entity):
     nonce: str
     code_verifier: str
     code_challenge: str
+    txn_cookie_hash: str
     created_at: datetime | None = None
     expires_at: datetime
     consumed_at: datetime | None = None
