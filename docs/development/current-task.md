@@ -1,34 +1,32 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-014
+AGV2-014V
 
 ## Title
-Admin identity CRUD and cross-project authorization hardening
+Close admin CRUD verification gaps and harden bootstrap/RBAC races
 
 ## Ownership
 Primary: admin API + identity/auth
-Coordinating: contracts, audit, platform/testing
+Coordinating: platform/testing, audit
 
 ## Why This Task Exists
 
-AGV2-013 established admin service-account authentication, RBAC, one-use bootstrap, and the first
-protected /admin/v1 endpoints.
+AGV2-014 implemented the intended admin identity CRUD and authorization boundaries, with 306 tests.
 
-Code review found one concrete information-disclosure gap in the minimal HTTP surface:
-credential rotate/revoke currently loads the target credential before project authorization, allowing
-a project-scoped admin to distinguish an existing credential in another project (403) from a
-nonexistent ID (404).
+Review found three remaining gaps before moving to human OIDC:
 
-This task fixes that boundary and completes the remaining identity-management CRUD needed before human
-OIDC is introduced.
+1. the task explicitly required re-running real OpenAI SDK non-stream/stream inference after the admin changes, but the handoff deferred it;
+2. principal-deactivation and immediate role-revocation effects were not both proven live in the AGV2-014 verification;
+3. two production-boundary invariants are still weak:
+   - bootstrap runtime config accepts arbitrarily short non-placeholder secrets even though the design requires a high-entropy operator secret;
+   - concurrent duplicate role-assignment creation can race past the application pre-check and hit the partial unique index as an unhandled IntegrityError instead of resolving idempotently.
 
-The current deployment is an internal development network, so developer ergonomics may remain simple,
-but production-facing authorization and secret-handling invariants must stay strict.
+Close these only. Do not expand into OIDC or broader admin CRUD.
 
 ## Compaction Recovery
 
-If context is compacted, summarized, restarted, or uncertain:
+If context is compacted/restarted/uncertain:
 1. re-read AGENTS.md;
 2. re-read project_spec.md;
 3. re-read this file;
@@ -40,380 +38,202 @@ current-task.md is authoritative.
 
 ## Before You Start
 
-1. Work on branch v2 and pull latest origin/v2.
-2. Read the canonical files plus docs/architecture/security.md, docs/architecture/admin-api.md,
-   docs/contracts/admin-v1-foundation.md, src/aethergate/api/admin.py,
-   src/aethergate/identity/admin.py, src/aethergate/identity/rbac.py, and related persistence/tests.
-3. Preserve AGV2-012/013 inference/admin audience separation and one-use bootstrap behavior.
-4. Do not modify/delete legacy v1 app/ or frontend/src/.
-5. Do not commit unrelated local/untracked files.
+- Work on branch v2; pull latest origin/v2.
+- Read the four canonical files plus:
+  - docs/architecture/security.md
+  - docs/architecture/admin-api.md
+  - src/aethergate/config.py
+  - src/aethergate/identity/admin.py
+  - src/aethergate/identity/authorization.py
+  - role-assignment persistence/model code
+  - tests/test_admin_auth.py
+  - tests/test_admin_crud.py
+- Preserve all AGV2-014 anti-enumeration and service-layer authorization semantics.
+- Do not touch legacy v1 app/ or frontend/src/.
+- Do not commit unrelated files.
 
-## 1. Fix cross-project credential enumeration
+## 1. Bootstrap secret strength guard
 
-Current rotate/revoke behavior:
-- look up credential by opaque ID;
-- return 404 if absent;
-- then authorize using its project;
-- return 403 if it exists outside the caller's project authority.
+The development helper already generates a strong token using secrets.token_urlsafe(32), but Settings currently accepts any non-placeholder non-empty string.
 
-That leaks existence across project boundaries.
-
-Required behavior for project-scoped callers:
-- an inaccessible credential ID and a nonexistent credential ID are indistinguishable;
-- do not reveal target project, principal, prefix, audience, status, or existence;
-- system_admin retains normal deployment-wide behavior.
-
-Use an authorization-aware resource resolver/service rather than duplicating ad-hoc checks in routers.
-
-For credential get/rotate/revoke:
-- system_admin may resolve any target;
-- project_admin/project_viewer may resolve only resources in authorized project scope;
-- unauthorized cross-project resource behaves as not-found or another fixed non-enumerating response;
-- write vs read permission remains distinct.
-
-Add deterministic and live tests comparing nonexistent vs cross-project IDs.
-
-## 2. Clarify generic credential administration vs admin-credential lifecycle
-
-The current POST /admin/v1/credentials DTO defaults audience to inference, while the service function is
-named create_admin_credential and audit action is admin_credential.created.
-
-Choose and document one coherent model.
-
-Preferred:
-- /admin/v1/credentials is the administrative API for managing client credentials of either audience;
-- caller still needs admin:credentials:write;
-- requested credential audience/scopes are validated by the shared identity service;
-- audit actions are neutral, e.g. credential.created / credential.rotated / credential.revoked;
-- audit metadata records safe audience value;
-- no endpoint/service name implies every managed credential is itself an admin credential.
-
-Alternatively, if the endpoint is intentionally admin-credential-only:
-- DTO must require/default admin audience appropriately;
-- inference credential provisioning needs a separately named path later.
-
-Do not leave the current mixed semantics.
-
-## 3. Complete project CRUD foundation over /admin/v1
-
-Implement thin HTTP CRUD for projects using existing domain/repository contracts.
-
-At minimum:
-- POST /admin/v1/projects
-- GET /admin/v1/projects
-- GET /admin/v1/projects/{project_id}
-- PATCH /admin/v1/projects/{project_id}
+Add a runtime validation guard suitable for production-facing configuration.
 
 Requirements:
-- system_admin: all projects;
-- project_admin: read/update its authorized project only;
-- project_viewer: read its authorized project only;
-- project-scoped callers must not enumerate other projects;
-- project creation requires deployment-level/system_admin authority;
-- disabling a project immediately affects inference/admin credential authentication as already designed;
-- stable opaque IDs;
-- typed DTOs;
-- no direct DB policy in routers;
-- deterministic ordering and basic pagination contract if list size can grow; implement a simple
-  limit/cursor or limit/offset foundation rather than an unbounded list.
+- no built-in/default bootstrap token;
+- empty/unset still disables bootstrap;
+- reject obvious placeholders as today;
+- reject trivially short configured bootstrap tokens;
+- preferred minimum: at least 32 characters of operator-provided secret material;
+- do not claim a length check proves entropy; docs must still require randomly generated high-entropy secrets;
+- existing dev helper remains valid;
+- token remains SecretStr and never logged.
 
-Do not implement project deletion in this phase.
+Add tests for:
+- unset accepted;
+- generated dev-format token accepted;
+- short arbitrary token rejected;
+- placeholder rejected;
+- token value does not appear in validation/log output.
 
-## 4. Complete principal CRUD foundation
+No migration should be needed.
 
-Implement:
-- POST /admin/v1/projects/{project_id}/principals
-- GET /admin/v1/projects/{project_id}/principals
-- GET /admin/v1/principals/{principal_id}
-- PATCH /admin/v1/principals/{principal_id}
+## 2. Concurrent duplicate role assignment must be idempotent
 
-Requirements:
-- system_admin deployment-wide;
-- project_admin may create/read/update principals in its project;
-- project_viewer read-only;
-- cross-project principal IDs are non-enumerable to project-scoped callers;
-- PrincipalKind remains explicit;
-- no human OIDC linkage fields yet unless only neutral placeholders are needed for the next task;
-- disabling a principal immediately affects active credentials.
+Current flow:
+- check for active equivalent assignment;
+- then insert;
+- DB partial unique index prevents duplicate rows.
 
-No delete; use inactive state.
+Under concurrent requests, both can pass the pre-check and one can receive IntegrityError.
 
-## 5. Role-assignment HTTP CRUD
+Required behavior:
+- concurrent creation of the same effective active assignment never returns a raw DB/500 error;
+- exactly one active assignment row exists;
+- callers receive either the same canonical assignment or another documented deterministic idempotent success result;
+- exactly one role_assignment.created audit event exists;
+- no duplicate history/event is created merely because of the race;
+- unrelated role-assignment conflicts still surface correctly.
 
-Expose the existing centralized role-assignment service.
+Preferred implementation:
+- use a race-safe insert/fetch pattern or savepoint/IntegrityError translation narrowly around the active-equivalent uniqueness constraint;
+- do not swallow unrelated IntegrityError values.
 
-Implement at least:
-- POST /admin/v1/role-assignments
-- GET /admin/v1/role-assignments with authorized filtering
-- GET /admin/v1/role-assignments/{id}
-- POST /admin/v1/role-assignments/{id}/revoke
+Add a true concurrent DB-gated regression test with at least two sessions/tasks.
 
-Requirements:
-- system_admin can grant/revoke system_admin and project roles;
-- project_admin may grant/revoke project_admin/project_viewer only within its own project, unless the
-  architecture deliberately chooses a stricter rule and documents it;
-- project_viewer cannot mutate roles;
-- project-scoped caller cannot discover assignments outside its scope;
-- no caller may grant a role/scope broader than its own effective authority;
-- privilege escalation is prevented centrally in the identity/admin service, not only in router code;
-- duplicate active assignment remains idempotent/uniqueness-safe;
-- role revocation audit remains immutable and actor-attributed.
+## 3. Live principal-deactivation proof
 
-Explicitly test:
-- project_admin cannot grant system_admin;
-- project_admin(A) cannot grant a role for B;
-- project_admin cannot use role assignment to escape project scope.
+On nomnom with real admin credentials:
 
-## 6. Harden service-layer authorization boundaries
+- create a project/principal/admin credential;
+- verify protected admin access works;
+- deactivate the principal through the admin API;
+- next protected admin request using that credential must fail immediately;
+- reactivate only for cleanup if needed;
+- no container restart required.
 
-Do not rely solely on the router passing actor_principal_id.
+Record only opaque IDs/status, not raw keys.
 
-Administrative mutation services should receive a typed AdminRequestContext or an explicit
-authorization decision/token sufficient to prove the actor was authorized.
+## 4. Live role-revocation proof
 
-At minimum harden:
-- credential create/rotate/revoke;
-- role assignment create/revoke;
-- project/principal mutations introduced here.
+On nomnom:
 
-Goal:
-- another internal caller cannot bypass RBAC merely by calling a service method with a forged actor ID;
-- router remains thin;
-- tests can exercise authorization at the service layer.
+- create a project-scoped admin credential with an active role assignment;
+- verify an allowed protected action works;
+- revoke the role assignment while credential remains otherwise valid;
+- next protected request requiring that role must fail immediately;
+- credential metadata remains active;
+- no stale role authority survives a new HTTP request.
 
-Avoid a giant god-service. A dedicated admin identity/service layer is fine.
+This must exercise the real API/container/DB path, not only an in-process test.
 
-## 7. Resource-aware authorization semantics
+## 5. Real inference regression — required now
 
-The existing authorize_admin signature accepts resource_type but currently authorization is primarily
-project-ID based.
+The AGV2-014 task required this but it was deferred.
 
-Define a clear resource-scope resolution model:
-- project resources authorize against that project;
-- principal resources resolve to principal.project_id;
-- credential resources resolve to credential.project_id;
-- role assignments resolve to their project scope, or deployment for system roles;
-- deployment-scoped resources require deployment authority.
+Use scripts/dev/v2 devseed or equivalent dev-safe setup as needed.
 
-Centralize this mapping or pass an already resolved authorization scope from a trusted service.
+With a real inference-audience credential and AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false:
 
-Do not compare unrelated opaque resource IDs directly to project IDs.
+- official OpenAI Python SDK non-stream chat completion succeeds;
+- official SDK streaming chat completion succeeds;
+- admin credential still fails on /v1/models and /v1/chat/completions;
+- inference credential still fails on /admin/v1/whoami;
+- persisted request attribution remains correct.
 
-## 8. Audit correctness and idempotency
+Use the current dynamic AetherGate port and current backend/model; do not assume the prior port.
 
-Audit events should describe actual state transitions.
+## 6. Regression
 
-Review:
-- repeated credential revoke;
-- repeated role-assignment revoke;
-- idempotent duplicate role assignment create.
-
-Preferred semantics:
-- one audit event for the state-changing action;
-- repeated idempotent no-op does not emit a misleading second revoked/created event;
-- or, if attempts are intentionally audited, use a distinct action/result field so state transitions
-  are not duplicated.
-
-Rename credential audit actions if generic credential management is chosen in section 2.
-
-Add API/service tests proving no secret/hash/token is present in audit metadata.
-
-## 9. DB/domain invariants
-
-Review migration 0010 and models for RBAC shape.
-
-Add migration 0011 only if required.
-
-At minimum enforce consistently:
-- system_admin => deployment scope and no project resource ID;
-- project_admin/project_viewer => project scope with project resource ID;
-- active equivalent assignment uniqueness;
-- valid role/scope enums.
-
-Migration must not rewrite 0010.
-
-If no schema change is needed, document why application/domain invariants plus existing DB constraints
-are sufficient.
-
-## 10. Pagination / list safety foundation
-
-The new admin list endpoints must not be unbounded.
-
-Use a simple consistent contract across projects/principals/credentials/role assignments:
-- default limit;
-- bounded maximum limit;
-- stable sort;
-- offset or opaque cursor.
-
-This is a foundation, not a full search framework.
-
-Existing credential-list endpoint should be brought into this list contract if practical.
-
-## Real nomnom Verification — Required
-
-Use dynamic Docker/Podman ports. Internal-network convenience is fine for test orchestration, but
-authenticate using real admin/inference credentials as appropriate.
-
-### A. Anti-enumeration
-With project_admin(A):
-- rotate/revoke/get nonexistent credential ID;
-- rotate/revoke/get existing credential in B;
-- prove externally visible response is indistinguishable in status/code/message where required;
-- prove B credential remains untouched.
-
-Repeat for principal and role-assignment IDs introduced here.
-
-### B. Project CRUD
-- system_admin creates A and B;
-- project_admin(A) reads/updates A;
-- project_admin(A) cannot enumerate/read/update B;
-- project_viewer(A) reads A but cannot update;
-- deactivate/reactivate a test project and prove auth effects.
-
-### C. Principal CRUD
-- project_admin(A) creates service principal in A;
-- viewer reads it;
-- A-scoped caller cannot enumerate B principal;
-- deactivation immediately invalidates that principal's credentials.
-
-### D. Role delegation / escalation defense
-- system_admin grants project_admin(A);
-- project_admin(A) may grant permitted project role in A;
-- cannot grant system_admin;
-- cannot grant any role for B;
-- project_viewer cannot grant/revoke;
-- revocation immediately removes authority.
-
-### E. Generic credential lifecycle
-If endpoint manages both audiences:
-- authorized admin provisions inference key and admin key;
-- inference key works only on inference;
-- admin key works only on admin;
-- rotate/revoke maintain separation;
-- list/read never show raw/hash.
-
-### F. Audit
-Verify state-changing project/principal/role/credential operations produce actor-attributed safe audit
-events without secret material.
-
-### G. Regression
 Re-run:
-- bootstrap remains one-use after restart;
-- admin whoami;
-- real SDK inference non-stream/stream;
-- queued inference revocation;
-- full scheduler/quota/accounting/identity suite;
-- migrations.
+- full containerized test suite;
+- admin anti-enumeration tests;
+- project/principal CRUD;
+- role delegation/escalation defense;
+- bootstrap one-use/concurrent behavior;
+- queued inference credential revocation;
+- scheduler/quota/accounting suites;
+- migration head / empty-to-latest checks.
+
+Baseline before this task: 306 passing tests.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
-1. cross-project credential existence non-enumeration;
-2. cross-project principal existence non-enumeration;
-3. cross-project role-assignment existence non-enumeration;
-4. system_admin project CRUD;
-5. project_admin project read/update only;
-6. project_viewer read-only;
-7. project list pagination/bounds;
-8. principal CRUD authorization;
-9. principal list pagination/bounds;
-10. project deactivation auth impact;
-11. principal deactivation auth impact;
-12. role-assignment create/list/read/revoke HTTP behavior;
-13. project_admin cannot grant system_admin;
-14. project_admin cannot grant outside project;
-15. viewer cannot mutate roles;
-16. service-layer call cannot bypass authorization with forged actor ID;
-17. resource-scope resolver maps credential/principal/assignment correctly;
-18. credential generic/admin semantic decision enforced;
-19. inference/admin audience separation through new credential endpoint;
-20. idempotent revoke audit semantics;
-21. duplicate assignment audit semantics;
-22. credential list bounded/paginated;
-23. audit metadata contains no raw key/hash/token;
-24. migration 0010 -> 0011 if added;
-25. empty DB -> latest;
-26. existing 290-test baseline remains green or higher.
+1. short bootstrap token rejected;
+2. strong generated bootstrap token accepted;
+3. bootstrap secret absent from validation/log output;
+4. concurrent duplicate role assignment yields one active assignment;
+5. concurrent duplicate assignment yields one created audit event;
+6. concurrent duplicate assignment does not expose IntegrityError/500;
+7. unrelated role-assignment integrity failure is not silently swallowed;
+8. principal deactivation still invalidates admin authentication;
+9. role revocation removes authority on next request;
+10. existing 306-test baseline remains green or higher.
 
-## Human OIDC Boundary
+## Migration
 
-Do not implement OIDC yet.
+Do not add a migration unless absolutely required.
 
-However, the CRUD/RBAC surface created here must be suitable for a human OIDC principal to use in the
-next phase without changing authorization semantics.
+Do not modify migrations 0001 through 0011.
+
+If no migration is needed, say so explicitly in the handoff.
 
 ## Documentation
 
 Update:
 - docs/architecture/security.md
-- docs/architecture/admin-api.md
-- docs/contracts/domain-model.md
-- docs/contracts/admin-v1-foundation.md
+- docs/architecture/admin-api.md if concurrency semantics need mention
 - docs/development/README.md
 - docs/development/agent-handoff.md
 
-Document the anti-enumeration rule, resource-scope resolution, delegation rules, list pagination
-contract, and generic credential-management semantics.
+Document:
+- bootstrap minimum-length guard is only a floor, not an entropy proof;
+- dev helper generates strong random bootstrap material;
+- duplicate role grant is concurrency-safe/idempotent;
+- live principal/role revocation and real SDK inference are now complete.
 
 Do not modify the dated audit.
 
-## Still Deferred
-
-Do not implement:
-- OIDC authorization-code flow;
-- browser session/cookies/CSRF;
-- OAuth device flow;
-- provider/catalog/accounting/queue full admin CRUD beyond what is necessary here;
-- CLI;
-- React UI;
-- Responses API;
-- embeddings;
-- v1 migration.
-
 ## Verification Before Commit
 
-- full containerized test suite;
-- migration checks if schema changed;
+- full containerized suite;
 - ruff/lint;
 - git diff --check;
 - secret scan;
-- authorization/error/log canary checks;
+- auth/bootstrap log canary checks;
+- migration head checks;
 - legacy v1 untouched;
 - dated audit unchanged;
-- all required live nomnom scenarios complete.
+- all live scenarios above complete.
 
 ## Handoff
 
 Include:
-- implementation commit(s);
-- anti-enumeration proof;
-- credential-management semantic decision;
-- project/principal/role CRUD behavior;
-- service-layer authorization model;
-- delegation/escalation rules;
-- resource-scope resolution;
-- pagination contract;
-- audit idempotency semantics;
-- migration revision or explicit no-migration decision;
-- live nomnom evidence;
+- implementation/verification commit(s);
+- bootstrap strength rule;
+- concurrent role-assignment behavior;
+- live principal-deactivation result;
+- live role-revocation result;
+- real SDK non-stream/stream result;
+- audience separation result;
 - final test count;
-- dynamic port/backend;
+- dynamic AetherGate port;
+- current backend/model;
+- explicit migration/no-migration decision;
 - issues/risks;
 - exactly one recommended next step.
 
-Never include raw bootstrap tokens, API keys, Authorization headers, hashes, provider secrets,
-prompt/completion bodies, or large logs.
+Never include raw bootstrap tokens, API keys, Authorization headers, hashes, provider secrets, prompt/completion bodies, or large logs.
 
 ## Commit and Push
 
 Use conventional commits on v2.
 
 Suggested primary commit:
-feat(admin): complete identity management and authorization boundaries
+fix(admin): close identity verification and RBAC race gaps
 
 Push all completed commits to origin/v2.
 Never push directly to main.
-Do not ask the user whether to commit/push.
+Do not ask whether to commit or push.
 
-The task is complete only when all stated live and automated verification criteria are met and
-origin/v2 contains the implementation and updated handoff.
+The task is complete only when all stated live and automated criteria are satisfied and origin/v2 contains the implementation and updated handoff.
