@@ -4,13 +4,15 @@
 - Branch: v2
 - AGV2-015 implementation commit: `805c403` (`feat(identity): add OIDC human sessions and CSRF
   protection`), pushed to `origin/v2`.
-- AGV2-015 hardening follow-up commit: `d8f9298` (login transaction cookie binding, audit
-  state-redaction fix, login-state cleanup), pushed to `origin/v2` (this session).
+- AGV2-015V hardening follow-up commits (pushed to `origin/v2` this session):
+  - `41aefca` `feat(identity): bind OIDC login transaction to initiating browser`
+  - `7eea53f` `fix(identity): clear OIDC login transaction cookie on callback completion`
 - Prior commits remain: `d7842c9` (AGV2-014V), `d283fd2` (AGV2-014), `5a81425` (AGV2-013). This
   handoff supersedes the AGV2-014V handoff.
 
-## Hardening follow-up (this session)
-Three scoped fixes on top of AGV2-015, all around the OIDC login transaction:
+## Hardening follow-up (AGV2-015V, this session)
+Code review of AGV2-015 found the login transaction was not bound to the initiating browser and the
+raw OIDC `state` leaked into failed-login audit rows. Fixed (see `current-task.md` AGV2-015V):
 
 1. **Login transaction cookie binding (login-CSRF / state-injection defense).** `/auth/oidc/login`
    now sets a dedicated short-lived `ag_oidc_txn` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` in
@@ -18,12 +20,15 @@ Three scoped fixes on top of AGV2-015, all around the OIDC login transaction:
    one-way SHA-256 `txn_cookie_hash` of the raw cookie (new `txn_cookie_hash` column, migration
    `0013`). `/auth/oidc/callback` requires the cookie to match in constant time; a missing, wrong,
    or cross-browser cookie fails with `400 invalid_login_state`. The raw transaction cookie value is
-   never persisted or logged.
-2. **Raw OIDC state removed from audit.** `_record_login_failed` previously wrote the raw `state` as
+   never persisted or logged, and grants no authority (it is not the authenticated session).
+2. **Transaction cookie cleared on every post-consume outcome.** Success and exchange/ID-token/
+   identity failures all clear `ag_oidc_txn` (the failure paths return the standard
+   `oidc_authentication_failed` envelope with the cookie deleted).
+3. **Raw OIDC state removed from audit.** `_record_login_failed` previously wrote the raw `state` as
    `resource_id` under `resource_type=session`; it now records an opaque transaction id under
    `resource_type=oidc_login` (metadata carries only the failure `reason`). Raw `state`/`nonce`/PKCE
-   verifier never appear in audit.
-3. **Login-state cleanup.** The login transaction is now **deleted on consumption** (instead of
+   verifier/binding never appear in audit.
+4. **Login-state cleanup.** The login transaction is now **deleted on consumption** (instead of
    marking `consumed_at`), and expired transactions are **deleted when a new transaction is
    created**. `consumed_at` is retained on the entity/table but is no longer used for consumption
    semantics; rows do not accumulate.
@@ -126,7 +131,7 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
   (`NOT NULL`, server default dropped after backfill). Live `0012 -> 0013` succeeded.
 
 ## Automated tests
-- `scripts/dev/v2 test` -> **353 passed** (was 348; +5 for the hardening follow-up). New coverage
+- `scripts/dev/v2 test` -> **359 passed** (was 348; +11 for the hardening follow-up). New coverage
   includes OIDC config validation, HTTPS-in-prod enforcement, discovery issuer mismatch, login-state
   entropy/expiry, nonce/PKCE/state one-time consumption, callback replay, ID-token
   issuer/audience/expiry/subject validation, unsafe algorithm rejection, unique `(issuer,subject)`,
@@ -136,7 +141,9 @@ port (uncommitted compose override) so the redirect URI was stable; backend Olla
   invalid-header-no-cookie-fallback, role revocation and project/principal deactivation on next
   request, logout idempotency, audit secret redaction, login transaction cookie binding
   (missing/forged/cross-browser), login-state delete-on-consume, login-state expiry cleanup, failed
-  login audit raw-state redaction, and migration `0012 -> 0013`.
+  login audit raw-state redaction, transaction-cookie attributes (dev + prod `Secure`),
+  clear-on-success and clear-on-failure, raw binding never persisted, session fixation replacement,
+  and migration `0012 -> 0013`.
 - `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean.
 
 ## Key files
