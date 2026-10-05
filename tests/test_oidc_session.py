@@ -120,6 +120,26 @@ def test_oidc_dev_allows_http_issuer():
     assert _oidc_settings().oidc_issuer == ISSUER
 
 
+def test_txn_cookie_secure_in_prod(monkeypatch):
+    from aethergate.api import session_auth
+
+    prod = _oidc_settings(
+        app_env="prod",
+        queue_key="k" * 32,
+        oidc_issuer="https://idp.example",
+        oidc_redirect_uri="https://aethergate.example/admin/v1/auth/oidc/callback",
+    )
+    monkeypatch.setattr("aethergate.api.session_auth.get_settings", lambda: prod)
+    resp = session_auth.RedirectResponse("https://idp.example/authorize", status_code=302)
+    session_auth._set_txn_cookie(resp, "raw-binding-value")
+    set_cookie = resp.headers["set-cookie"].lower()
+    assert "secure" in set_cookie
+    assert "httponly" in set_cookie
+    assert "samesite=lax" in set_cookie
+    assert "path=/admin/v1/auth/oidc" in set_cookie
+    assert f"max-age={prod.oidc_login_ttl_seconds}" in set_cookie
+
+
 async def _provider_for(idp: DevOidcIdp, settings: Settings):
     transport = httpx.ASGITransport(app=idp.app)
     http = httpx.AsyncClient(transport=transport, base_url=settings.oidc_issuer)
@@ -538,6 +558,88 @@ async def test_audit_failed_login_no_raw_state(oidc_http):
             assert raw_state not in blob
             assert e.resource_id != raw_state
             assert txn_cookie not in blob
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_txn_cookie_attributes(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    set_cookie = login.headers["set-cookie"].lower()
+    assert session_service.LOGIN_TXN_COOKIE_NAME + "=" in set_cookie
+    assert "httponly" in set_cookie
+    assert "samesite=lax" in set_cookie
+    assert "path=/admin/v1/auth/oidc" in set_cookie
+    assert "max-age=600" in set_cookie
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_txn_cookie_cleared_on_success(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+    callback, cookie, csrf = await _follow_login(client, idp_client)
+    assert callback.status_code == 200
+    cleared = any(
+        session_service.LOGIN_TXN_COOKIE_NAME in sc
+        for sc in callback.headers.get_list("set-cookie")
+    )
+    assert cleared
+    # The binding cookie must be gone (deleted), not re-set to a new value.
+    txn_headers = [
+        sc for sc in callback.headers.get_list("set-cookie")
+        if session_service.LOGIN_TXN_COOKIE_NAME in sc
+    ]
+    assert all("max-age=0" in sc.lower() or '=""' in sc for sc in txn_headers)
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_txn_cookie_cleared_on_failure(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+    login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
+    authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
+    query = parse_qs(urlsplit(authorize.headers["location"]).query)
+    callback = await client.get(
+        "/admin/v1/auth/oidc/callback",
+        params={"code": "bogus-code", "state": query["state"][0]},
+        cookies={session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie},
+    )
+    assert callback.status_code == 401
+    txn_headers = [
+        sc for sc in callback.headers.get_list("set-cookie")
+        if session_service.LOGIN_TXN_COOKIE_NAME in sc
+    ]
+    assert txn_headers
+    assert all("max-age=0" in sc.lower() or '=""' in sc for sc in txn_headers)
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_login_binding_raw_not_persisted(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    async with factory() as s:
+        async with s.begin():
+            entity, raw_binding = await session_service.create_login_transaction(s)
+            state = entity.state
+    async with factory() as s:
+        row = (await s.execute(
+            select(models.OidcLoginState).where(models.OidcLoginState.state == state)
+        )).scalar_one()
+        assert row.txn_cookie_hash == session_service.hash_verifier(raw_binding)
+        assert raw_binding not in row.txn_cookie_hash
+        for col in ("id", "state", "nonce", "code_verifier", "code_challenge", "txn_cookie_hash"):
+            assert raw_binding not in str(getattr(row, col))
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_session_fixation_replaced(oidc_http):
+    client, idp_client, factory, idp = oidc_http
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+    _, first_cookie, _ = await _follow_login(client, idp_client)
+    _, second_cookie, _ = await _follow_login(client, idp_client)
+    assert first_cookie != second_cookie
+    who = await client.get("/admin/v1/whoami", cookies={"ag_session": second_cookie})
+    assert who.status_code == 200
+    assert who.json()["authentication_kind"] == "browser_session"
 
 
 @pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")

@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aethergate.api.deps import get_gateway_request_id
 from aethergate.config import get_settings
 from aethergate.contracts.admin_v1 import (
     LogoutResult,
@@ -82,6 +83,29 @@ def _clear_txn_cookie(response: JSONResponse) -> None:
     response.delete_cookie(
         key=session_service.LOGIN_TXN_COOKIE_NAME, path=_TXN_COOKIE_PATH
     )
+
+
+def _oidc_failure_response(
+    request: Request, *, code: str, message: str, status_code: int
+) -> JSONResponse:
+    """Return a standardized OIDC failure envelope and clear the transaction cookie.
+
+    Used for post-consume callback failures (exchange / ID token / identity). The
+    login transaction is already consumed at that point, so the browser's stale
+    binding cookie is cleared alongside the error.
+    """
+    response = JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": message,
+                "request_id": get_gateway_request_id(request),
+            }
+        },
+    )
+    _clear_txn_cookie(response)
+    return response
 
 
 async def _record_login_failed(
@@ -163,7 +187,12 @@ async def oidc_callback(
             await _record_login_failed(
                 session, reason=LOGIN_FAILED_EXCHANGE, resource_id=txn_id
             )
-        raise
+        return _oidc_failure_response(
+            request,
+            code="oidc_authentication_failed",
+            message="OIDC authentication failed.",
+            status_code=401,
+        )
 
     id_token = token_response.get("id_token")
     if not isinstance(id_token, str) or not id_token:
@@ -171,7 +200,12 @@ async def oidc_callback(
             await _record_login_failed(
                 session, reason=LOGIN_FAILED_ID_TOKEN, resource_id=txn_id
             )
-        raise OidcAuthenticationFailed()
+        return _oidc_failure_response(
+            request,
+            code="oidc_authentication_failed",
+            message="OIDC authentication failed.",
+            status_code=401,
+        )
 
     try:
         claims = await provider.validate_id_token(id_token, expected_nonce=transaction.nonce)
@@ -180,7 +214,12 @@ async def oidc_callback(
             await _record_login_failed(
                 session, reason=LOGIN_FAILED_ID_TOKEN, resource_id=txn_id
             )
-        raise
+        return _oidc_failure_response(
+            request,
+            code="oidc_authentication_failed",
+            message="OIDC authentication failed.",
+            status_code=401,
+        )
 
     subject = claims.get("sub")
     issuer = settings.oidc_issuer or ""
@@ -214,7 +253,12 @@ async def oidc_callback(
             await _record_login_failed(
                 session, reason=LOGIN_FAILED_IDENTITY, resource_id=txn_id
             )
-        raise
+        return _oidc_failure_response(
+            request,
+            code="oidc_authentication_failed",
+            message="OIDC authentication failed.",
+            status_code=401,
+        )
 
     body = SessionEstablished(
         session=_session_read(
