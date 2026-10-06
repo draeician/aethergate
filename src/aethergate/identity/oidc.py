@@ -157,6 +157,97 @@ class OidcProvider:
             raise OidcConfigurationError("OIDC discovery missing token_endpoint")
         return endpoint
 
+    def device_authorization_endpoint(self, document: dict[str, Any]) -> str:
+        endpoint = document.get("device_authorization_endpoint")
+        if not isinstance(endpoint, str) or not endpoint:
+            raise OidcConfigurationError(
+                "OIDC discovery missing device_authorization_endpoint"
+            )
+        return endpoint
+
+    async def has_device_authorization_endpoint(self) -> bool:
+        """Return True when the provider advertises a device authorization endpoint."""
+        document = await self._discover()
+        return isinstance(document.get("device_authorization_endpoint"), str)
+
+    async def start_device_authorization(self) -> dict[str, Any]:
+        """Call the provider device-authorization endpoint (RFC 8628).
+
+        Uses the public device client (no client secret). Returns the raw
+        provider response (device_code/user_code/verification URIs/expiry/
+        interval). Raises :class:`OidcConfigurationError` when the endpoint is
+        absent or the provider rejects the request.
+        """
+        document = await self._discover()
+        endpoint = self.device_authorization_endpoint(document)
+        client_id = self._settings.oidc_device_client_id
+        if not client_id:
+            raise OidcConfigurationError("device client id is not configured")
+        data = {
+            "client_id": client_id,
+            "scope": " ".join(self._settings.oidc_device_scope_list),
+        }
+        http = await self._get_http()
+        try:
+            response = await http.post(endpoint, data=data)
+            response.raise_for_status()
+            return response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise OidcConfigurationError("device authorization failed") from exc
+
+    async def poll_device_token(self, device_code: str) -> tuple[str, dict[str, Any]]:
+        """Poll the provider token endpoint using the device grant.
+
+        Returns ``(status, payload)`` where ``status`` is one of ``success``,
+        ``authorization_pending``, ``slow_down``, ``expired_token``, or
+        ``access_denied``. ``payload`` is the token response on success, empty
+        otherwise. Never logs the device_code.
+        """
+        document = await self._discover()
+        endpoint = self.token_endpoint(document)
+        client_id = self._settings.oidc_device_client_id
+        data = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device_code,
+            "client_id": client_id,
+        }
+        http = await self._get_http()
+        try:
+            response = await http.post(endpoint, data=data)
+        except httpx.HTTPError:
+            raise OidcAuthenticationFailed() from None
+
+        if 200 <= response.status_code < 300:
+            return "success", response.json()
+
+        try:
+            body = response.json()
+            error = body.get("error")
+        except ValueError:
+            raise OidcAuthenticationFailed() from None
+
+        if error in (
+            "authorization_pending",
+            "slow_down",
+            "expired_token",
+            "access_denied",
+        ):
+            return error, {}
+        raise OidcAuthenticationFailed()
+
+    async def validate_device_id_token(self, id_token: str) -> dict[str, Any]:
+        """Validate a device-flow ID token (no nonce; audience == device client).
+
+        The device grant has no ``nonce`` binding, so nonce validation is
+        skipped; ``iss``, ``aud`` (device client id), ``exp``/``nbf``, signature,
+        algorithm, and ``sub`` are still strictly validated.
+        """
+        return await self._decode_id_token(
+            id_token,
+            audience=self._settings.oidc_device_client_id,
+            expected_nonce=None,
+        )
+
     async def begin_login(
         self,
         *,
@@ -216,6 +307,19 @@ class OidcProvider:
         indistinguishable message. ``expected_nonce`` is compared in constant
         time. The ``sub`` claim must be present and non-empty.
         """
+        return await self._decode_id_token(
+            id_token,
+            audience=self._settings.oidc_client_id,
+            expected_nonce=expected_nonce,
+        )
+
+    async def _decode_id_token(
+        self,
+        id_token: str,
+        *,
+        audience: str | None,
+        expected_nonce: str | None,
+    ) -> dict[str, Any]:
         try:
             header = jwt.get_unverified_header(id_token)
         except jwt.PyJWTError as exc:
@@ -236,7 +340,7 @@ class OidcProvider:
                 id_token,
                 key=signing_key,
                 algorithms=[alg],
-                audience=self._settings.oidc_client_id,
+                audience=audience,
                 issuer=self._settings.oidc_issuer,
                 options={"require": ["exp", "iss", "aud", "sub"]},
             )
@@ -246,7 +350,9 @@ class OidcProvider:
         subject = claims.get("sub")
         if not isinstance(subject, str) or not subject:
             raise OidcAuthenticationFailed()
-        if not secrets.compare_digest(claims.get("nonce", ""), expected_nonce):
+        if expected_nonce is not None and not secrets.compare_digest(
+            claims.get("nonce", ""), expected_nonce
+        ):
             raise OidcAuthenticationFailed()
 
         return claims

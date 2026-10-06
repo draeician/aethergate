@@ -292,6 +292,76 @@ class OidcLoginState(Base, TimestampMixin):
     )
 
 
+class DeviceAuthorization(Base, TimestampMixin):
+    """A one-time RFC 8628 device-authorization transaction.
+
+    Only the one-way SHA-256 ``device_code_hash`` is persisted; the raw
+    ``device_code`` is a bearer secret returned once at ``device/start`` and
+    never stored. No provider access/refresh/ID token is ever stored here.
+    """
+
+    __tablename__ = "device_authorizations"
+    __table_args__ = (
+        Index("uq_device_authorizations_code_hash", "device_code_hash", unique=True),
+        CheckConstraint(
+            "expires_at > created_at", name="ck_device_authorizations_expiry_order"
+        ),
+        CheckConstraint(
+            "poll_interval_seconds >= 1",
+            name="ck_device_authorizations_poll_interval_positive",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    device_code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    verification_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    verification_uri_complete: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    poll_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5
+    )
+    last_poll_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class CliSession(Base, TimestampMixin):
+    """A durable human CLI session established through the device flow.
+
+    Only the one-way SHA-256 verifier of the raw ``ags_...`` token is persisted;
+    the raw token is returned exactly once at device-flow success and never
+    stored or logged.
+    """
+
+    __tablename__ = "cli_sessions"
+    __table_args__ = (
+        Index("uq_cli_sessions_token_hash", "token_hash", unique=True),
+        CheckConstraint(
+            "expires_at > created_at", name="ck_cli_sessions_expiry_order"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
+    principal_id: Mapped[str] = mapped_column(
+        ForeignKey("principals.id"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
 class AuditEvent(Base, TimestampMixin):
     """Immutable administrative audit event (safe metadata only).
 
@@ -972,6 +1042,8 @@ __all__ = [
     "ExternalIdentity",
     "BrowserSession",
     "OidcLoginState",
+    "DeviceAuthorization",
+    "CliSession",
     "AuditEvent",
     "Provider",
     "ProviderAccount",

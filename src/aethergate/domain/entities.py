@@ -36,6 +36,8 @@ from aethergate.domain.ids import (
     BudgetPolicyId,
     BudgetReservationId,
     BudgetWindowId,
+    CliSessionId,
+    DeviceAuthorizationId,
     EndpointId,
     ExecutionAttemptId,
     ExternalIdentityId,
@@ -156,9 +158,10 @@ class AdminRequestContext:
     Carries the effective (active) role assignments for the authenticated
     principal so the authorization service can answer ``authorize_admin``
     without re-resolving identity. The actor may be authenticated by an admin
-    service credential (``api_credential_id`` + ``audience`` + ``scopes``) or by
-    a human browser session (``browser_session_id``, no credential). The
-    ``authentication_kind`` disambiguates the two; authorization always flows
+    service credential (``api_credential_id`` + ``audience`` + ``scopes``), by a
+    human browser session (``browser_session_id``, no credential), or by a human
+    CLI session (``cli_session_id``, no credential). The
+    ``authentication_kind`` disambiguates the three; authorization always flows
     through the same centralized RBAC engine.
     """
 
@@ -169,6 +172,7 @@ class AdminRequestContext:
     assignments: tuple[RoleAssignment, ...]
     api_credential_id: ApiCredentialId | None = None
     browser_session_id: BrowserSessionId | None = None
+    cli_session_id: CliSessionId | None = None
     audience: CredentialAudience | None = None
     scopes: tuple[CredentialScope, ...] = ()
 
@@ -231,6 +235,47 @@ class OidcLoginState(Entity):
     created_at: datetime | None = None
     expires_at: datetime
     consumed_at: datetime | None = None
+
+
+class DeviceAuthorization(Entity):
+    """A one-time RFC 8628 device-authorization transaction.
+
+    The raw ``device_code`` is a bearer secret: only its one-way SHA-256
+    ``device_code_hash`` is persisted, and the raw value is returned exactly once
+    at ``device/start``. ``user_code``/``verification_uri`` are non-secret
+    display values. The transaction is short-lived, consumed exactly once, and
+    never stores any provider access/refresh/ID token.
+    """
+
+    id: DeviceAuthorizationId
+    device_code_hash: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str | None = None
+    created_at: datetime | None = None
+    expires_at: datetime
+    poll_interval_seconds: int = 5
+    last_poll_at: datetime | None = None
+    consumed_at: datetime | None = None
+
+
+class CliSession(Entity):
+    """A durable human CLI session established through the device flow.
+
+    Only the one-way SHA-256 verifier of the raw ``ags_...`` token is persisted;
+    the raw token is returned exactly once at device-flow success. It shares the
+    same Principal/RoleAssignment RBAC engine as browser sessions and is
+    admin-only (never authenticates the inference surface).
+    """
+
+    id: CliSessionId
+    principal_id: PrincipalId
+    token_hash: str
+    created_at: datetime | None = None
+    expires_at: datetime
+    last_seen_at: datetime | None = None
+    revoked_at: datetime | None = None
+    is_active: bool = True
 
 
 class BootstrapState(Entity):
@@ -602,6 +647,8 @@ __all__ = [
     "ExternalIdentity",
     "BrowserSession",
     "OidcLoginState",
+    "DeviceAuthorization",
+    "CliSession",
     "BootstrapState",
     "Provider",
     "SecretRef",

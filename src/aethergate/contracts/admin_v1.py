@@ -36,6 +36,7 @@ from aethergate.domain.ids import (
     BrowserSessionId,
     BudgetPolicyId,
     BudgetReservationId,
+    CliSessionId,
     EndpointId,
     ExecutionAttemptId,
     ExternalIdentityId,
@@ -190,7 +191,9 @@ class WhoamiRead(ContractModel):
 
     Service-credential callers populate ``api_credential_id``/``audience``/
     ``scopes``; browser-session callers populate ``browser_session_id`` with
-    ``authentication_kind=browser_session`` and empty/absent credential fields.
+    ``authentication_kind=browser_session`` and empty/absent credential fields;
+    CLI-session callers populate ``cli_session_id`` with
+    ``authentication_kind=cli_session`` and empty/absent credential fields.
     """
 
     principal_id: PrincipalId
@@ -198,6 +201,7 @@ class WhoamiRead(ContractModel):
     authentication_kind: AdminAuthenticationKind
     api_credential_id: ApiCredentialId | None = None
     browser_session_id: BrowserSessionId | None = None
+    cli_session_id: CliSessionId | None = None
     audience: CredentialAudience | None = None
     scopes: tuple[CredentialScope, ...] = ()
     roles: tuple[Role, ...]
@@ -232,6 +236,58 @@ class SessionEstablished(ContractModel):
 
 class LogoutResult(ContractModel):
     revoked: bool
+
+
+# --- Human CLI (OAuth device flow) sessions -----------------------------------
+
+
+class DeviceAuthorizationRead(ContractModel):
+    """Result of ``device/start``: the one-time device code and display values.
+
+    ``device_code`` is a bearer secret returned exactly once here and never
+    persisted beyond its one-way SHA-256 verifier. ``user_code`` and the
+    verification URIs are non-secret display values.
+    """
+
+    device_code: str = Field(min_length=1)
+    user_code: str = Field(min_length=1)
+    verification_uri: str = Field(min_length=1)
+    verification_uri_complete: str | None = None
+    expires_in: int = Field(ge=1)
+    interval: int = Field(ge=1)
+
+
+class DevicePollRequest(ContractModel):
+    """A poll request carrying the one-time device code (never echoed back)."""
+
+    device_code: str = Field(min_length=1)
+
+
+class CliSessionRead(ContractModel):
+    """Current human CLI session metadata. Never includes the raw session token."""
+
+    principal_id: PrincipalId
+    project_id: ProjectId
+    authentication_kind: AdminAuthenticationKind
+    cli_session_id: CliSessionId
+    roles: tuple[Role, ...]
+    issuer: str | None = None
+    subject: str | None = None
+
+
+class DevicePollRead(ContractModel):
+    """One device-flow poll outcome.
+
+    ``status`` is ``pending``, ``slow_down``, or ``success``. Only ``success``
+    carries the freshly established ``session`` and the one-time raw ``token``
+    (returned exactly once, never persisted beyond its one-way SHA-256 verifier).
+    """
+
+    status: str
+    session: CliSessionRead | None = None
+    token: str | None = None
+    token_type: str = "Bearer"
+    expires_in: int | None = None
 
 
 class ExternalIdentityCreate(ContractModel):
@@ -791,6 +847,10 @@ __all__ = [
     "SessionRead",
     "SessionEstablished",
     "LogoutResult",
+    "DeviceAuthorizationRead",
+    "DevicePollRequest",
+    "CliSessionRead",
+    "DevicePollRead",
     "ExternalIdentityCreate",
     "ExternalIdentityRead",
     "SecretRefCreate",

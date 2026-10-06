@@ -37,6 +37,8 @@ EXPECTED_TABLES = {
     "external_identities",
     "browser_sessions",
     "oidc_login_states",
+    "device_authorizations",
+    "cli_sessions",
     "providers",
     "provider_accounts",
     "endpoints",
@@ -451,5 +453,47 @@ def test_migration_0014_to_0015() -> None:
         # Explicit downgrade is reasonable.
         _run_alembic("downgrade", "0014", env=env)
         assert "operational_state" not in _columns(url, "endpoints")
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0015_to_0016() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1516")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0015", env=env)
+        assert "device_authorizations" not in asyncio.run(_table_names(url))
+        assert "cli_sessions" not in asyncio.run(_table_names(url))
+
+        _run_alembic("upgrade", "head", env=env)
+        tables = asyncio.run(_table_names(url))
+        assert {"device_authorizations", "cli_sessions"} <= tables
+        assert "uq_device_authorizations_code_hash" in _indexes(
+            url, "device_authorizations"
+        )
+        assert "uq_cli_sessions_token_hash" in _indexes(url, "cli_sessions")
+        assert "ck_device_authorizations_expiry_order" in _check_constraints(
+            url, "device_authorizations"
+        )
+        assert "ck_device_authorizations_poll_interval_positive" in _check_constraints(
+            url, "device_authorizations"
+        )
+        assert "ck_cli_sessions_expiry_order" in _check_constraints(url, "cli_sessions")
+        assert "principal_id" in _columns(url, "cli_sessions")
+        assert "device_code_hash" in _columns(url, "device_authorizations")
+        assert "device_code_hash" not in _nullable_columns(url, "device_authorizations")
+        assert "token_hash" not in _nullable_columns(url, "cli_sessions")
+
+        # Explicit downgrade removes only the new tables.
+        _run_alembic("downgrade", "0015", env=env)
+        tables = asyncio.run(_table_names(url))
+        assert "device_authorizations" not in tables
+        assert "cli_sessions" not in tables
+        assert "browser_sessions" in tables
     finally:
         asyncio.run(drop_database(url))

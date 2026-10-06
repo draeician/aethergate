@@ -23,8 +23,13 @@ from aethergate.errors import (
     CatalogConflictError,
     CatalogDestinationDenied,
     CatalogParentMismatchError,
+    CliSessionInvalid,
     CredentialLifecycleError,
     CsrfValidationError,
+    DeviceAccessDenied,
+    DeviceCodeInvalid,
+    DeviceExpired,
+    DeviceFlowUnavailable,
     OidcAuthenticationFailed,
     OidcConfigurationError,
     OidcLoginStateInvalid,
@@ -182,6 +187,61 @@ async def csrf_validation_error_handler(
     )
 
 
+async def cli_session_invalid_handler(
+    request: Request, exc: CliSessionInvalid
+) -> JSONResponse:
+    return _admin_error(
+        401,
+        "not_authenticated",
+        "Authentication is required for the admin API.",
+        get_gateway_request_id(request),
+    )
+
+
+async def device_flow_unavailable_handler(
+    request: Request, exc: DeviceFlowUnavailable
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "device_flow_unavailable",
+        "OAuth device login is not configured on this deployment.",
+        get_gateway_request_id(request),
+    )
+
+
+async def device_code_invalid_handler(
+    request: Request, exc: DeviceCodeInvalid
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "device_code_invalid",
+        "The device code is invalid, expired, or already used.",
+        get_gateway_request_id(request),
+    )
+
+
+async def device_expired_handler(
+    request: Request, exc: DeviceExpired
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "device_expired",
+        "The device authorization has expired.",
+        get_gateway_request_id(request),
+    )
+
+
+async def device_access_denied_handler(
+    request: Request, exc: DeviceAccessDenied
+) -> JSONResponse:
+    return _admin_error(
+        400,
+        "device_access_denied",
+        "The device authorization was denied.",
+        get_gateway_request_id(request),
+    )
+
+
 async def catalog_conflict_error_handler(
     request: Request, exc: CatalogConflictError
 ) -> JSONResponse:
@@ -261,6 +321,11 @@ __all__ = [
     "oidc_login_state_invalid_handler",
     "session_invalid_handler",
     "csrf_validation_error_handler",
+    "cli_session_invalid_handler",
+    "device_flow_unavailable_handler",
+    "device_code_invalid_handler",
+    "device_expired_handler",
+    "device_access_denied_handler",
     "catalog_conflict_error_handler",
     "active_route_conflict_error_handler",
     "catalog_parent_mismatch_error_handler",

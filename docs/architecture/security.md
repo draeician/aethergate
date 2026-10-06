@@ -204,6 +204,55 @@ JavaScript storage.
   tokens, state, nonce, PKCE verifier, raw session cookie, and raw CSRF token are never logged or
   persisted. (Settled)
 
+## Identity phase 4 — human OAuth device flow and CLI sessions (AGV2-019)
+
+Human operators authenticate a Linux CLI through an RFC 8628 OAuth device flow against the
+configured OIDC provider. The gateway mediates the transaction and issues a **durable CLI session**
+that authenticates a `Principal` and authorizes through the **same** `RoleAssignment`/RBAC engine as
+browser sessions. No provider token or CLI session secret is ever stored in plaintext.
+
+- **Device provider config** (`AETHERGATE_OIDC_DEVICE_*`) reuses the issuer/discovery/JWKS already
+  configured for browser OIDC: a public `device_client_id`, `device scopes` (`openid` always
+  enforced and de-duplicated), and an enable flag. The device client is **public** — it has no
+  embedded client secret, and the browser confidential-client secret is never placed in the Linux
+  CLI. If the provider does not advertise `device_authorization_endpoint`, device login returns a
+  stable `device_flow_unavailable` error. (Settled)
+- **Gateway-mediated device transaction.** `POST /admin/v1/auth/device/start` calls the provider
+  device authorization endpoint and creates a short-lived durable AetherGate device transaction.
+  The raw provider `device_code` is a bearer secret: the CLI sends it back on each poll, and
+  PostgreSQL stores only a one-way SHA-256 verifier plus safe metadata (never the raw code). It is
+  never logged/audited and never placed in a gateway-generated URL. (Settled)
+- **Poll semantics.** `POST /admin/v1/auth/device/poll` hashes the submitted `device_code` to find
+  the transaction, enforces expiry and the provider-recommended poll interval (a too-fast poll
+  returns `slow_down` **without** calling the provider; a provider `slow_down` raises the stored
+  interval +5s, capped at 60s), calls the provider token endpoint with the device grant, and
+  translates `authorization_pending`/`slow_down` safely. Terminal states (`access_denied`,
+  `expired_token`) and success consume the one-time transaction. (Settled)
+- **ID-token validation on success** uses the same production verification path as browser OIDC:
+  issuer, audience == `device_client_id`, signature/algorithm (asymmetric only), expiry/not-before,
+  and a required `sub`. The resulting `ExternalIdentity` is resolved by `(issuer, subject)`; a
+  known identity maps to an active principal; an unknown identity follows the same JIT policy
+  (unprivileged `user`, no role from any claim). No role is granted from IdP claims. (Settled)
+- **Durable CLI session.** A successful poll creates a fresh `CliSession`: stable `CliSessionId`,
+  `principal_id`, one-way SHA-256 `token_hash`, `created_at`, `expires_at`, throttled
+  `last_seen_at`, and `revoked_at`. The raw session token is `ags_<8-hex>_<token_urlsafe(32)>`
+  (>=256 bits CSPRNG), returned exactly once, and never logged/audited/persisted. Lifetime is
+  configurable (`cli_session_ttl_seconds`, safe default 8–12h); there is no refresh token in this
+  phase — an expired session requires another device login. (Settled)
+- **Admin auth unification.** Protected `/admin/v1` endpoints accept an admin credential
+  (`agk_...`), a browser session cookie, or a CLI session Bearer (`ags_...`).
+  `AdminAuthenticationKind` gains `CLI_SESSION`, and `AdminRequestContext` gains `cli_session_id`.
+  CLI sessions use the same Principal/RoleAssignment RBAC as browser sessions: role revocation
+  applies on the next request; principal/project deactivation applies immediately; a CLI session is
+  admin-only and never authenticates `/v1` inference; an invalid supplied `Authorization` never
+  falls through to a browser cookie; CLI bearer requests do not require browser CSRF. (Settled)
+- **Logout.** `POST /admin/v1/auth/cli/logout` durably revokes the current CLI session (idempotent)
+  and the CLI removes its local token; the raw bearer token is never logged/audited. (Settled)
+- **Audit.** `device.login_success` records the resulting principal/session ID; `cli_session.logout`
+  is audited; fixed safe failure categories only. Never logged: `device_code`, `user_code` (treated
+  as authentication material), provider access/ID tokens, the raw CLI session token, API
+  credentials, or the Authorization header. (Settled)
+
 ## Bootstrap and fail-closed startup
 
 - A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled — AGV2-013)

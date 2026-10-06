@@ -53,6 +53,7 @@ from aethergate.errors import (
     CredentialLifecycleError,
 )
 from aethergate.identity import admin as admin_service
+from aethergate.identity import cli_session as cli_session_service
 from aethergate.identity import service as identity_service
 from aethergate.identity import session as session_service
 from aethergate.identity.authorization import (
@@ -88,6 +89,8 @@ async def _admin_context(request: Request) -> domain.AdminRequestContext:
             raise AdminAuthenticationRequired() from None
         async with get_session_factory()() as session:
             async with session.begin():
+                if token.startswith(cli_session_service.CLI_SESSION_PREFIX):
+                    return await admin_service.authenticate_cli_session(session, token)
                 return await admin_service.authenticate_admin(session, token)
 
     raw_cookie = request.cookies.get(session_service.SESSION_COOKIE_NAME)
@@ -196,6 +199,7 @@ async def whoami(context: AdminContextDep) -> WhoamiRead:
         authentication_kind=context.authentication_kind,
         api_credential_id=context.api_credential_id,
         browser_session_id=context.browser_session_id,
+        cli_session_id=context.cli_session_id,
         audience=context.audience,
         scopes=context.scopes,
         roles=context.roles,

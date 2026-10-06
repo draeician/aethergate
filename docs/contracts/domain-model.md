@@ -116,7 +116,6 @@ floating point (`float`) is rejected for money and pricing. There is no
   writes cannot bypass them.
 
 ### Human identity: external identities, sessions, and login transactions (AGV2-015)
-
 - `AdminAuthenticationKind` (`service_credential` | `browser_session`) — how an admin request was
   authenticated. Both kinds resolve to the same `AdminRequestContext` and RBAC engine; a browser
   session carries no `ApiCredential` and populates `browser_session_id` instead of
@@ -137,6 +136,24 @@ floating point (`float`) is rejected for money and pricing. There is no
   consumption; expired rows are deleted when a new transaction is created).
 - `AdminRequestContext` gains `authentication_kind`, optional `browser_session_id`, and keeps
   `api_credential_id`/`audience`/`scopes` populated only for the service-credential kind.
+
+### Human device flow and CLI sessions (AGV2-019)
+
+- `AdminAuthenticationKind` gains `cli_session`; `AdminRequestContext` gains an optional
+  `cli_session_id`. A CLI session carries no `ApiCredential` and populates `cli_session_id` instead
+  of `api_credential_id`/`audience`/`scopes`/`browser_session_id`. It authorizes through the same
+  `RoleAssignment`/RBAC engine as a browser session.
+- `DeviceAuthorization` — short-lived, one-time device transaction (migration `0016`): stable
+  `DeviceAuthorizationId`, one-way SHA-256 `device_code_hash` of the provider device code (the raw
+  code is never persisted), safe provider metadata (`user_code` reference and the polling `interval`),
+  `expires_at`, `consumed_at`, and a terminal outcome (`approved`/`denied`/`expired`/`consumed`).
+  It is never placed in a gateway-generated URL and never logged.
+- `CliSession` — durable human CLI session (migration `0016`): stable `CliSessionId`,
+  `principal_id`, one-way SHA-256 `token_hash` (the raw `ags_...` token is returned once and never
+  persisted), `created_at`, `expires_at` (configurable `cli_session_ttl_seconds`), throttled
+  `last_seen_at`, and `revoked_at`. Session revalidation on every request re-checks revocation,
+  expiry, active principal, and active project, so role revocation and principal/project
+  deactivation take effect on the next request.
 
 ### Endpoint operational state (AGV2-018)
 

@@ -47,6 +47,7 @@ from aethergate.errors import (
     BootstrapAlreadyCompleted,
     BootstrapTokenRejected,
 )
+from aethergate.identity import cli_session as cli_session_service
 from aethergate.identity import rbac
 from aethergate.identity import service as identity_service
 from aethergate.identity import session as session_service
@@ -183,6 +184,34 @@ async def authenticate_browser_session(
             assignments=tuple(assignments),
         ),
         session_entity,
+    )
+
+
+async def authenticate_cli_session(
+    session: AsyncSession, raw_token: str
+) -> domain.AdminRequestContext:
+    """Resolve a raw ``ags_...`` CLI session token to an ``AdminRequestContext``.
+
+    The context has ``authentication_kind=CLI_SESSION``, a ``cli_session_id``,
+    empty ``scopes``/``audience``/``api_credential_id`` (no fake credential), and
+    the principal's active role assignments so the same centralized RBAC engine
+    authorizes it. Any failure raises ``CliSessionInvalid`` (indistinguishable).
+    """
+    session_entity, principal = await cli_session_service.resolve_cli_session(
+        session, raw_token, utcnow()
+    )
+    assignments = await repository.list_active_role_assignments(session, principal.id)
+    return domain.AdminRequestContext(
+        project_id=principal.project_id,
+        principal_id=principal.id,
+        authentication_kind=AdminAuthenticationKind.CLI_SESSION,
+        cli_session_id=session_entity.id,
+        api_credential_id=None,
+        browser_session_id=None,
+        audience=None,
+        scopes=(),
+        roles=tuple(a.role for a in assignments),
+        assignments=tuple(assignments),
     )
 
 
@@ -694,6 +723,7 @@ async def link_external_identity(
 __all__ = [
     "authenticate_admin",
     "authenticate_browser_session",
+    "authenticate_cli_session",
     "authorize_admin",
     "bootstrap",
     "get_bootstrap_status",

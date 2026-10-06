@@ -89,6 +89,19 @@ Human OIDC/session endpoints (AGV2-015):
 - `POST /admin/v1/auth/logout` — revoke the session and clear the cookie (CSRF-protected, idempotent).
 - `POST /admin/v1/oidc/identities` — link an external identity (`issuer` + `subject`) to a principal.
 
+CLI/device-flow endpoints (AGV2-019):
+
+- `POST /admin/v1/auth/device/start` — start a gateway-mediated OAuth device transaction (no auth);
+  returns `user_code`, `verification_uri`, `expires_in`, `interval`, and the raw provider
+  `device_code` (sent back on each poll).
+- `POST /admin/v1/auth/device/poll` — submit `{"device_code": ...}`; returns a typed status
+  (`pending` | `slow_down` | `success` | `access_denied` | `expired_token`). `success` reveals the
+  raw CLI session token once.
+- `POST /admin/v1/auth/cli/logout` — revoke the current CLI session (idempotent).
+
+`GET /admin/v1/whoami` reports `authentication_kind` (`service_credential` | `browser_session` |
+`cli_session`), populating `api_credential_id` / `browser_session_id` / `cli_session_id` respectively.
+
 Catalog/routing control-plane endpoints (AGV2-016), all deployment-scoped (`system_admin` +
 `admin:catalog:*`; project roles denied):
 
@@ -308,8 +321,40 @@ one-off container on the host network) and point `AETHERGATE_OIDC_ISSUER` at it.
 in memory, so restarting it changes the signing key (restart the API to clear its in-memory JWKS
 cache).
 
-## Tests
+## Linux CLI (AGV2-019)
 
+The `aethergate` command is an installable Linux client that is a thin HTTP client over `/admin/v1`
+(it never imports persistence/repository modules). See `docs/cli.md` for the full reference.
+
+```bash
+pip install -e .
+aethergate --version          # works with no server/config
+aethergate --help
+aethergate completion bash    # completion without contacting the server
+```
+
+Profiles live under `~/.config/aethergate/config.toml` and contain **no tokens**. Human login uses
+the gateway-mediated OAuth device flow (`aethergate auth login`); automation uses an admin service
+credential (`aethergate auth set-token --stdin`). Persistent tokens are stored in the OS keyring
+(never plaintext profile TOML); `auth login --no-store` gives an ephemeral in-process login. The
+`AETHERGATE_TOKEN` env var overrides storage for the current process only (CI).
+
+Device-flow configuration reuses the browser OIDC issuer/discovery/JWKS with a public device client:
+
+```
+AETHERGATE_OIDC_DEVICE_CLIENT_ID=<public-device-client-id>
+AETHERGATE_OIDC_DEVICE_SCOPES=openid profile    # openid always enforced
+AETHERGATE_CLI_SESSION_TTL_SECONDS=43200        # 12h default
+```
+
+The device client is **public** (no client secret); the browser confidential-client secret is never
+placed in the CLI. Device flow is enabled when OIDC is enabled **and** a public device client ID is
+configured. If the provider advertises no `device_authorization_endpoint`, device login
+returns `503 device_flow_unavailable`. The deterministic local IdP (`dev_oidc_idp.py`) also
+implements device authorization plus explicit `approve`/`deny`/`expire` control endpoints for
+offline verification.
+
+## Tests
 ```bash
 # host (offline; DB-gated tests skip)
 .venv/bin/python -m pytest -q
@@ -345,6 +390,8 @@ transactions); `0013` binds the OIDC login transaction to the initiating browser
 `txn_cookie_hash`); `0014` adds the catalog one-active-route partial unique index
 `uq_route_bindings_one_active_per_alias` (`model_alias_id WHERE is_active = true`); `0015` adds
 `endpoints.operational_state` (`active` default, CHECK `active|paused|draining`) for the queue operator
-control plane.
+control plane; `0016` adds the device-flow and CLI-session tables (`device_authorizations` with a
+one-way `device_code_hash` verifier and one-time/expiry metadata, and `cli_sessions` with a one-way
+`token_hash` verifier, expiry, and revocation).
 Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

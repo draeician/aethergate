@@ -180,6 +180,39 @@ class CsrfValidationError(DomainError):
     """
 
 
+class DeviceFlowUnavailable(DomainError):
+    """The OAuth device flow is not configured/enabled on this deployment.
+
+    Raised when device login is requested but no public device client is
+    configured or the provider does not advertise a device authorization
+    endpoint. The message is fixed and never includes client configuration.
+    """
+
+
+class DeviceCodeInvalid(DomainError):
+    """A device polling code is unknown, consumed, or replayed.
+
+    The three cases are deliberately indistinguishable so a caller cannot probe
+    transaction state. The message never echoes the supplied device code.
+    """
+
+
+class DeviceExpired(DomainError):
+    """A device authorization transaction has expired (terminal)."""
+
+
+class DeviceAccessDenied(DomainError):
+    """The user denied (or the provider rejected) the device authorization."""
+
+
+class CliSessionInvalid(DomainError):
+    """A CLI session token is missing, invalid, expired, or revoked.
+
+    Raised by the admin context resolver; mapped to a fixed 401. The message is
+    deliberately indistinguishable from a nonexistent session.
+    """
+
+
 class CredentialLifecycleError(DomainError):
     """A credential create/rotate request violates a lifecycle invariant.
 

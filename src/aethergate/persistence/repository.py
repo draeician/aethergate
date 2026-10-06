@@ -34,6 +34,8 @@ from aethergate.domain.ids import (
     BudgetPolicyId,
     BudgetReservationId,
     BudgetWindowId,
+    CliSessionId,
+    DeviceAuthorizationId,
     EndpointId,
     ExecutionAttemptId,
     ExternalIdentityId,
@@ -1631,6 +1633,191 @@ async def delete_expired_oidc_login_states(
         delete(models.OidcLoginState).where(models.OidcLoginState.expires_at <= now)
     )
     return result.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
+# Device authorization transactions
+# ---------------------------------------------------------------------------
+
+
+def _device_authorization_to_domain(
+    row: models.DeviceAuthorization,
+) -> domain.DeviceAuthorization:
+    return domain.DeviceAuthorization(
+        id=DeviceAuthorizationId(row.id),
+        device_code_hash=row.device_code_hash,
+        user_code=row.user_code,
+        verification_uri=row.verification_uri,
+        verification_uri_complete=row.verification_uri_complete,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        poll_interval_seconds=row.poll_interval_seconds,
+        last_poll_at=row.last_poll_at,
+        consumed_at=row.consumed_at,
+    )
+
+
+async def create_device_authorization(
+    session: AsyncSession, entity: domain.DeviceAuthorization
+) -> domain.DeviceAuthorization:
+    row = models.DeviceAuthorization(
+        id=str(entity.id),
+        device_code_hash=entity.device_code_hash,
+        user_code=entity.user_code,
+        verification_uri=entity.verification_uri,
+        verification_uri_complete=entity.verification_uri_complete,
+        expires_at=entity.expires_at,
+        poll_interval_seconds=entity.poll_interval_seconds,
+        last_poll_at=entity.last_poll_at,
+        consumed_at=entity.consumed_at,
+    )
+    session.add(row)
+    await session.flush()
+    return _device_authorization_to_domain(row)
+
+
+async def get_device_authorization_by_code_hash(
+    session: AsyncSession, device_code_hash: str
+) -> domain.DeviceAuthorization | None:
+    result = await session.execute(
+        select(models.DeviceAuthorization).where(
+            models.DeviceAuthorization.device_code_hash == device_code_hash
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _device_authorization_to_domain(row) if row else None
+
+
+async def get_device_authorization_by_code_hash_for_update(
+    session: AsyncSession, device_code_hash: str
+) -> domain.DeviceAuthorization | None:
+    result = await session.execute(
+        select(models.DeviceAuthorization)
+        .where(models.DeviceAuthorization.device_code_hash == device_code_hash)
+        .with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    return _device_authorization_to_domain(row) if row else None
+
+
+async def touch_device_authorization_poll(
+    session: AsyncSession, device_auth_id: DeviceAuthorizationId, polled_at: datetime
+) -> domain.DeviceAuthorization | None:
+    row = await session.get(models.DeviceAuthorization, str(device_auth_id))
+    if row is None:
+        return None
+    row.last_poll_at = polled_at
+    await session.flush()
+    return _device_authorization_to_domain(row)
+
+
+async def consume_device_authorization(
+    session: AsyncSession, device_auth_id: DeviceAuthorizationId, consumed_at: datetime
+) -> domain.DeviceAuthorization | None:
+    row = await session.get(models.DeviceAuthorization, str(device_auth_id))
+    if row is None:
+        return None
+    row.consumed_at = consumed_at
+    await session.flush()
+    return _device_authorization_to_domain(row)
+
+
+async def update_device_authorization_poll_interval(
+    session: AsyncSession, device_auth_id: DeviceAuthorizationId, poll_interval_seconds: int
+) -> domain.DeviceAuthorization | None:
+    row = await session.get(models.DeviceAuthorization, str(device_auth_id))
+    if row is None:
+        return None
+    row.poll_interval_seconds = poll_interval_seconds
+    await session.flush()
+    return _device_authorization_to_domain(row)
+
+
+async def delete_expired_device_authorizations(
+    session: AsyncSession, now: datetime
+) -> int:
+    result = await session.execute(
+        delete(models.DeviceAuthorization).where(
+            models.DeviceAuthorization.expires_at <= now
+        )
+    )
+    return result.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
+# CLI sessions
+# ---------------------------------------------------------------------------
+
+
+def _cli_session_to_domain(row: models.CliSession) -> domain.CliSession:
+    return domain.CliSession(
+        id=CliSessionId(row.id),
+        principal_id=PrincipalId(row.principal_id),
+        token_hash=row.token_hash,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        last_seen_at=row.last_seen_at,
+        revoked_at=row.revoked_at,
+        is_active=row.is_active,
+    )
+
+
+async def create_cli_session(
+    session: AsyncSession, entity: domain.CliSession
+) -> domain.CliSession:
+    row = models.CliSession(
+        id=str(entity.id),
+        principal_id=str(entity.principal_id),
+        token_hash=entity.token_hash,
+        expires_at=entity.expires_at,
+        last_seen_at=entity.last_seen_at,
+        revoked_at=entity.revoked_at,
+        is_active=entity.is_active,
+    )
+    session.add(row)
+    await session.flush()
+    return _cli_session_to_domain(row)
+
+
+async def get_cli_session_by_hash(
+    session: AsyncSession, token_hash: str
+) -> domain.CliSession | None:
+    result = await session.execute(
+        select(models.CliSession).where(models.CliSession.token_hash == token_hash)
+    )
+    row = result.scalar_one_or_none()
+    return _cli_session_to_domain(row) if row else None
+
+
+async def get_cli_session(
+    session: AsyncSession, cli_session_id: CliSessionId
+) -> domain.CliSession | None:
+    row = await session.get(models.CliSession, str(cli_session_id))
+    return _cli_session_to_domain(row) if row else None
+
+
+async def touch_cli_session(
+    session: AsyncSession, cli_session_id: CliSessionId, last_seen_at: datetime
+) -> domain.CliSession | None:
+    row = await session.get(models.CliSession, str(cli_session_id))
+    if row is None:
+        return None
+    row.last_seen_at = last_seen_at
+    await session.flush()
+    return _cli_session_to_domain(row)
+
+
+async def revoke_cli_session(
+    session: AsyncSession, cli_session_id: CliSessionId, revoked_at: datetime
+) -> domain.CliSession | None:
+    row = await session.get(models.CliSession, str(cli_session_id))
+    if row is None:
+        return None
+    if row.revoked_at is None:
+        row.revoked_at = revoked_at
+    row.is_active = False
+    await session.flush()
+    return _cli_session_to_domain(row)
 
 
 # ---------------------------------------------------------------------------

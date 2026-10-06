@@ -87,6 +87,19 @@ class Settings(BaseSettings):
         default=600, validation_alias="AETHERGATE_OIDC_LOGIN_TTL_SECONDS"
     )
 
+    # OAuth device flow (public CLI client) + durable human CLI sessions.
+    # The device client is public and MUST have no embedded client secret; it is
+    # distinct from the browser confidential client (``oidc_client_id``/secret).
+    oidc_device_client_id: str | None = Field(
+        default=None, validation_alias="AETHERGATE_OIDC_DEVICE_CLIENT_ID"
+    )
+    oidc_device_scopes: str = Field(
+        default="openid", validation_alias="AETHERGATE_OIDC_DEVICE_SCOPES"
+    )
+    cli_session_ttl_seconds: int = Field(
+        default=43200, validation_alias="AETHERGATE_CLI_SESSION_TTL_SECONDS"
+    )
+
     # Scheduler queue encryption key (Fernet). Outside PostgreSQL, never committed.
     queue_key: SecretStr | None = Field(default=None, validation_alias="AETHERGATE_QUEUE_KEY")
     # Scheduler bounds / timing.
@@ -137,11 +150,27 @@ class Settings(BaseSettings):
             scopes.insert(0, "openid")
         return list(dict.fromkeys(scopes))
 
+    @property
+    def oidc_device_scope_list(self) -> list[str]:
+        """Parsed, deduplicated device-flow scopes (``openid`` always first)."""
+        import re
+
+        scopes = [s for s in re.split(r"[\s,]+", self.oidc_device_scopes) if s]
+        if "openid" not in scopes:
+            scopes.insert(0, "openid")
+        return list(dict.fromkeys(scopes))
+
+    @property
+    def device_flow_enabled(self) -> bool:
+        """True when a public device client is configured (device flow available)."""
+        return bool(self.oidc_enabled and self.oidc_device_client_id)
+
     @field_validator(
         "oidc_issuer",
         "oidc_client_id",
         "oidc_redirect_uri",
         "oidc_client_secret",
+        "oidc_device_client_id",
         mode="before",
     )
     @classmethod
@@ -174,6 +203,8 @@ class Settings(BaseSettings):
             )
         if self.oidc_login_ttl_seconds <= 0:
             raise ValueError("oidc_login_ttl_seconds must be positive")
+        if self.cli_session_ttl_seconds <= 0:
+            raise ValueError("cli_session_ttl_seconds must be positive")
         # An HTTP issuer is allowed only in dev/test; production requires HTTPS.
         if self.app_env == "prod" and self.oidc_issuer is not None:
             if not self.oidc_issuer.startswith("https://"):

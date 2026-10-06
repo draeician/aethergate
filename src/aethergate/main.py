@@ -7,7 +7,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from aethergate import __version__
-from aethergate.api import accounting_admin, admin_errors, catalog_admin, queue_admin, session_auth
+from aethergate.api import (
+    accounting_admin,
+    admin_errors,
+    catalog_admin,
+    cli_auth,
+    queue_admin,
+    session_auth,
+)
 from aethergate.api import admin as admin_api
 from aethergate.api.deps import get_gateway_request_id
 from aethergate.api.health import router as health_router
@@ -25,8 +32,13 @@ from aethergate.errors import (
     CatalogConflictError,
     CatalogDestinationDenied,
     CatalogParentMismatchError,
+    CliSessionInvalid,
     CredentialLifecycleError,
     CsrfValidationError,
+    DeviceAccessDenied,
+    DeviceCodeInvalid,
+    DeviceExpired,
+    DeviceFlowUnavailable,
     DomainError,
     OidcAuthenticationFailed,
     OidcConfigurationError,
@@ -45,6 +57,7 @@ app.include_router(catalog_admin.router)
 app.include_router(accounting_admin.router)
 app.include_router(queue_admin.router)
 app.include_router(session_auth.router)
+app.include_router(cli_auth.router)
 
 app.add_exception_handler(DomainError, domain_error_handler)
 app.add_exception_handler(
@@ -79,6 +92,11 @@ app.add_exception_handler(
 )
 app.add_exception_handler(SessionInvalid, admin_errors.session_invalid_handler)
 app.add_exception_handler(CsrfValidationError, admin_errors.csrf_validation_error_handler)
+app.add_exception_handler(CliSessionInvalid, admin_errors.cli_session_invalid_handler)
+app.add_exception_handler(DeviceFlowUnavailable, admin_errors.device_flow_unavailable_handler)
+app.add_exception_handler(DeviceCodeInvalid, admin_errors.device_code_invalid_handler)
+app.add_exception_handler(DeviceExpired, admin_errors.device_expired_handler)
+app.add_exception_handler(DeviceAccessDenied, admin_errors.device_access_denied_handler)
 app.add_exception_handler(CatalogConflictError, admin_errors.catalog_conflict_error_handler)
 app.add_exception_handler(
     ActiveRouteConflictError, admin_errors.active_route_conflict_error_handler

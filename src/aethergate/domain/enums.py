@@ -29,13 +29,16 @@ class AdminAuthenticationKind(StrEnum):
     """How an admin request was authenticated.
 
     A service credential presents an ``Authorization: Bearer agk_...`` header; a
-    human browser session presents the server-managed session cookie. Both resolve
-    to the same :class:`~aethergate.domain.entities.AdminRequestContext` and the
-    same centralized RBAC engine, but a browser session carries no API credential.
+    human browser session presents the server-managed session cookie; a human CLI
+    session presents an ``Authorization: Bearer ags_...`` header established
+    through the OAuth device flow. All three resolve to the same
+    :class:`~aethergate.domain.entities.AdminRequestContext` and the same
+    centralized RBAC engine, but browser/CLI sessions carry no API credential.
     """
 
     SERVICE_CREDENTIAL = "service_credential"
     BROWSER_SESSION = "browser_session"
+    CLI_SESSION = "cli_session"
 
 
 class CredentialAudience(StrEnum):

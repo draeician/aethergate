@@ -2,191 +2,194 @@
 
 ## Current State
 - Branch: `v2`.
-- AGV2-018 (queue/operator admin API) is **complete**: implementation, migration `0015`, automated tests,
-  and every real nomnom live scenario (A–L) verified against the real stack.
-- Migration head: `0015` (adds `endpoints.operational_state`). `0001`–`0014` untouched.
-- Full suite (with `DATABASE_URL` + `AETHERGATE_TEST_DATABASE_URL`): **425 passed** (was 402; +22
-  queue-admin DB-gated tests + 1 migration test). `ruff check src tests` clean.
-- Live stack: dynamic API port `127.0.0.1:43001` (OIDC enabled), real Ollama backend
-  `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K` alias `gpt-4`,
-  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
+- AGV2-019 (Linux CLI foundation + human OAuth device-flow auth) is **complete**: implementation, migration
+  `0016`, automated tests, docs, and every required live nomnom scenario (A–I) plus the OpenAI SDK
+  regression (J) verified against the real stack.
+- Migration head: `0016` (adds `device_authorizations` + `cli_sessions`). `0001`–`0015` untouched.
+- Full suite (with `DATABASE_URL` + `AETHERGATE_TEST_DATABASE_URL`): **470 passed** (was 425; +20
+  `test_cli_session.py`, +1 `test_migrations.py` 0015→0016, +24 `test_cli.py`). `ruff check src tests`
+  clean. Containerized suite (`scripts/dev/v2 test`) also green.
+- Live stack: dynamic API port `127.0.0.1:43001`, deterministic local IdP with device support on the
+  host at `http://192.168.22.50:8491` (issuer `http://192.168.22.50:8491`, device client
+  `aethergate-device-client`), real Ollama backend `http://192.168.22.50:11434`, upstream
+  `qwen3.8-2b-distill:Q6_K` alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
 
-## AGV2-018 Completed — queue and operator admin API
+## AGV2-019 Completed — Linux CLI foundation and human OAuth device-flow authentication
 
-### 1. Durable endpoint operational state (migration 0015)
-- `EndpointOperationalState` enum (`active` | `paused` | `draining`) in `domain/enums.py`.
-- `domain.Endpoint.operational_state` (default `active`), mapped in `persistence/repository.py`.
-- `models.Endpoint.operational_state` column + CHECK `IN ('active','paused','draining')`, server
-  default `active`; migration `0015` (linear, `down_revision="0014"`, downgrade implemented).
+### 1. Device-flow architecture (RFC 8628)
+- Typed config: `AETHERGATE_OIDC_DEVICE_CLIENT_ID` (public client, no secret), `AETHERGATE_OIDC_DEVICE_SCOPES`
+  (`openid` always enforced and de-duplicated), `AETHERGATE_CLI_SESSION_TTL_SECONDS` (default 43200s).
+  `device_flow_enabled` is derived (`oidc_enabled AND oidc_device_client_id`); the browser confidential
+  client secret is never placed in the CLI.
+- `POST /admin/v1/auth/device/start` calls the provider `device_authorization_endpoint`, persists a
+  short-lived durable transaction storing only a one-way SHA-256 `device_code_hash` (never the raw
+  code), and returns the one-time `device_code` plus non-secret `user_code`/verification URIs.
+- `POST /admin/v1/auth/device/poll` hashes the submitted `device_code`, enforces expiry and the
+  provider poll interval (too-fast poll → `slow_down` without calling the provider; provider `slow_down`
+  bumps the stored interval +5s capped at 60s), translates `authorization_pending`/`slow_down`, and on
+  success validates the ID token (iss/aud/sig/exp/nbf, required `sub`) through the same production
+  verification path as browser OIDC, resolves the `ExternalIdentity` by `(issuer, subject)`, and
+  creates a durable CLI session exactly once. Unknown identity follows the same JIT policy (unprivileged
+  `user`, no role from claims).
 
-### 2. Scheduler operator service boundary
-`src/aethergate/scheduler/admin.py` — centralized operator service that accepts a typed
-`AdminRequestContext`, authorizes internally, resolves project/deployment scope centrally, and uses
-safe scheduler transition primitives (no lifecycle logic in routers). Routers (`api/queue_admin.py`)
-are thin.
+### 2. Durable CLI sessions (migration 0016)
+- `CliSession`: stable `CliSessionId`, `principal_id`, one-way SHA-256 `token_hash`, `created_at`,
+  `expires_at`, throttled `last_seen_at`, `revoked_at`. Raw token is `ags_<4-hex>_<token_urlsafe(32)>`,
+  returned exactly once, never persisted/logged.
+- `DeviceAuthorization`: one-way `device_code_hash`, `user_code` reference, poll `interval`,
+  `expires_at`, `consumed_at`, terminal outcome. One-time + expiry constrained.
+- `POST /admin/v1/auth/cli/logout` durably revokes the current CLI session (idempotent). Session
+  revalidation re-checks revocation/expiry/active principal/active project on every request.
 
-### 3. Refactor to a single cancellation/reconciliation state machine
-`SchedulingService.request_cancellation`, the reconcile CLI path, and the new admin service all reuse
-the module-level `cancel_request_transition` / `reconcile_transition` / `_release_pre_dispatch_accounting`
-primitives in `scheduler/service.py`. No divergent lifecycle copies remain.
+### 3. Admin authentication unification
+- `AdminAuthenticationKind.CLI_SESSION`; `AdminRequestContext` gains `cli_session_id`.
+- `_admin_context` bearer routing is prefix-dispatched: `ags_` → `authenticate_cli_session`, otherwise
+  `agk_` → `authenticate_admin`. CLI sessions use the same Principal/RoleAssignment RBAC engine as
+  browser sessions; an invalid `Authorization` never falls through to a cookie; CLI bearer requests
+  need no CSRF; a CLI session never authenticates `/v1` inference.
 
-### 4. Pause/drain admission gate
-The worker re-checks `operational_state` under the same endpoint `FOR UPDATE` row lock used for
-physical capacity admission, immediately before reserving. Filtering paused/draining endpoints out of
-queue scans is an optimization only. A paused or draining claim returns `"paused"` (worker waits, no
-hot-spin) with wait reason `endpoint_paused`/`endpoint_draining`; queued work stays held until
-`resume`. In-flight reserved/dispatched/streaming work is never killed; `resume` restores dispatch;
-`draining_complete` flips when active physical reservations reach zero.
+### 4. Deterministic local device-flow IdP
+- `DevOidcIdp` (in `dev_oidc_idp.py`) advertises `device_authorization_endpoint`, serves
+  `/device_authorization`, `/token` (device grant), and control endpoints `/device/approve` /
+  `/device/deny` / `/device/expire` (by `user_code`). Approval accepts an optional `subject` so one
+  issuer mints ID tokens for multiple human identities. No Internet IdP, no real provider credentials.
 
-### 5. Endpoints added (`/admin/v1/queue`)
-- Reads: `GET /queue/requests` (paginated, filters), `GET /queue/requests/{request_id}`,
-  `GET /queue/summary`, `GET /queue/outcome-unknown`, `GET /queue/quota-status`.
-- Endpoint runtime: `GET /queue/endpoints`, `GET /queue/endpoints/{endpoint_id}`.
-- Mutations: `POST /queue/endpoints/{endpoint_id}/pause` / `drain` / `resume`,
-  `POST /queue/requests/{request_id}/cancel`, `POST /queue/requests/{request_id}/reconcile`.
+### 5. Installable CLI (`aethergate`)
+- Console entry point `aethergate = "aethergate.cli.main:main"`; deps `click`, `keyring`, `tomli-w`
+  (profile write), stdlib `tomllib` (profile read). `main()` wraps `cli()` to map `CliError` to stable
+  exit codes without tracebacks (a real bug found: the entry point previously pointed at `cli`, so
+  `CliError` escaped as an unhandled traceback/exit 1 — fixed and covered by a test).
+- CLI is a thin HTTP client over `/admin/v1`; it never imports persistence/repository modules.
 
-### 6. Queue DTO safe-field list
-`QueueRequestRead` exposes only: `request_id`, `project_id`, `principal_id`, `api_credential_id`,
-`model_alias_id`, `endpoint_id`, `quota_group_id`, `state`, `stream`, `queued_at`, `started_at`,
-`finished_at`, `queue_wait_until`, `expires_at`, `cancellation_requested`, `wait_reason`,
-`wait_limit_id`, `wait_limit_metric`, `next_eligible_at`, `error_code`, `price_snapshot_id`,
-`reconciled_state`, `reconciled_at`, `reconciled_by`, optional `worker_id`/`lease_expires_at`, and a
-computed `effective_wait_reason`. It never exposes `payload_encrypted`, `result_encrypted`, decrypted
-prompt/completion, stream-event bodies, `fencing_token`, or provider secret material.
+### 6. Profiles / token storage / service credential
+- Profiles under XDG `~/.config/aethergate/config.toml`, no secrets. `create/list/show/delete/set-default`;
+  base-URL validation (https expected for remote; loopback http allowed; `--insecure` labeled dev-only);
+  trusted `--ca-bundle`.
+- Tokens via `TokenStore` (keyring: Secret Service/KWallet); write is verified by a read-back round
+  trip; no silent plaintext fallback. `auth login --no-store` = ephemeral in-process login;
+  `AETHERGATE_TOKEN` overrides storage for the current process only.
+- `auth set-token --stdin` (or hidden prompt) validates the credential against `/admin/v1/whoami`
+  before storing; inference-audience credentials are rejected for admin CLI use; argv never accepts a
+  raw credential.
 
-### 7. Authorization / scoping
-- Project-scoped (`admin:queue:read`/`write`): `system_admin` reads all + cancels any eligible request;
-  `project_admin` reads/cancels own project; `project_viewer` reads own project only. Cross-project
-  opaque request IDs are non-enumerating (`404`); project roles never see `project_id = NULL` requests.
-- Deployment-only (`system_admin` deployment authority + `admin:queue:*`, regardless of scopes):
-  endpoint runtime, pause/drain/resume, quota-status, outcome_unknown reconciliation. A `project_admin`
-  cannot gain operator authority merely by holding `admin:queue:*`.
+### 7. Output / exit-code / HTTP client contract
+- Every command supports `--json` (exactly one JSON doc on stdout; diagnostics on stderr). Stable exit
+  codes: `0` ok, `1` generic, `2` usage, `3` auth, `4` forbidden, `5` not found, `6` conflict,
+  `7` network/TLS, `8` server. Device terminal codes map to `3`.
+- One reusable `Client`: base URL + trusted CA, Authorization injection, JSON, timeout, structured
+  error parsing, safe retry for idempotent GET only (never POST/PATCH), CLI-version User-Agent.
 
-### 8. Cancellation semantics
-`queued`/`reserved` → terminal `cancelled` immediately (release endpoint/quota/budget reservations,
-discard pre-dispatch price snapshot); `dispatched`/`streaming` → set `cancellation_requested` only
-(never claim upstream stopped; owning worker settles conservatively); already-cancelled → idempotent
-`already_cancelled`; `succeeded`/`failed`/`expired` → stable `terminal` no-op conflict;
-`outcome_unknown` → `outcome_unknown` (cannot cancel; requires reconciliation). Typed result
-distinguishes all five; audit distinguishes `request.cancelled` vs `request.cancellation_requested`.
-
-### 9. Reconciliation semantics
-Disposition `failed` | `cancelled` only (`succeeded` rejected); `reconciled_by` = authenticated
-`principal_id` (never client-supplied); releases the held physical reservation exactly once; settles
-budget conservatively; no fabricated `UsageRecord`; repeat reconciliation is a stable conflict with no
-double release/commit.
-
-### 10. Error translation
-Stable codes: `404 not_found`, `403 forbidden`, `400 invalid_request` (bad disposition),
-`409 invalid_lifecycle` (cancel a terminal request / reconcile a non-`outcome_unknown` request).
-No SQL, stack traces, raw provider errors, or encryption data.
+### 8. Command coverage / completion / version
+- Core `profile`/`auth login|logout|whoami|set-token`/`completion`; `projects list/show/create/update`;
+  `principals list/show/create`; `credentials list/show`; `role-assignments list/show`; catalog
+  `providers/provider-accounts/endpoints/model-aliases/route-bindings/price-policies` (`list/show`) +
+  `create-provider`; accounting `budgets/usage/ledger/audit`; queue/operator `queue
+  list/show/summary/cancel/outcome-unknown/reconcile/quota-status` + `endpoint
+  list/show/pause/drain/resume`. No generic "POST arbitrary JSON" escape hatch.
+- `completion bash|zsh|fish` renders without contacting the server; `--version`/`--help` work offline.
 
 ## Automated tests
-- `tests/test_queue_admin.py` (new, DB-gated, 22 tests): operational-state default/slot calc,
-  pause/drain prevent-reserve + survive restart + idempotent audit, pause-vs-claim DB row-lock race,
-  queued/reserved/dispatched/idempotent/terminal/outcome_unknown cancellation, reconcile once + reject
-  succeeded/project-role, quota zero-state, project RBAC/non-enumeration, and HTTP DTO-safety/404/403/
-  cancel coverage.
-- `tests/test_migrations.py`: +1 `test_migration_0014_to_0015`.
-- Full suite: **425 passed** (`DATABASE_URL` must be set in addition to `AETHERGATE_TEST_DATABASE_URL`;
-  two pre-existing tests `test_http_admin_key_rejected_on_inference` and
-  `test_credential_audience_separation_via_endpoint` hit the real `get_settings()` and need
-  `DATABASE_URL`).
-- `ruff check src tests` clean.
+- `tests/test_cli_session.py` (new, DB-gated, 20 tests): device start/pending, slow_down interval
+  enforcement, expiry, one-time consumption/replay, ID-token validation, unknown-identity/JIT,
+  raw code not persisted, CLI session raw token not persisted, expiry/revocation, role-revocation and
+  principal-deactivation reflected next request, CLI session rejected on inference, service-credential
+  unchanged, and HTTP DTO safety.
+- `tests/test_cli.py` (new, offline, 24 tests): profiles CRUD + no-token-in-config + https/localhost/CA
+  behavior; token store (memory, keyring round trip, keyring-unavailable fail-safe); client error→exit
+  mapping (401/403/404/409/400/500 + device-terminal→3 + network→7); GET-only retry; Authorization
+  injection; JSON stdout purity; `--version`/`--help`/`completion` offline; `auth whoami`/`set-token
+  --stdin`; and `main()` mapping `CliError`→exit code.
+- `tests/test_migrations.py`: +1 `test_migration_0015_to_0016` (also covers empty→latest).
+- Full suite: **470 passed** host and containerized; `ruff check src tests` clean.
 
 ## Live verification status
-**Complete.** All scenarios A–L verified against the real stack (backend Ollama
-`http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`,
-`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, dynamic loopback host port). A real bug was found and
-fixed during this pass (see below).
+**Complete.** All required scenarios verified against the real stack (device-capable local IdP, real
+Ollama backend, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, dynamic loopback API port). Driver:
+`/tmp/opencode/agv2019_driver.py` (75 assertions, all green). Two real bugs found and fixed during the
+pass (see below).
 
-### Verified
-- **A queue inspection**: six concurrent requests → observed `1 dispatched + 5 queued`, then all six
-  `succeeded`; queue summary counts coherent; endpoint runtime `occupied <= 2` with correct
-  `available_slots`; a request DTO contains none of `payload_encrypted`/`result_encrypted`/
-  `fencing_token`/`prompt`/`content`/`secret`.
-- **B project RBAC**: `system_admin` sees all; `project_admin(A)`/`project_viewer(A)` see A only;
-  `project_admin(B)` sees B only; A caller querying a B request ID → `404`; `project_admin(A)` pause →
-  `403`; `project_viewer(A)` cancel → `403`.
-- **C pause live**: pause → two requests stay `queued` with `effective_wait_reason=endpoint_paused`;
-  `operational_state=paused` survives API+worker restart; resume → held work dispatches and succeeds.
-- **D drain live**: drain → new request stays `queued` with `effective_wait_reason=endpoint_draining`
-  (held, **not** failed — this is the fixed behavior); `draining_complete=true` at zero occupied slots;
-  resume → held work dispatches.
-- **E pause-vs-claim race** (driver harness): forced a worker claim to race an operator pause; the
-  endpoint row lock resolves the boundary so a reservation either commits before pause or the claim
-  refuses afterward — never a reservation after the pause commit.
-- **F queued cancellation**: `project_admin(A)` cancels its own queued request → `cancelled_now`,
-  `state=cancelled`; no upstream contact.
-- **G reserved pre-dispatch cancellation**: cancellation of a `reserved` request releases
-  endpoint/quota/budget reservations and discards the pre-dispatch price snapshot; queue API shows
-  `cancelled`; no upstream call.
-- **H dispatched cancellation**: cancel after durable dispatch intent returns `cancellation_requested`
-  (not a claimed upstream kill); owning worker settles without duplicate settlement.
-- **I outcome_unknown reconciliation**: forced lease loss/death after durable dispatch intent → request
-  becomes `outcome_unknown` with its physical slot still occupied; `project_admin` cannot reconcile;
-  `system_admin` reconcile (`failed`/`cancelled`) releases the slot exactly once and settles budget
-  conservatively with no fabricated `UsageRecord`; repeated reconcile is a stable conflict; `succeeded`
-  disposition rejected.
-- **J quota runtime status**: with a request quota group/limit seeded, `GET /queue/quota-status` reports
-  `committed=2`, `reserved=0`, `remaining=28` after two real admissions; read creates no fake window row.
-- **K browser RBAC/CSRF** (deterministic local OIDC IdP on the compose network):
-  - human `system_admin` pause/resume with correct `X-CSRF-Token` → `200`; wrong CSRF → `403`; missing
-    CSRF → `403`; Bearer pause → `200` (CSRF-exempt);
-  - human `project_admin` cancels its own queued request with CSRF → `200` `cancelled_now`;
-  - human `project_viewer` cancel → `403`.
-- **L regression**: full containerized suite **425 passed**; official OpenAI SDK (`openai` 2.54.0)
-  `models.list()` → `gpt-4` plus non-stream and stream (`17` chunks, `finish_reason=stop`) completions
-  green.
+- **A WIP marker**: `.aethergate-wip` exists, `git check-ignore` succeeds, absent from tracked/staged.
+- **B package/profile**: `aethergate --version` (0.1.0) and `--help` offline; profile created against
+  live API; profile TOML contains no token; `completion bash` renders.
+- **C human device login**: linked `dev-admin` subject → `system_admin`; `authorization_pending` before
+  approval; approval → success; `whoami --json` reports `authentication_kind=cli_session` +
+  `system_admin`; the real `aethergate auth login` persisted the token to the keyring and a **new**
+  process read it back.
+- **D device negatives**: `expired_token` → `device_expired`; unknown identity (JIT off) →
+  `oidc_authentication_failed`; invalid/replayed code → `device_code_invalid`.
+- **E RBAC continuity**: `project_admin(A)` reads/writes A, cannot see B (`404`); `project_viewer(A)`
+  reads A but cannot mutate (`403`); revoke viewer role → next command denied (non-enumerating `404`);
+  deactivate project_admin principal → next command denied.
+- **F operator workflow**: `system_admin` CLI session ran `queue summary`/`list`, endpoint
+  `pause`→`resume`, `outcome-unknown`; JSON outputs parsed cleanly.
+- **G service credential**: `set-token --stdin` imported the admin credential (whoami
+  `service_credential`); an inference-audience credential was rejected for admin CLI (exit 3).
+- **H token persistence/logout**: stored CLI token survived a new process; logout revoked server-side
+  and the replayed token returned `401`.
+- **I error exits**: missing profile → `5`; invalid token → `3`; not-found → `5`; unreachable server →
+  `7`.
+- **J regression**: full containerized suite green; OpenAI Python SDK `models.list()` → `gpt-4` plus
+  non-stream and stream completions green (bypass false).
 
 ### Fixed during this pass
-Draining initially **failed** queued work once occupied slots reached zero (`error_code=endpoint_draining`).
-This contradicted the spec ("queued work remains held; resume dispatches it"). Corrected in
-`scheduler/service.py` to hold queued work with wait reason `endpoint_draining` and return `"paused"`
-(worker waits) until an explicit `resume`; `draining_complete` remains a computed read of zero occupied
-slots. Test `test_drain_prevents_new_reserve_until_empty` now asserts the held-then-resume behavior.
+1. **CLI entry point did not trap `CliError`.** `pyproject.toml` pointed the console script at the click
+   `cli` group, so an expected error (e.g. rejected inference credential) surfaced as a raw traceback and
+   exit 1 instead of the documented exit code. Fixed by pointing it at `main` (which maps `CliError` →
+   exit code) and adding `test_main_maps_cli_error_to_exit_code`.
+2. **Deterministic IdP could not select a device subject.** The device flow minted a fixed subject,
+   which would make multi-identity RBAC device logins impossible. Added an optional `subject` override
+   to the `/device/approve` control endpoint (backward compatible).
 
 ## Key files
-- `src/aethergate/migrations/versions/0015_endpoint_operational_state.py` — new migration.
-- `src/aethergate/domain/enums.py`, `domain/entities.py` — `EndpointOperationalState` + field.
-- `src/aethergate/persistence/models.py`, `persistence/repository.py` — column/check + mapping.
-- `src/aethergate/scheduler/service.py` — shared transitions + pause/drain admission gate.
-- `src/aethergate/scheduler/repository.py` — queue/runtime/quota aggregate helpers.
-- `src/aethergate/scheduler/admin.py` — operator admin service.
-- `src/aethergate/api/queue_admin.py` — `/admin/v1/queue` router.
-- `src/aethergate/api/admin_errors.py`, `errors.py` — queue transition error handling.
-- `src/aethergate/contracts/admin_v1.py` — queue DTOs.
-- `src/aethergate/main.py`, `worker.py` — router/handler registration + `"paused"` handling.
-- `tests/test_queue_admin.py`, `tests/test_migrations.py`.
-- Docs: `docs/architecture/scheduler.md`, `docs/architecture/admin-api.md`,
-  `docs/contracts/domain-model.md`, `docs/contracts/admin-v1-foundation.md`,
-  `docs/development/README.md`.
+- `src/aethergate/identity/cli_session.py` — device-flow + CLI-session service (start/poll/create/
+  resolve/revoke, `DevicePollResult`, `generate_cli_session_token`).
+- `src/aethergate/identity/oidc.py` — `device_authorization_endpoint`, `start_device_authorization`,
+  `poll_device_token`, `validate_device_id_token`, shared `_decode_id_token`.
+- `src/aethergate/identity/admin.py` — `authenticate_cli_session`.
+- `src/aethergate/api/cli_auth.py` — `/admin/v1/auth/device/start|poll` + `/auth/cli/logout`.
+- `src/aethergate/api/admin.py` — `_admin_context` `ags_`/`agk_` bearer routing + `whoami` CLI session id.
+- `src/aethergate/api/admin_errors.py`, `errors.py`, `main.py` — new errors/handlers/registration.
+- `src/aethergate/domain/{ids,enums,entities}.py` — `CliSessionId`/`DeviceAuthorizationId`,
+  `AdminAuthenticationKind.CLI_SESSION`, entities + `AdminRequestContext.cli_session_id`.
+- `src/aethergate/persistence/{models,repository}.py`; `migrations/versions/0016_device_flow_cli_sessions.py`.
+- `src/aethergate/contracts/admin_v1.py` — `DeviceAuthorizationRead`, `DevicePollRequest/Read`,
+  `CliSessionRead`, `WhoamiRead.cli_session_id`.
+- `src/aethergate/config.py` — device client/scopes + CLI-session TTL config.
+- `src/aethergate/dev_oidc_idp.py` — deterministic device-flow IdP with per-approval subject.
+- `src/aethergate/cli/{main,client,profiles,tokenstore,output,errors}.py` — the CLI.
+- `pyproject.toml` — CLI deps + console entry point.
+- `tests/test_cli_session.py`, `tests/test_cli.py`, `tests/test_migrations.py`.
+- Docs: `docs/cli.md` (new), `docs/architecture/security.md`, `docs/architecture/admin-api.md`,
+  `docs/contracts/domain-model.md`, `docs/contracts/admin-v1-foundation.md`, `docs/development/README.md`.
 
 ## Decisions
-- Pause/drain and catalog `is_active` are distinct; pause/drain never sets `is_active=false`.
-- Pause and drain intentionally share the "no new dispatch" gate; `draining` additionally reports
-  `draining_complete` at zero reservations and is not auto-flipped by a background job.
-- The cancellation/reconciliation state machine is single-sourced in the shared transitions, reused by
-  the normal scheduler path, the reconcile CLI, and the admin API.
-- `terminal` and `outcome_unknown` cancel outcomes are returned (not raised) at the service layer and
-  mapped to `409 invalid_lifecycle` at the HTTP boundary; reconciliation raises `QueueTransitionError`
-  for repeat/non-`outcome_unknown` at the service layer.
+- The CLI is a thin HTTP client over `/admin/v1` and never imports persistence/repository modules.
+- Human CLI sessions and service-account admin credentials are distinct: `ags_` (CLI session, RBAC via
+  Principal/RoleAssignment) vs `agk_` (service credential, RBAC via role assignment + scopes). A human
+  login never fakes an `ApiCredential`.
+- Only one-way SHA-256 verifiers are persisted for `device_code` and the CLI session token; both raw
+  values are one-time reveals.
+- Device-flow terminal error codes surface as CLI auth failures (exit 3), not usage errors.
+- Profiles and tokens are strictly separated (no secret in TOML); keyring writes are round-trip verified.
+- CLI write expansion for endpoints/model-aliases/routes is deferred (no unsafe passthrough); `providers`
+  has `create-provider` only.
 
 ## Issues / Risks
-- `scripts/dev/v2` runs the full suite inside the container, which already sets both
-  `DATABASE_URL` and `AETHERGATE_TEST_DATABASE_URL`; running DB-gated tests on the host requires
-  setting **both** env vars (the two inference-path admin tests use the un-monkeypatched
-  `get_settings()`).
-- The pause-vs-claim race test uses `asyncio.sleep(0.05)` only to let the pause task reach its blocking
-  `FOR UPDATE`; correctness is the endpoint row lock, not the sleep.
-- Browser CSRF (scenario K) was verified using the deterministic local OIDC IdP plus an **uncommitted**
-  compose override (`deploy/v2/compose.oidc.yaml`) that wires the OIDC env passthrough; the underlying
-  `deploy/v2/compose.yaml` still lacks a first-class OIDC env block (the same gap noted in the
-  AGV2-017 handoff remains, for a later deployment/ops task).
-- The model completes in ~3s on this backend, so catching the transient `reserved`/`dispatched`
-  in-flight window live requires a slow adapter or a stopped worker; those state transitions are
-  instead proven deterministically by the DB-gated tests.
+- `ruff format` is **not** part of this repo's enforced workflow (`ruff check` is); 73 pre-existing files
+  would be reformatted, so formatting was intentionally left alone to avoid unrelated churn.
+- Token-quota admission fails closed for the Ollama `qwen3.8-2b-distill` model (`estimate_input_tokens`
+  returns `None` because no model-specific tokenizer exists). This is pre-existing and correct
+  (fail-closed); the live SDK regression was seeded request-quota-only. Token quotas for such models
+  remain a documented limitation.
+- The live device-flow IdP ran on the host (not a committed compose service); the OIDC/device env was
+  injected via an **uncommitted** compose override (`/tmp/opencode/device_override.yml`). The underlying
+  `deploy/v2/compose.yaml` still lacks first-class OIDC/device env blocks (same gap noted in AGV2-017/
+  018 handoffs, for a later deployment/ops task).
+- The device-flow IdP (host) and browser IdP (`dev-oidc-idp` container) were both present during some
+  runs; the browser container is orphaned by the current compose file and should be removed in a later
+  cleanup.
 
 ## Recommended Next Step
-Close AGV2-018: commit and push the updated handoff to `origin/v2` (implementation, tests, and all
-A–L live scenarios are already green), then start the next scheduled v2 workstream.
+Commit and push the AGV2-019 handoff and all work to `origin/v2` (implementation, migration `0016`,
+  tests, docs, and all A–J live evidence are green), then remove `.aethergate-wip` and pick up the next
+  scheduled v2 workstream.

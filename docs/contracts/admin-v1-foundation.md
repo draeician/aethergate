@@ -163,6 +163,27 @@ Queue/operator admin DTOs (AGV2-018):
 These DTOs back the `/admin/v1/queue` surface introduced in AGV2-018, reusing the shared `Page[T]`
 shape and the deployment-vs-project authorization split.
 
+CLI / device-flow DTOs (AGV2-019):
+
+- `DeviceAuthorizationRead` — safe device-transaction metadata returned by
+  `POST /admin/v1/auth/device/start`: `user_code`, `verification_uri`,
+  `verification_uri_complete` (optional), `expires_in`, `interval`, and the raw provider
+  `device_code` (revealed once here; the caller sends it back on each poll). Never re-exposed.
+- `DevicePollRequest` — `device_code` (the raw provider device code, sent in the JSON body on each
+  poll).
+- `DevicePollRead` — typed poll result: `status` (`pending` | `slow_down` | `success` |
+  `access_denied` | `expired_token`), an updated `interval` for `slow_down`, and the one-time raw
+  `token` only on `success`.
+- `CliSessionRead` — safe current-CLI-session metadata (`cli_session_id`, `principal_id`,
+  `expires_at`); the raw `ags_...` token is returned exactly once at device login and never stored
+  or re-read.
+- `WhoamiRead` gains `cli_session_id`, so `authentication_kind` now distinguishes `service_credential`
+  | `browser_session` | `cli_session`, populating the matching context field.
+
+These DTOs back the CLI/device-flow auth surface introduced in AGV2-019 (device start/poll, CLI
+logout, and `whoami` with the CLI-session kind). The raw device code and the raw CLI session token
+are one-time reveals at the start/success boundaries respectively, never placed on a read DTO.
+
 ## Requirements honored
 
 - Stable opaque resource IDs (typed `*Id` values, no database auto-increment or table names).

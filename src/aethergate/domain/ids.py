@@ -154,6 +154,14 @@ class OidcLoginStateId(ResourceId):
     __slots__ = ()
 
 
+class DeviceAuthorizationId(ResourceId):
+    __slots__ = ()
+
+
+class CliSessionId(ResourceId):
+    __slots__ = ()
+
+
 __all__ = [
     "ResourceId",
     "ProjectId",
@@ -182,4 +190,6 @@ __all__ = [
     "ExternalIdentityId",
     "BrowserSessionId",
     "OidcLoginStateId",
+    "DeviceAuthorizationId",
+    "CliSessionId",
 ]

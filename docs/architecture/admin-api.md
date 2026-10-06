@@ -313,6 +313,32 @@ cookie. Cookie-authenticated `POST/PUT/PATCH/DELETE` requests require `X-CSRF-To
 and `GET`/`HEAD` do not. `whoami` reports `authentication_kind` (`service_credential` | `browser_session`)
 and populates `api_credential_id` or `browser_session_id` accordingly.
 
+## CLI / device-flow auth surface (AGV2-019)
+
+Human operators authenticate a Linux CLI through a gateway-mediated OAuth device flow and receive a
+durable CLI session that authorizes through the same RBAC engine as browser sessions:
+
+- `POST /admin/v1/auth/device/start` — start a device transaction (no auth); returns `user_code`,
+  `verification_uri`, `verification_uri_complete` (when the provider supplies it), `expires_in`,
+  `interval`, and the provider `device_code` (a bearer secret the CLI must send back on each poll).
+  `503 device_flow_unavailable` when device flow is not configured/enabled.
+- `POST /admin/v1/auth/device/poll` — submit the raw `device_code` in the JSON body; returns a typed
+  status (`pending` | `slow_down` | `success` | `access_denied` | `expired_token`). `success`
+  returns the raw CLI session token exactly once; terminal states consume the one-time transaction.
+- `POST /admin/v1/auth/cli/logout` — revoke the current CLI session (idempotent).
+
+`GET /admin/v1/whoami` now reports `authentication_kind` including `cli_session`, populating
+`cli_session_id` for CLI sessions and `api_credential_id` / `browser_session_id` for the other kinds.
+
+All protected `/admin/v1` endpoints accept an admin credential (`agk_...`), a browser session
+cookie, or a CLI session Bearer (`ags_...`). The routing rule in `_admin_context` is
+prefix-dispatched: `ags_` resolves as a CLI session; an otherwise-valid `agk_` credential resolves
+as a service credential. A supplied `Authorization` header is authoritative and never falls through
+to a cookie; CLI bearer requests do not require CSRF. Device-flow errors use the standard envelope
+with stable codes: `503 device_flow_unavailable`, `404 device_code_invalid`, `401
+device_access_denied` / `device_expired` / `cli_session_invalid`, and a `400 slow_down`-shaped poll
+is never an error (it is a typed poll status).
+
 ## Deferred
 
 - Concrete schema/OpenAPI layout for `/admin/v1` (owned by the `contracts` workstream, established first).
