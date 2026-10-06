@@ -3,8 +3,8 @@
 ## Current State
 - Branch: `v2`.
 - AGV2-018 (queue/operator admin API) implementation and automated tests are complete; live nomnom
-  verification is **partially complete** — scenarios A, B, C, D, and F verified against the real stack;
-  E (race harness), G/H/I/J live, K (browser CSRF), and L (full regression + official SDK) remain
+  verification is **partially complete** — scenarios A, B, C, D, F, and L(SDK) verified against the real
+  stack; E (race harness), G/H/I/J live, K (browser CSRF), and the full L regression battery remain
   (G/H/I/J are covered by deterministic automated tests).
 - Migration head: `0015` (adds `endpoints.operational_state`). `0001`–`0014` untouched.
 - Full suite (with `DATABASE_URL` + `AETHERGATE_TEST_DATABASE_URL`): **425 passed** (was 402; +22
@@ -114,6 +114,8 @@ real bug was found and fixed during this pass (see below).
   resume → held work dispatches.
 - **F queued cancellation**: `project_admin(A)` cancels its own queued request → `cancelled_now`,
   `state=cancelled`; no upstream contact.
+- **L official OpenAI SDK** (`openai` 2.54.0): `models.list()` → `gpt-4`; non-stream completion and
+  stream completion (`17` chunks, `finish_reason=stop`) both green.
 
 ### Fixed during this pass
 Draining initially **failed** queued work once occupied slots reached zero (`error_code=endpoint_draining`).
@@ -129,7 +131,8 @@ slots. Test `test_drain_prevents_new_reserve_until_empty` now asserts the held-t
   by deterministic DB-gated tests in `tests/test_queue_admin.py`.
 - **K** browser RBAC/CSRF — needs the deterministic local OIDC IdP + an uncommitted compose override to
   wire OIDC env passthrough.
-- **L** full regression + official OpenAI SDK non-stream/stream re-run.
+- **L** full regression re-run (the SDK non-stream/stream paths are verified above; the broader
+  regression battery still needs a fresh containerized run).
 
 ## Key files
 - `src/aethergate/migrations/versions/0015_endpoint_operational_state.py` — new migration.
