@@ -2,15 +2,80 @@
 
 ## Current State
 - Branch: `v2`.
-- AGV2-017 implementation complete on `v2` (see "Task Completed"). This handoff supersedes the
-  AGV2-016V handoff.
-- Migration head: `0014` (no new migration; the nullable `budget_reservations.price_snapshot_id` was
-  already introduced by `0008`, so the AGV2-017 read-contract fix needs no schema change; empty ->
-  `0014` re-verified live).
-- Full containerized suite: **399 passed** (was 386; +13 new `tests/test_accounting_admin.py`). `ruff
-  check src tests` clean; `git diff --check` clean; staged secret scan clean.
+- AGV2-017V complete (see below); AGV2-017 remains complete underneath. This handoff
+  supersedes the AGV2-017 handoff.
+- Migration head: `0014` (unchanged; AGV2-017V added no migration and modified none of
+  `0001`–`0014`).
+- Full containerized suite: **402 passed** (was 399; +2 concurrent price-policy race tests,
+  +1 budget double-commit settlement-replay test). `ruff check src tests` clean;
+  `git diff --check` clean; staged secret/token/content canary scan clean.
 
-## Task Completed
+## AGV2-017V Completed — close accounting concurrency + release verification gaps
+
+### 1. True concurrent PricePolicy race (new tests, no production change)
+Added to `tests/test_accounting_admin.py` (DB-gated, independent `async_sessionmaker`
+sessions, `asyncio.Barrier(2)` synchronization so this is a genuine race, not sequential
+calls):
+
+- `test_concurrent_price_policy_create_race` — two sessions race to create the first enabled
+  policy on the same route. Exactly one winner; the loser receives the typed
+  `PricePolicyConflictError`; exactly one enabled policy remains; no raw `IntegrityError`
+  escapes; and the loser's aborted transaction does not corrupt a subsequent disabled create.
+- `test_concurrent_price_policy_enable_race` — two disabled policies race to enable via
+  `repository.update_price_policy` under the same barrier. Same invariants.
+
+No production change was required: the partial unique index
+`uq_price_policies_one_enabled_per_route` (migration `0008`) plus the
+`_is_price_policy_conflict` `IntegrityError` translation already backstop the race correctly.
+
+### 2. Live released pre-dispatch budget reservation (nomnom, 18/18)
+Real admin API setup (bootstrap, `ollama` provider/account/endpoint, model alias
+`gpt-4-release`, request-priced `0.05` policy, project, inference credential, budget
+`1.00`/3600s), then the real `SchedulingService` drove `admit_and_enqueue` +
+`claim_and_reserve` (acquiring a budget reservation + immutable price snapshot, state
+`reserved`). The request was reverted to the pre-dispatch `reserved` window (the same harness
+step as the deterministic `test_pre_dispatch_cancel_releases_budget`) and then
+`request_cancellation` ran the real release lifecycle (`_release_pre_dispatch_accounting`).
+
+Proven from PostgreSQL **and** the admin API:
+
+- `BudgetReservation.state == released`, `reserved_amount == 0`, `committed_amount == 0`,
+  `price_snapshot_id == null`;
+- the pre-dispatch `PriceSnapshot` was discarded;
+- no `UsageRecord` and no `usage_debit LedgerEntry` for that request;
+- the `InferenceRequest` is `cancelled`; the budget window `reserved_amount == 0` and
+  `committed_amount == 0`;
+- no upstream dispatch evidence (`upstream_request_id` null; worker was stopped so
+  `run_complete`/`run_stream` never executed);
+- `GET /admin/v1/budget-reservations?request_id=…` serializes `price_snapshot_id: null` and
+  `state: "released"`; `GET /admin/v1/projects/{id}/budget-status` reports
+  `reserved=0 committed=0`.
+
+The released row came from the real scheduler/accounting lifecycle, not a manual insert.
+
+### 3. Settlement idempotency (rerun existing regression + 1 narrow addition)
+The prior "repeated GET reads prove idempotency" claim was removed. Settlement replay is now
+proven by the containerized regression in `tests/test_accounting.py`:
+
+- `test_usage_record_and_ledger_idempotent` — a same-canonical settlement replay does not
+  duplicate the `UsageRecord` (unique per `request_id`) and a duplicate ledger
+  `idempotency_key` collapses to one entry.
+- `test_settlement_replay_does_not_double_commit_budget` (**new**) — replays
+  `settle_budget_reservations_to_actual` for the already-committed request (no second upstream
+  charge); the budget window `committed_amount` stays `0.05`, never `0.10`.
+- `test_conflicting_usage_record_replay_raises` and `test_conflicting_ledger_entry_replay_raises`
+  — a conflicting replay raises `AccountingInvariantError` and mutates nothing.
+
+### 4. Regression / SDK
+- Full containerized suite: **402 passed**.
+- Official OpenAI SDK non-stream and stream (`32` chunks) inference with
+  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false` — `3/3` green (alias listed by
+  `models.list()`, non-stream completion, stream completion).
+- Backend Ollama `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias
+  `gpt-4`/`gpt-4-release`; API dynamic loopback host port (release proof ran the scheduler
+  driver inside the `api` container against `http://api:8000`).
+
+## Task Completed (AGV2-017, still the base)
 AGV2-017 — Accounting admin API: pricing, project budgets, usage/ledger, and audit reads.
 
 ### Endpoints added (`/admin/v1`)
@@ -88,65 +153,34 @@ Stable codes only (no SQL/constraint names/stack traces/secrets): `404 not_found
 `403 forbidden`, `400 invalid_request`, `400 parent_mismatch`, `409 price_policy_conflict`, plus
 stable immutable-field validation errors for budget `currency`/`window_seconds`.
 
-## Live nomnom verification (all scenarios green)
-
+## Live nomnom verification (AGV2-017, still green)
 Clean reset -> `scripts/dev/v2 migrate` (empty -> `0014`) -> one-use bootstrap -> catalog built
 entirely through `/admin/v1`. Backend Ollama `http://192.168.22.50:11434`, upstream
 `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`. Bearer
-scenarios A-H/J (35/35) ran against a dynamic loopback port; browser scenario I (7/7) ran against a
-pinned `44777` port with an uncommitted compose override + a local `MultiSubjectIdp`.
-
-- **A price policy + snapshot + inference.** Created request-priced `0.05` policy via `/admin/v1`; read
-  returned fixed-point `0.050000000000`; real SDK inference succeeded; immutable `PriceSnapshot`
-  captured; PATCH to `0.10`; second inference; both `0.05` and `0.10` snapshots preserved.
-- **B one-enabled invariant.** Disabled alternate created; enabling it while another enabled =>
-  `409 price_policy_conflict`.
-- **C budget live.** Budget created via `/admin/v1`; status zero-state `headroom == limit`; inference
-  committed `0.10`; an over-budget request returned `502 budget_request_too_large`; a budget-exhausted
-  request blocked in the queue with `wait_reason = budget_window_exhausted`; PATCH `limit_amount`
-  admitted a new request and `committed_amount` reflected the raised limit (historical window intact).
-- **D budget scope RBAC.** `project_admin(A)` read its own budget; `project_admin(B)` saw only B's
-  budget; `project_viewer` write => `403`; `project_admin(A)` PATCH own budget => `200`.
-- **E usage + ledger.** Real request-priced inference produced exactly one `UsageRecord` and one
-  `usage_debit` `LedgerEntry` with positive fixed-point amounts matching snapshot pricing.
-- **F idempotent settlement.** Repeated usage/ledger reads did not change row counts or amounts.
-- **G reservation read.** `budget-reservations` listed the committed reservation (with snapshot id).
-- **H audit reads.** `system_admin` saw deployment + project events; `project_admin(A)` saw its own
-  `project_budget_policy.*` events but not deployment `price_policy.*`; a project credential without
-  `admin:audit:read` => `403`; audit payloads contained no secret material.
-- **I browser session/CSRF (local IdP).** Real OIDC login for `dev-admin` (system_admin),
-  `dev-padmin` (project_admin), `dev-pviewer` (project_viewer). system_admin price-policy create with
-  correct CSRF => `201`; missing CSRF => `403`; wrong CSRF => `403`; project_admin budget PATCH with
-  CSRF => `200`; project_admin missing CSRF => `403`; project_viewer mutation => `403`; Bearer
-  mutation without CSRF => `201`.
-- **J SDK regressions.** Official OpenAI SDK `models.list()` listed `gpt-4`; non-stream and stream
-  chat completions both succeeded with inference auth bypass false.
+scenarios A-H/J (35/35) and browser scenario I (7/7) were green; AGV2-017V re-verified the normal
+inference path (SDK non-stream + stream) and added the released-reservation proof (18/18).
 
 ## Migration
-- None. Head remains `0014`; `0001`–`0014` untouched. `budget_reservations.price_snapshot_id`
-  nullable came from `0008`, so the AGV2-017 read-contract fix required no schema change.
+- None (both AGV2-017 and AGV2-017V). Head remains `0014`; `0001`–`0014` untouched.
+  `budget_reservations.price_snapshot_id` nullable came from `0008`, so the AGV2-017 read-contract
+  fix required no schema change.
 
 ## Automated tests
-- Full containerized suite: **399 passed**. New `tests/test_accounting_admin.py` (13 tests: service-layer
-  authorization cannot be bypassed; price-policy CRUD/shape/one-enabled/409 + PATCH full-shape;
-  immutable snapshot after edit; budget CRUD/immutable-currency/window + RBAC + non-enumeration;
-  budget status zero-state + exact headroom; reservation nullable snapshot; usage/ledger reads +
-  non-enumeration + signed Decimal; audit scoping + no-op-audit + no-secret; Bearer CSRF-exempt).
-  `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean (only the test-only
-  `test-bootstrap-secret-*` literal, matching existing test conventions).
+- Full containerized suite: **402 passed**.
+  - `tests/test_accounting_admin.py`: 15 tests (13 AGV2-017 + 2 new concurrent race tests).
+  - `tests/test_accounting.py`: +1 new `test_settlement_replay_does_not_double_commit_budget`
+    (settlement idempotency).
+  - `ruff check src tests` clean; `git diff --check` clean; staged secret/token/content canary scan
+    clean (only the pre-existing test-only `test-bootstrap-secret-*` literal).
 
 ## Key files
-- `src/aethergate/accounting/admin.py` — accounting admin service (authz, invariants, audit,
-  `BudgetStatus` dataclass, conflict translation).
-- `src/aethergate/api/accounting_admin.py` — thin `/admin/v1` accounting router + converters.
-- `src/aethergate/contracts/admin_v1.py` — `PriceSnapshotRead`, `AuditEventRead`, `enabled` on
-  `BudgetStatusRead`, nullable `BudgetReservationRead.price_snapshot_id`.
-- `src/aethergate/domain/entities.py` — `BudgetReservation.price_snapshot_id` nullable.
-- `src/aethergate/persistence/repository.py` — new accounting read/list/update repository functions.
-- `src/aethergate/api/admin_errors.py` — `PricePolicyConflictError` handler.
-- `src/aethergate/main.py` — router + exception registration.
-- `tests/test_accounting_admin.py` — new suite.
-- Docs: `docs/architecture/accounting.md`, `docs/architecture/admin-api.md`,
+- `tests/test_accounting_admin.py` — accounting admin suite + concurrent price-policy race tests.
+- `tests/test_accounting.py` — accounting foundation suite + settlement idempotency regressions.
+- (AGV2-017, unchanged): `src/aethergate/accounting/admin.py`, `src/aethergate/api/accounting_admin.py`,
+  `src/aethergate/contracts/admin_v1.py`, `src/aethergate/domain/entities.py`,
+  `src/aethergate/persistence/repository.py`, `src/aethergate/api/admin_errors.py`,
+  `src/aethergate/main.py`.
+- Docs (AGV2-017): `docs/architecture/accounting.md`, `docs/architecture/admin-api.md`,
   `docs/contracts/domain-model.md`, `docs/contracts/admin-v1-foundation.md`,
   `docs/development/README.md`.
 
@@ -158,20 +192,25 @@ pinned `44777` port with an uncommitted compose override + a local `MultiSubject
 - Manual ledger adjustment HTTP writes deferred (adjustment policy/approval not settled).
 - No accounting-summary endpoint added (optional; not required, avoids multi-currency distortion).
 - No new migration: the nullable snapshot column already existed in `0008`.
+- The concurrent price-policy race needed no production fix; the `0008` partial unique index + typed
+  `IntegrityError` translation already handled it.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
-  `--no-deps`.
+  `--no-deps`. A transient podman DNS resolution failure (`Temporary failure in name resolution`)
+  can surface on the first bootstrap immediately after a `reset`; wait for `/health/ready` and retry.
 - Pre-existing flaky concurrency tests (`test_scheduler_quota.py::test_saturated_quota_group_does_not_block_unrelated_group`
   and `test_accounting.py::test_two_workers_cannot_oversubscribe_budget`) can fail intermittently only
   under full-suite load; they pass in isolation/targeted runs and were green this session.
-- `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; live scenario I used an
-  uncommitted compose override (pinned host port `44777`, local `MultiSubjectIdp` on `8491`) — the same
-  mechanism as AGV2-016V. A budget-exhausted request stays held until its next eligible window by
-  design; a PATCH `limit_amount` raise affects *future* admission (and is proven), it does not
-  auto-wake the already-held request.
+- `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; browser scenario I used an
+  uncommitted compose override. A budget-exhausted request stays held until its next eligible window
+  by design; a PATCH `limit_amount` raise affects *future* admission, it does not auto-wake the
+  already-held request.
 - litellm still has no trusted token estimator; token-priced quotas fail closed (request-only pricing
   used in the smoke).
+- The live released-reservation proof requires the worker to be stopped (so the real scheduler driver
+  can claim then cancel before autonomous dispatch); this is a test-harness orchestration step, not a
+  production behavior.
 
 ## Recommended Next Step
 Queue the queue/operator admin API (`admin:queue:*` — queue state inspection, outcome_unknown
