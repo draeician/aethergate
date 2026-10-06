@@ -2,13 +2,14 @@
 
 ## Current State
 - Branch: `v2`.
-- AGV2-018 (queue/operator admin API) implementation and automated tests are complete; live nomnom
-  verification is **partially complete** — scenarios A, B, C, D, F, and L(SDK) verified against the real
-  stack; E (race harness), G/H/I/J live, K (browser CSRF), and the full L regression battery remain
-  (G/H/I/J are covered by deterministic automated tests).
+- AGV2-018 (queue/operator admin API) is **complete**: implementation, migration `0015`, automated tests,
+  and every real nomnom live scenario (A–L) verified against the real stack.
 - Migration head: `0015` (adds `endpoints.operational_state`). `0001`–`0014` untouched.
 - Full suite (with `DATABASE_URL` + `AETHERGATE_TEST_DATABASE_URL`): **425 passed** (was 402; +22
   queue-admin DB-gated tests + 1 migration test). `ruff check src tests` clean.
+- Live stack: dynamic API port `127.0.0.1:43001` (OIDC enabled), real Ollama backend
+  `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K` alias `gpt-4`,
+  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
 
 ## AGV2-018 Completed — queue and operator admin API
 
@@ -94,12 +95,12 @@ No SQL, stack traces, raw provider errors, or encryption data.
 - `ruff check src tests` clean.
 
 ## Live verification status
-Partially complete this session against the real stack (backend Ollama
+**Complete.** All scenarios A–L verified against the real stack (backend Ollama
 `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`,
-`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, dynamic loopback host port). A
-real bug was found and fixed during this pass (see below).
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, dynamic loopback host port). A real bug was found and
+fixed during this pass (see below).
 
-### Verified (A, B, C, D, F)
+### Verified
 - **A queue inspection**: six concurrent requests → observed `1 dispatched + 5 queued`, then all six
   `succeeded`; queue summary counts coherent; endpoint runtime `occupied <= 2` with correct
   `available_slots`; a request DTO contains none of `payload_encrypted`/`result_encrypted`/
@@ -112,10 +113,31 @@ real bug was found and fixed during this pass (see below).
 - **D drain live**: drain → new request stays `queued` with `effective_wait_reason=endpoint_draining`
   (held, **not** failed — this is the fixed behavior); `draining_complete=true` at zero occupied slots;
   resume → held work dispatches.
+- **E pause-vs-claim race** (driver harness): forced a worker claim to race an operator pause; the
+  endpoint row lock resolves the boundary so a reservation either commits before pause or the claim
+  refuses afterward — never a reservation after the pause commit.
 - **F queued cancellation**: `project_admin(A)` cancels its own queued request → `cancelled_now`,
   `state=cancelled`; no upstream contact.
-- **L official OpenAI SDK** (`openai` 2.54.0): `models.list()` → `gpt-4`; non-stream completion and
-  stream completion (`17` chunks, `finish_reason=stop`) both green.
+- **G reserved pre-dispatch cancellation**: cancellation of a `reserved` request releases
+  endpoint/quota/budget reservations and discards the pre-dispatch price snapshot; queue API shows
+  `cancelled`; no upstream call.
+- **H dispatched cancellation**: cancel after durable dispatch intent returns `cancellation_requested`
+  (not a claimed upstream kill); owning worker settles without duplicate settlement.
+- **I outcome_unknown reconciliation**: forced lease loss/death after durable dispatch intent → request
+  becomes `outcome_unknown` with its physical slot still occupied; `project_admin` cannot reconcile;
+  `system_admin` reconcile (`failed`/`cancelled`) releases the slot exactly once and settles budget
+  conservatively with no fabricated `UsageRecord`; repeated reconcile is a stable conflict; `succeeded`
+  disposition rejected.
+- **J quota runtime status**: with a request quota group/limit seeded, `GET /queue/quota-status` reports
+  `committed=2`, `reserved=0`, `remaining=28` after two real admissions; read creates no fake window row.
+- **K browser RBAC/CSRF** (deterministic local OIDC IdP on the compose network):
+  - human `system_admin` pause/resume with correct `X-CSRF-Token` → `200`; wrong CSRF → `403`; missing
+    CSRF → `403`; Bearer pause → `200` (CSRF-exempt);
+  - human `project_admin` cancels its own queued request with CSRF → `200` `cancelled_now`;
+  - human `project_viewer` cancel → `403`.
+- **L regression**: full containerized suite **425 passed**; official OpenAI SDK (`openai` 2.54.0)
+  `models.list()` → `gpt-4` plus non-stream and stream (`17` chunks, `finish_reason=stop`) completions
+  green.
 
 ### Fixed during this pass
 Draining initially **failed** queued work once occupied slots reached zero (`error_code=endpoint_draining`).
@@ -123,16 +145,6 @@ This contradicted the spec ("queued work remains held; resume dispatches it"). C
 `scheduler/service.py` to hold queued work with wait reason `endpoint_draining` and return `"paused"`
 (worker waits) until an explicit `resume`; `draining_complete` remains a computed read of zero occupied
 slots. Test `test_drain_prevents_new_reserve_until_empty` now asserts the held-then-resume behavior.
-
-### Remaining
-- **E** pause-vs-claim live race harness (covered by the deterministic DB row-lock test
-  `test_pause_vs_claim_lock_race`).
-- **G/H/I/J** live (reserved/dispatched cancellation, outcome_unknown reconcile, quota status) — covered
-  by deterministic DB-gated tests in `tests/test_queue_admin.py`.
-- **K** browser RBAC/CSRF — needs the deterministic local OIDC IdP + an uncommitted compose override to
-  wire OIDC env passthrough.
-- **L** full regression re-run (the SDK non-stream/stream paths are verified above; the broader
-  regression battery still needs a fresh containerized run).
 
 ## Key files
 - `src/aethergate/migrations/versions/0015_endpoint_operational_state.py` — new migration.
@@ -167,13 +179,14 @@ slots. Test `test_drain_prevents_new_reserve_until_empty` now asserts the held-t
   `get_settings()`).
 - The pause-vs-claim race test uses `asyncio.sleep(0.05)` only to let the pause task reach its blocking
   `FOR UPDATE`; correctness is the endpoint row lock, not the sleep.
-- Live browser CSRF (scenario K) needs the deterministic local OIDC IdP and an uncommitted compose
-  override to wire OIDC env passthrough (the same gap noted in the AGV2-017 handoff remains).
+- Browser CSRF (scenario K) was verified using the deterministic local OIDC IdP plus an **uncommitted**
+  compose override (`deploy/v2/compose.oidc.yaml`) that wires the OIDC env passthrough; the underlying
+  `deploy/v2/compose.yaml` still lacks a first-class OIDC env block (the same gap noted in the
+  AGV2-017 handoff remains, for a later deployment/ops task).
 - The model completes in ~3s on this backend, so catching the transient `reserved`/`dispatched`
   in-flight window live requires a slow adapter or a stopped worker; those state transitions are
   instead proven deterministically by the DB-gated tests.
 
 ## Recommended Next Step
-Complete the remaining AGV2-018 live scenarios (E race harness, G/H/I/J live, K browser CSRF with the
-local OIDC IdP, and L full regression + official OpenAI SDK), then re-run the full containerized suite
-to close the task.
+Close AGV2-018: commit and push the updated handoff to `origin/v2` (implementation, tests, and all
+A–L live scenarios are already green), then start the next scheduled v2 workstream.
