@@ -1,66 +1,60 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-019
+AGV2-019V
 
 ## Title
-Linux CLI foundation and human OAuth device-flow authentication
-
-## Ownership
-Primary: CLI + identity/auth
-Coordinating: admin API/contracts, platform/testing, security
+Close CLI token-handling and protected-storage gaps
 
 ## WIP Marker — FIRST LOCAL ACTION
 
-The repository-wide WIP marker protocol in AGENTS.md is mandatory.
-
-Immediately after entering the repository, **before pull/read/implementation work**, create:
+Immediately after entering the repository, before pull/read/implementation work, create:
 
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-019
+- task ID: AGV2-019V
 - branch: v2
 - UTC start timestamp
 
-The marker:
-- is already gitignored;
-- must never be staged, committed, or pushed;
-- must contain no secrets;
-- must remain present for the entire incomplete task;
-- must be recreated after restart/compaction if missing while work is incomplete;
-- must be removed only after every completion criterion is green, the handoff is committed, all
-  commits are pushed to origin/v2, and origin/v2 is verified to contain the completed work.
+It is gitignored. Never stage/commit/push it.
+Keep it present while this task is incomplete.
+Remove it only after all verification is green, the handoff is committed, every commit is pushed to
+origin/v2, and origin/v2 is verified.
 
-If the task is blocked/incomplete, leave the marker present.
+If blocked/incomplete, leave it present.
 
 ## Why This Task Exists
 
-The v2 backend management surface is now broad enough for an operator client:
+AGV2-019 is substantially implemented and pushed:
+- OAuth device flow;
+- durable CLI sessions;
+- migration 0016;
+- installable Linux CLI;
+- profiles/CA support;
+- keyring-backed token storage;
+- admin API command coverage;
+- 470 passing tests;
+- live device-flow/RBAC/operator/SDK verification.
 
-- identity/RBAC/bootstrap;
-- human OIDC browser auth;
-- catalog/routing;
-- accounting/budgets/usage/ledger;
-- queue/operator controls.
+Final code review found three narrow CLI contract violations:
 
-The project specification requires an installable Linux CLI that is a thin client over the same
-/admin/v1 API, with:
-- human login through an approved OAuth device flow;
-- protected token storage;
-- profiles and trusted CA configuration;
-- machine-readable JSON;
-- predictable non-zero exit codes;
-- shell completion;
-- secret input through prompt/stdin, never argv.
+1. `aethergate auth login` emits the entire successful device-poll response. That response contains
+   the one-time raw `ags_...` CLI session bearer token, so the token is printed to stdout in both
+   human and `--json` modes.
+2. `KeyringTokenStore` does not translate real keyring backend exceptions
+   (`NoKeyringError`, locked/unavailable backend, etc.) into the CLI's safe
+   `TokenStoreUnavailable` error, so some Linux hosts can get a raw traceback.
+3. The CLI requirement says an expired/revoked human CLI session token should be cleared from
+   protected storage on an authentication `401` when appropriate. The code defines the idea but
+   does not wire it through. A stored stale `ags_...` token remains in the keyring.
 
-This task builds that foundation and enough resource/operator commands to prove the CLI is a real
-product client, not a database wrapper.
+Close these only. Do not redo AGV2-019 or advance to the web console yet.
 
 ## Recovery
 
 If context is compacted/restarted/uncertain:
-1. ensure `.aethergate-wip` exists; recreate if the task is incomplete;
+1. ensure `.aethergate-wip` exists if task incomplete;
 2. re-read AGENTS.md;
 3. re-read project_spec.md;
 4. re-read this file;
@@ -68,655 +62,201 @@ If context is compacted/restarted/uncertain:
 6. inspect git status/history;
 7. continue from repository state.
 
-current-task.md is authoritative.
+## 1. Never print the raw CLI session token
 
-## Before You Start
+The server device-poll success response must continue to return the raw session token exactly once so
+the CLI can store it.
 
-1. Work on branch v2 and pull latest origin/v2.
-2. Read:
-   - AGENTS.md
-   - project_spec.md
-   - docs/development/current-task.md
-   - docs/development/agent-handoff.md
-   - docs/architecture/security.md
-   - docs/architecture/admin-api.md
-   - current OIDC/browser-session implementation
-   - current AdminRequestContext/authentication dependency
-   - all current /admin/v1 routers/contracts
-   - pyproject.toml
-3. Preserve existing browser OIDC/session/CSRF behavior.
-4. Preserve service-account admin Bearer auth.
-5. Preserve inference/admin audience separation.
-6. Do not access PostgreSQL directly from the product CLI.
-7. Do not modify/delete legacy v1 app/ or frontend/src/.
-8. Do not commit unrelated local/untracked files.
+The product CLI must consume that token internally and MUST NOT emit it on stdout or stderr.
 
-## 1. Device-flow architecture
+For successful `aethergate auth login`:
 
-Implement RFC 8628-style human device authorization against the configured OIDC provider.
+### Human output
+Print only safe confirmation such as:
+- authenticated principal / authentication kind;
+- roles;
+- token stored successfully;
+- expiry if useful.
 
-Do not implement OAuth cryptography by hand when the existing standards-aware OIDC/JWT libraries can
-validate provider responses.
+Never print:
+- `token`;
+- Authorization header;
+- device_code;
+- provider tokens.
 
-### Provider configuration
+### JSON output
+Return a safe machine-readable success object that excludes the raw bearer token.
 
-Add typed config for a public CLI/device OAuth client:
-- device_client_id;
-- device scopes with openid required;
-- optional display name if useful.
+Preferred shape:
+- status;
+- stored: true;
+- session safe metadata;
+- expires_in.
 
-Preferred:
-- reuse the configured issuer/discovery/JWKS;
-- discover `device_authorization_endpoint` and `token_endpoint` from provider metadata;
-- the CLI/device client is public and has no embedded client secret.
+The raw token must be removed before calling the generic output formatter.
 
-Do not place the browser confidential-client secret into the Linux CLI.
+Add explicit tests proving a canary raw `ags_...` token is absent from:
+- human stdout;
+- human stderr;
+- `--json` stdout;
+- `--json` stderr.
 
-If the provider does not advertise a device authorization endpoint, return a stable
-device_flow_unavailable error.
+Also prove JSON stdout remains one valid document.
 
-## 2. Gateway-mediated device transaction
+### --no-store
 
-The CLI talks to AetherGate, not directly to internal DB/auth state.
+The current one-shot `--no-store` flag uses an in-memory store that disappears when the command
+exits and therefore does not provide a useful subsequent authenticated CLI command.
 
-Add:
-- POST /admin/v1/auth/device/start
-- POST /admin/v1/auth/device/poll
+Do not expose the token merely to make `--no-store` useful.
 
-### Start
+Choose one safe behavior:
+- remove/deprecate `--no-store` for this one-shot CLI; or
+- retain it only if it has a meaningful secure same-process workflow.
 
-AetherGate:
-1. calls the configured provider device authorization endpoint;
-2. receives provider device_code/user_code/verification URI metadata;
-3. creates a short-lived durable AetherGate device transaction;
-4. returns to the CLI:
-   - user_code;
-   - verification_uri;
-   - verification_uri_complete when provider supplies it;
-   - expires_in;
-   - poll interval;
-   - the provider device_code or an equivalent high-entropy poll secret needed for subsequent poll.
+No raw token printing is allowed in either case.
 
-Security:
-- raw device_code/poll secret is a bearer secret;
-- never log/audit it;
-- never put it in a URL generated by AetherGate;
-- if persisted, persist only a one-way verifier/hash;
-- preferred design: the CLI sends the raw device_code back on each poll; PostgreSQL stores only its
-  hash and safe transaction metadata.
+## 2. Translate keyring backend failures safely
 
-### Poll
+Harden `KeyringTokenStore`.
 
-CLI POSTs the raw device polling secret in the JSON body.
-
-AetherGate:
-- hashes it to find the transaction;
-- enforces expiry and provider-recommended polling interval;
-- calls the provider token endpoint using the device authorization grant;
-- translates authorization_pending and slow_down safely;
-- on success validates the ID token:
-  - issuer;
-  - audience == device_client_id;
-  - signature/algorithm;
-  - expiry/not-before where applicable;
-  - subject required;
-- resolves the existing ExternalIdentity by issuer + subject;
-- requires active Principal/project;
-- does not grant roles from IdP claims;
-- creates a fresh AetherGate CLI session;
-- marks the device transaction consumed;
-- returns the raw AetherGate CLI session token exactly once.
-
-Unknown identity:
-- follow the same safe JIT policy as browser OIDC if JIT is enabled;
-- JIT may create only an unprivileged USER principal;
-- no role is inferred from email/domain/group/username.
-
-## 3. Durable CLI sessions
-
-Do not fake an ApiCredential for a human.
-
-Add a distinct durable CLI session model.
-
-Suggested:
-- CliSessionId;
-- principal_id;
-- token_hash;
-- created_at;
-- expires_at;
-- last_seen_at optional/throttled;
-- revoked_at;
-- safe device transaction / external identity reference if useful.
-
-Raw CLI session token:
-- >=256 bits CSPRNG;
-- use a distinct recognizable prefix, e.g. `ags_`;
-- returned once;
-- PostgreSQL stores only SHA-256 verifier/hash;
-- never logged/audited.
-
-Session lifetime:
-- configurable;
-- finite;
-- safe default such as 8 or 12 hours;
-- no refresh token storage in the CLI or gateway in this phase;
-- expired login requires another device flow.
-
-Add:
-- GET /admin/v1/auth/cli/session or reuse whoami cleanly;
-- POST /admin/v1/auth/cli/logout.
-
-Logout:
-- durably revokes current CLI session;
-- idempotent;
-- raw bearer token remains absent from logs/audit.
-
-## 4. Admin authentication unification
-
-Protected /admin/v1 endpoints must accept:
-- admin API credential (`agk_...`);
-- browser session cookie;
-- human CLI session Bearer (`ags_...` or chosen prefix).
-
-Extend AdminAuthenticationKind with CLI_SESSION.
-
-AdminRequestContext:
-- principal_id/project_id;
-- active roles;
-- authentication_kind;
-- api_credential_id for service credential;
-- browser_session_id for browser session;
-- cli_session_id for CLI session;
-- service credential scopes only when applicable.
-
-CLI sessions use the same Principal/RoleAssignment RBAC engine as browser sessions.
-
-Rules:
-- role revocation applies on the next CLI request;
-- principal/project deactivation applies immediately;
-- CLI session is admin-only and never authenticates /v1 inference;
-- invalid supplied Authorization never falls through to a browser cookie;
-- CLI bearer requests do not require browser CSRF.
-
-## 5. Migration 0016
-
-Add linear migration 0016 for:
-- device authorization transactions;
-- CLI sessions;
-- indexes/constraints.
-
-Do not rewrite 0001-0015.
-
-Required:
-- 0015 -> 0016 succeeds;
-- empty DB -> latest succeeds;
-- existing sessions/credentials remain unchanged;
-- raw device_code/session token/provider tokens are not stored;
-- device transaction is one-time/expiry constrained by application and DB shape where practical.
-
-## 6. Deterministic local device-flow IdP
-
-Extend the existing deterministic local OIDC test provider to support device authorization:
-
-- discovery advertises device_authorization_endpoint;
-- device start returns device_code/user_code/verification URI;
-- a deterministic test helper can authorize a pending device code for a chosen subject;
-- token polling returns:
-  - authorization_pending before approval;
-  - slow_down when deliberately exercised if supported;
-  - signed ID token after approval;
-  - expired_token for expired transaction;
-- signed ID token validates through the same production verification path.
-
-No Internet IdP dependency and no real provider credentials in tests.
-
-## 7. Installable CLI entry point
-
-Add a console entry point, preferably:
-
-`aethergate`
-
-via pyproject.toml.
-
-Use a mature CLI framework if useful (Click/Typer acceptable) but keep dependency weight reasonable.
-
-The CLI must never import persistence/repository modules for normal product operations.
-
-All product commands use HTTP /admin/v1.
-
-## 8. CLI profiles
-
-Implement profiles stored under XDG conventions, e.g.:
-
-`~/.config/aethergate/config.toml`
-
-Profile fields:
-- name;
-- base URL;
-- trusted CA bundle path or system trust;
-- optional default output mode.
-
-Requirements:
-- profile config contains no raw bearer token;
-- default profile support;
-- create/list/show/delete/set-default commands;
-- base URL validated;
-- HTTPS expected for production profiles;
-- explicit `--insecure` may exist only as a per-command dev/test escape hatch if strongly labeled
-  and never saved silently as production default;
-- trusted custom CA bundle supported.
-
-No arbitrary proxying of secrets/headers.
-
-## 9. Protected token storage
-
-Persistent admin/service tokens must not be stored in plaintext profile TOML.
-
-Use a protected OS credential store on Linux, preferably Python `keyring` backed by Secret Service /
-KWallet where available.
-
-Abstract storage behind a TokenStore interface so tests use an in-memory fake.
-
-Requirements:
-- human CLI session token stored under profile after successful login;
-- service-account admin credential may also be stored via explicit login/import;
-- logout deletes/revokes human session and removes local token;
-- profile delete removes its stored token;
-- no token printed in normal output.
-
-If a usable protected keyring is unavailable:
-- fail safely with an actionable message;
-- optionally support an explicit ephemeral `--no-store` login for the current process if clean;
+For get/set/delete:
+- catch keyring backend exceptions such as `keyring.errors.KeyringError` /
+  `NoKeyringError` and equivalent backend failures;
+- never expose a Python traceback through the console entry point;
+- raise the existing `TokenStoreUnavailable` with an actionable non-secret message where the
+  operation requires the protected store;
 - do not silently fall back to plaintext disk.
 
-## 10. Service-account credential input
+For delete:
+- distinguish "credential not found" from "backend unavailable" if the keyring library exposes that
+  distinction;
+- absence may be treated idempotently;
+- backend failure must not be silently represented as successful removal when the command relies on
+  removal for its security/postcondition.
 
-For automation/admin service credentials support an explicit command, e.g.:
+Tests must simulate:
+- no backend;
+- backend get failure;
+- backend set failure;
+- backend delete failure;
+- missing credential delete;
+- no traceback;
+- no token included in error text.
 
-- `aethergate auth set-token --stdin`
-- or interactive hidden prompt.
+## 3. Clear stale stored human CLI sessions on 401
 
-Never accept raw admin/inference credentials as a normal CLI argv option.
+When a command authenticates using a persisted human CLI session token (`ags_...`) and the gateway
+returns the fixed authentication-required `401`:
+
+- remove that token from the profile's protected TokenStore;
+- return the normal auth error / exit code 3;
+- emit a safe message that re-login is required;
+- do not retry the mutation;
+- do not remove a stored service-account credential (`agk_...`) merely because it receives a 401;
+- do not mutate token storage for network, 403, 404, 409, or 5xx errors.
+
+If `AETHERGATE_TOKEN` supplied the token:
+- do not modify persistent keyring state based on the env override;
+- report the authentication failure normally.
+
+Implement this at a centralized CLI request/auth boundary rather than duplicating it across commands.
+
+Add tests:
+1. persisted `ags_` + 401 => token deleted;
+2. persisted `agk_` + 401 => token retained;
+3. env `ags_` + 401 => stored profile token untouched;
+4. `ags_` + 403/404/409/500/network => token retained;
+5. deletion backend failure => safe actionable error, no traceback.
+
+## 4. Logout local-removal correctness
+
+Review `auth logout`.
 
 Requirements:
-- stdin/prompt only;
-- admin credential validated with /admin/v1/whoami before storage;
-- inference credentials rejected for admin CLI auth;
-- token never echoed/logged.
+- server-side CLI session revocation still happens first;
+- successful server revoke removes the local persisted human CLI token;
+- already-revoked/expired human session behavior is documented and does not trap the user with an
+  undeletable stale local token;
+- service-account credential is not sent to the CLI-session logout endpoint as if it were a human
+  session;
+- provide an explicit safe local credential removal path if necessary (e.g. auth clear-token), rather
+  than overloading human logout incorrectly.
 
-Environment-variable token injection for CI may be supported if documented and if it overrides
-persistent storage only for the current process; do not persist it automatically.
+Keep scope narrow.
 
-## 11. Output and exit-code contract
+## 5. WIP marker verification
 
-Every command supports:
-- human-readable default output;
-- `--json` machine-readable JSON.
+At start:
+- `.aethergate-wip` exists;
+- `git check-ignore .aethergate-wip` succeeds;
+- it is untracked/unstaged.
 
-Do not mix progress text into JSON stdout.
+At completion, only after push verification:
+- remove it;
+- verify absent locally;
+- verify it never appeared in tracked/staged/committed files.
 
-Use stderr for human diagnostics.
+GitHub already proves the previous marker was not committed; this task must follow the same protocol.
 
-Define predictable non-zero exit codes, at minimum distinct categories for:
-- usage/validation error;
-- authentication required/expired;
-- authorization denied;
-- not found;
-- conflict/invalid lifecycle;
-- network/TLS failure;
-- server/internal failure.
+## Regression
 
-Document the mapping and test it.
-
-Never dump Python tracebacks by default.
-
-## 12. HTTP client behavior
-
-Implement one reusable typed-ish CLI HTTP client layer.
-
-Requirements:
-- profile base URL;
-- trusted CA;
-- Authorization injection from TokenStore/env;
-- JSON request/response;
-- structured AetherGate error parsing;
-- request timeout;
-- safe retries only for idempotent GETs on transport failures if you choose to add retries;
-- never retry state-changing POST/PATCH automatically;
-- user-agent with CLI version;
-- no sensitive headers in debug output.
-
-Handle 401:
-- clear an expired/revoked CLI session token when appropriate;
-- do not erase a service credential on one transient server error.
-
-## 13. CLI command coverage
-
-Implement enough coverage to make the CLI useful over the backend already built.
-
-### Core
-- `aethergate profile ...`
-- `aethergate auth login` (device flow)
-- `aethergate auth logout`
-- `aethergate auth whoami`
-
-### Projects / identities
-At minimum:
-- projects list/show/create/update;
-- principals list/show;
-- credentials list;
-- role assignments list.
-
-### Catalog
-At minimum:
-- providers list/show;
-- provider-accounts list/show;
-- endpoints list/show;
-- model-aliases list/show;
-- route-bindings list/show.
-
-Provide create/update for at least providers/endpoints/model aliases/routes if clean; otherwise
-document that write expansion is a follow-up CLI coverage task. Do not use a generic unsafe
-"POST arbitrary JSON to arbitrary path" escape hatch.
-
-### Accounting
-At minimum:
-- price-policies list/show;
-- budgets list/show/status;
-- usage list/show;
-- ledger list/show;
-- audit list/show.
-
-### Queue/operator
-At minimum:
-- queue list/show/summary;
-- endpoints runtime list/show;
-- queue cancel;
-- endpoint pause/drain/resume;
-- outcome-unknown list;
-- reconcile;
-- quota-status.
-
-Critical operator mutations must require normal RBAC and never bypass server checks.
-
-## 14. Shell completion
-
-Provide shell-completion support for at least bash/zsh/fish via the selected CLI framework or
-documented generated completion command.
-
-Do not require root installation.
-
-Add tests that the completion command can render without contacting the server.
-
-## 15. Version / package behavior
-
-CLI version comes from package metadata and matches `aethergate.__version__` if that convention
-already exists.
-
-Do not perform an unrelated SemVer release/tag.
-
-Ensure:
-- editable/installable package exposes the console command;
-- `aethergate --version` works without server access;
-- `aethergate --help` works without server access.
-
-## 16. Device-flow audit safety
-
-Audit:
-- device login success may record resulting principal/session ID;
-- CLI logout/revoke may be audited;
-- fixed safe failure categories only if useful.
-
-Never log/audit:
-- device_code;
-- user_code if treated as authentication material;
-- provider access token;
-- ID token;
-- raw CLI session token;
-- API credential;
-- Authorization header.
-
-## Real nomnom Verification — Required
-
-Use dynamic API ports and a fresh deterministic local IdP with device support.
-
-### A. WIP marker
-At the beginning of the task:
-- prove `.aethergate-wip` exists locally;
-- prove `git check-ignore .aethergate-wip` succeeds;
-- prove it is absent from staged/tracked files.
-
-Do not remove it until the very end.
-
-### B. Package / profile
-On a Linux environment:
-- install package/CLI;
-- `aethergate --version`;
-- create profile for live AetherGate;
-- custom CA/system CA behavior exercised as practical;
-- profile TOML contains no token.
-
-### C. Human device login
-- start device login through CLI;
-- CLI displays verification URL + user code without leaking device_code;
-- IdP initially returns authorization_pending;
-- authorize system_admin subject in local IdP;
-- polling succeeds;
-- raw CLI session token is stored only in protected test keyring / memory fake, not config;
-- `aethergate auth whoami --json` reports authentication_kind=cli_session and system_admin role.
-
-### D. Device negative cases
-- expired device transaction;
-- unknown/unlinked identity with JIT off;
-- invalid/replayed/consumed device code;
-- provider slow_down/poll interval enforcement;
-- provider ID token audience/issuer failure;
-- no CLI session created for failures.
-
-### E. RBAC continuity
-Create human project_admin(A) and project_viewer(A) device logins.
-
-Prove:
-- project_admin reads/writes permitted project resources;
-- project_admin cannot see B;
-- project_viewer reads but cannot mutate;
-- revoke role during active CLI session -> next command denied without relogin;
-- deactivate principal/project -> next command denied.
-
-### F. Operator workflow
-Using CLI session as system_admin:
-- queue summary;
-- queue list;
-- endpoint runtime;
-- pause -> resume;
-- outcome_unknown list and controlled reconcile;
-- JSON outputs parse cleanly.
-
-### G. Service credential workflow
-- import admin service credential through stdin/hidden prompt;
-- whoami succeeds;
-- inference-audience credential is rejected for admin CLI;
-- no raw key appears in shell argv/process command line/logs/config.
-
-### H. Token persistence/logout
-- stored human CLI token survives a new CLI process via protected token-store test backend or real
-  available keyring;
-- logout revokes server session and removes local token;
-- replay old token fails;
-- profile delete removes local token entry.
-
-### I. TLS/network/error exits
-Prove:
-- unreachable server -> documented network exit code;
-- unauthorized -> auth exit code;
-- forbidden -> authorization exit code;
-- not found -> not-found exit code;
-- conflict -> conflict exit code;
-- JSON mode emits only valid JSON on stdout.
-
-### J. Existing backend regression
 Re-run:
-- full containerized test suite;
-- OIDC browser auth + CSRF;
-- queue/operator tests;
-- catalog/accounting admin tests;
-- official OpenAI Python SDK non-stream + stream with inference auth bypass false.
+- full containerized suite (baseline 470);
+- CLI unit tests;
+- device-flow/CLI-session tests;
+- migration head remains 0016;
+- browser OIDC/session regressions;
+- queue/catalog/accounting admin regressions;
+- official OpenAI SDK non-stream + stream with inference bypass false.
 
-## Automated Tests
+No migration expected.
 
-Add deterministic coverage for at least:
-
-1. device config/discovery validation;
-2. missing device endpoint => stable unavailable;
-3. device transaction raw code not persisted;
-4. device poll pending;
-5. device slow_down/interval enforcement;
-6. device expiry;
-7. one-time consumption/replay rejection;
-8. ID-token issuer/audience/signature/expiry validation;
-9. unknown identity/JIT policy;
-10. CLI session raw token not persisted;
-11. CLI session expiry/revocation;
-12. role revocation reflected next request;
-13. project/principal deactivation reflected next request;
-14. CLI session rejected on inference surface;
-15. service admin credential remains supported;
-16. browser session behavior unchanged;
-17. migration 0015 -> 0016;
-18. empty DB -> latest;
-19. profile CRUD;
-20. token absent from config file;
-21. keyring TokenStore fake;
-22. keyring-unavailable fail-safe;
-23. service credential stdin/prompt path;
-24. secret rejected from argv if such option is attempted;
-25. HTTP error -> exit-code mapping;
-26. JSON stdout purity;
-27. trusted CA wiring;
-28. no automatic retry of mutations;
-29. CLI whoami;
-30. representative project/catalog/accounting commands;
-31. queue pause/resume/cancel/reconcile commands;
-32. shell completion generation;
-33. CLI help/version offline;
-34. secret/token/log canary scan;
-35. existing 425-test baseline remains green or higher;
-36. official SDK regressions remain green.
-
-## Migration
-
-Add migration 0016.
-
-Do not rewrite 0001-0015.
-
-Verify:
-- 0015 -> 0016;
-- empty DB -> latest;
-- existing browser sessions/API credentials remain valid;
-- no raw OAuth/provider/session secrets are introduced.
+Do not modify migrations 0001-0016.
 
 ## Documentation
 
 Update:
-- docs/architecture/security.md
-- docs/architecture/admin-api.md
-- add docs/cli.md or equivalent living CLI document
-- docs/contracts/domain-model.md
-- docs/contracts/admin-v1-foundation.md
-- docs/development/README.md
-- docs/development/agent-handoff.md
-- README.md if installation entry point belongs there
+- docs/cli.md;
+- docs/development/agent-handoff.md;
+- any security/admin document only if behavior text needs correction.
 
 Document:
-- device-flow trust model;
-- CLI session vs API credential vs browser session;
-- profiles;
-- protected token storage;
-- trusted CA;
-- JSON/output/exit code contract;
-- command coverage;
-- service-token stdin/prompt handling;
-- WIP marker remained local and was removed only after completion.
-
-Do not modify the dated architecture audit.
-
-## Still Deferred
-
-Do not implement:
-- web console;
-- SAML;
-- SCIM;
-- IdP group-to-role mapping;
-- multiple OIDC providers;
-- plaintext fallback token store;
-- arbitrary admin-path passthrough command;
-- v1 migration;
-- Responses API;
-- embeddings;
-- production secret backend choice;
-- release/tagging.
-
-## Verification Before Commit
-
-- full containerized suite;
-- CLI deterministic tests;
-- device-flow tests;
-- migration 0015 -> 0016;
-- empty DB -> latest;
-- ruff/lint;
-- git diff --check;
-- secret/token/content canary scan;
-- no token in profile/argv/logs;
-- legacy v1 untouched;
-- dated audit unchanged;
-- all required live nomnom scenarios complete.
+- login output never contains the raw CLI token;
+- protected keyring backend failure behavior;
+- stale human-session token clearing rule;
+- logout/local-token semantics;
+- explicit no-migration decision;
+- WIP marker removed only after final push verification.
 
 ## Handoff
 
 Include:
 - implementation commit(s);
-- migration 0016;
-- device-flow architecture;
-- provider/client configuration;
-- CLI session model/lifetime;
-- token-storage model;
-- profile/TLS behavior;
-- command coverage;
-- JSON/exit-code contract;
-- local IdP device verification;
-- RBAC/revocation proof;
-- operator workflow proof;
-- service credential stdin proof;
+- login token-redaction proof;
+- keyring failure handling proof;
+- stale ags_ 401 clearing proof;
+- agk_ retention proof;
+- env-token behavior;
+- logout/local-clear semantics;
 - final test count;
-- dynamic API/IdP ports;
-- issues/risks;
+- real device login regression;
+- real SDK regression;
+- migration head 0016/no migration;
+- WIP marker lifecycle;
 - exactly one recommended next step.
 
-Never include raw device codes, user codes if sensitive, OIDC/provider tokens, CLI session tokens,
-API credentials, bootstrap/session/CSRF secrets, prompt/completion content, or large logs.
-
-## Completion / WIP Marker Removal
-
-The task is not complete until every stated criterion is green and origin/v2 contains the
-implementation, migration, tests, docs, and updated handoff.
-
-After:
-1. final verification passes;
-2. handoff is committed;
-3. all commits are pushed to origin/v2;
-4. origin/v2 is verified to contain the final commits;
-
-then and only then remove local `.aethergate-wip`.
-
-Finally verify:
-- `.aethergate-wip` no longer exists;
-- it was never tracked/staged/committed.
+Never include raw CLI/device/API/OIDC/session tokens or provider secrets.
 
 ## Commit and Push
 
-Suggested primary commit:
-`feat(cli): add device login and Linux admin client`
+Suggested commit:
+`fix(cli): protect login tokens and stale session storage`
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to commit/push.
+
+The task is complete only when every criterion above is green, origin/v2 contains the final
+implementation/tests/docs/handoff, and local `.aethergate-wip` has been removed after push
+verification.
