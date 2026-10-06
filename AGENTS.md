@@ -45,6 +45,14 @@ These rules are authoritative for work launched from `docs/development/current-t
 generic interactive workflow boilerplate below.
 
 - `docs/development/current-task.md` is the canonical active assignment.
+- **WIP marker protocol:** for every task launched from `current-task.md`, the first local repository
+  action after entering the repo is to create the root file `.aethergate-wip`. Keep it present for
+  the entire active task. It is an operator-visible local marker only: it is gitignored, must never be
+  staged/committed/pushed, and must contain no secrets. Safe contents are the task ID, branch, and a
+  start timestamp. If context is compacted/restarted and the task is still incomplete, recreate the
+  marker if it is missing. Remove `.aethergate-wip` only after all task completion criteria are green,
+  the handoff is updated, all required commits are pushed to `origin/v2`, and the remote branch has
+  been verified. If the task is blocked or incomplete, leave the marker in place.
 - `docs/development/agent-handoff.md` is the canonical previous-task state.
 - After any context compaction, summarization, restart, or uncertainty about what remains to do,
   immediately re-read:
