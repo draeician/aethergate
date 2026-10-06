@@ -523,7 +523,9 @@ class BudgetReservation(Entity):
     id: BudgetReservationId
     request_id: RequestId
     budget_policy_id: BudgetPolicyId
-    price_snapshot_id: PriceSnapshotId
+    # Detached (released) pre-dispatch reservations store NULL: their snapshot is
+    # discarded, so this must be nullable to match persistence truth.
+    price_snapshot_id: PriceSnapshotId | None = None
     window_start: datetime
     reserved_amount: NonNegativeMoney
     committed_amount: NonNegativeMoney

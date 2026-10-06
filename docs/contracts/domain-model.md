@@ -153,7 +153,8 @@ floating point (`float`) is rejected for money and pricing. There is no
   `limit_amount`, positive `window_seconds`, `enabled`). Not a prepaid balance.
 - `BudgetWindow` — authoritative committed/reserved monetary amounts per policy window.
 - `BudgetReservation` — per-request monetary reservation (request, policy, snapshot, window,
-  reserved/committed amounts, state, settlement reason).
+  reserved/committed amounts, state, settlement reason). `price_snapshot_id` is nullable: a released
+  pre-dispatch reservation detaches its snapshot and stores `NULL`.
 - `UsageRecord` — immutable measured usage (one per request; no content/secrets).
 - `LedgerEntry` — immutable append-only entry (`usage_debit` references a `UsageRecord`;
   adjustments do not; signed typed Decimal amount, idempotency key, optional reason).

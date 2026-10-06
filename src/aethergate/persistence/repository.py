@@ -7,6 +7,7 @@ objects never escape this module.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,9 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import (
     BillingUnit,
+    BudgetReservationState,
     Capability,
     CredentialAudience,
     CredentialScope,
+    LedgerEntryType,
     PrincipalKind,
     QuotaMetric,
     ResourceScopeType,
@@ -28,20 +31,27 @@ from aethergate.domain.ids import (
     AuditEventId,
     BrowserSessionId,
     BudgetPolicyId,
+    BudgetReservationId,
+    BudgetWindowId,
     EndpointId,
+    ExecutionAttemptId,
     ExternalIdentityId,
+    LedgerEntryId,
     ModelAliasId,
     OidcLoginStateId,
     PricePolicyId,
+    PriceSnapshotId,
     PrincipalId,
     ProjectId,
     ProviderAccountId,
     ProviderId,
     QuotaGroupId,
     QuotaLimitId,
+    RequestId,
     RoleAssignmentId,
     RouteBindingId,
     SecretRefId,
+    UsageRecordId,
 )
 from aethergate.errors import (
     ActiveRouteConflictError,
@@ -1778,3 +1788,712 @@ async def get_project_budget_policy_by_name(
     )
     row = result.scalar_one_or_none()
     return _budget_policy_to_domain(row) if row else None
+
+
+async def get_project_budget_policy(
+    session: AsyncSession, policy_id: BudgetPolicyId
+) -> domain.ProjectBudgetPolicy | None:
+    row = await session.get(models.ProjectBudgetPolicy, str(policy_id))
+    return _budget_policy_to_domain(row) if row else None
+
+
+async def get_project_budget_policy_for_update(
+    session: AsyncSession, policy_id: BudgetPolicyId
+) -> domain.ProjectBudgetPolicy | None:
+    row = (
+        await session.execute(
+            select(models.ProjectBudgetPolicy)
+            .where(models.ProjectBudgetPolicy.id == str(policy_id))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    return _budget_policy_to_domain(row) if row else None
+
+
+async def list_project_budget_policies(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    enabled: bool | None = None,
+    currency: str | None = None,
+    limit: int | None = 50,
+    offset: int = 0,
+) -> list[domain.ProjectBudgetPolicy]:
+    stmt = select(models.ProjectBudgetPolicy)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.where(
+            models.ProjectBudgetPolicy.project_id.in_([str(p) for p in project_ids])
+        )
+    if enabled is not None:
+        stmt = stmt.where(models.ProjectBudgetPolicy.enabled.is_(enabled))
+    if currency is not None:
+        stmt = stmt.where(models.ProjectBudgetPolicy.currency == currency)
+    stmt = stmt.order_by(
+        models.ProjectBudgetPolicy.created_at.asc(),
+        models.ProjectBudgetPolicy.id.asc(),
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    stmt = stmt.offset(offset)
+    result = await session.execute(stmt)
+    return [_budget_policy_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_project_budget_policies(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    enabled: bool | None = None,
+    currency: str | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.ProjectBudgetPolicy)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.where(
+            models.ProjectBudgetPolicy.project_id.in_([str(p) for p in project_ids])
+        )
+    if enabled is not None:
+        stmt = stmt.where(models.ProjectBudgetPolicy.enabled.is_(enabled))
+    if currency is not None:
+        stmt = stmt.where(models.ProjectBudgetPolicy.currency == currency)
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_project_budget_policy(
+    session: AsyncSession,
+    policy_id: BudgetPolicyId,
+    *,
+    name: str | None = None,
+    limit_amount: Decimal | None = None,
+    enabled: bool | None = None,
+) -> domain.ProjectBudgetPolicy | None:
+    """Update mutable budget fields only (name/limit/enabled).
+
+    ``currency`` and ``window_seconds`` are immutable and never touched here; the
+    service layer rejects any attempt to change them.
+    """
+    row = await session.get(models.ProjectBudgetPolicy, str(policy_id))
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if limit_amount is not None:
+        row.limit_amount = limit_amount
+    if enabled is not None:
+        row.enabled = enabled
+    await session.flush()
+    return _budget_policy_to_domain(row)
+
+
+def _price_snapshot_to_domain(row: models.PriceSnapshot) -> domain.PriceSnapshot:
+    return domain.PriceSnapshot(
+        id=PriceSnapshotId(row.id),
+        source_price_policy_id=PricePolicyId(row.source_price_policy_id),
+        route_binding_id=RouteBindingId(row.route_binding_id),
+        provider_account_id=ProviderAccountId(row.provider_account_id),
+        model_alias_id=ModelAliasId(row.model_alias_id),
+        billing_unit=BillingUnit(row.billing_unit),
+        currency=row.currency,
+        unit_scale=row.unit_scale,
+        request_price=row.request_price,
+        input_price=row.input_price,
+        output_price=row.output_price,
+        captured_at=row.captured_at,
+    )
+
+
+async def get_price_snapshot(
+    session: AsyncSession, snapshot_id: PriceSnapshotId
+) -> domain.PriceSnapshot | None:
+    row = await session.get(models.PriceSnapshot, str(snapshot_id))
+    return _price_snapshot_to_domain(row) if row else None
+
+
+async def list_price_snapshots(
+    session: AsyncSession,
+    *,
+    route_binding_id: RouteBindingId | None = None,
+    model_alias_id: ModelAliasId | None = None,
+    provider_account_id: ProviderAccountId | None = None,
+    source_price_policy_id: PricePolicyId | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.PriceSnapshot]:
+    stmt = select(models.PriceSnapshot)
+    if route_binding_id is not None:
+        stmt = stmt.where(models.PriceSnapshot.route_binding_id == str(route_binding_id))
+    if model_alias_id is not None:
+        stmt = stmt.where(models.PriceSnapshot.model_alias_id == str(model_alias_id))
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.PriceSnapshot.provider_account_id == str(provider_account_id)
+        )
+    if source_price_policy_id is not None:
+        stmt = stmt.where(
+            models.PriceSnapshot.source_price_policy_id == str(source_price_policy_id)
+        )
+    stmt = (
+        stmt.order_by(models.PriceSnapshot.captured_at.asc(), models.PriceSnapshot.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_price_snapshot_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_price_snapshots(
+    session: AsyncSession,
+    *,
+    route_binding_id: RouteBindingId | None = None,
+    model_alias_id: ModelAliasId | None = None,
+    provider_account_id: ProviderAccountId | None = None,
+    source_price_policy_id: PricePolicyId | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.PriceSnapshot)
+    if route_binding_id is not None:
+        stmt = stmt.where(models.PriceSnapshot.route_binding_id == str(route_binding_id))
+    if model_alias_id is not None:
+        stmt = stmt.where(models.PriceSnapshot.model_alias_id == str(model_alias_id))
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.PriceSnapshot.provider_account_id == str(provider_account_id)
+        )
+    if source_price_policy_id is not None:
+        stmt = stmt.where(
+            models.PriceSnapshot.source_price_policy_id == str(source_price_policy_id)
+        )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def get_price_policy(
+    session: AsyncSession, policy_id: PricePolicyId
+) -> domain.PricePolicy | None:
+    row = await session.get(models.PricePolicy, str(policy_id))
+    return _price_policy_to_domain(row) if row else None
+
+
+async def list_price_policies(
+    session: AsyncSession,
+    *,
+    route_binding_id: RouteBindingId | None = None,
+    enabled: bool | None = None,
+    billing_unit: BillingUnit | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.PricePolicy]:
+    stmt = select(models.PricePolicy)
+    if route_binding_id is not None:
+        stmt = stmt.where(models.PricePolicy.route_binding_id == str(route_binding_id))
+    if enabled is not None:
+        stmt = stmt.where(models.PricePolicy.enabled.is_(enabled))
+    if billing_unit is not None:
+        stmt = stmt.where(models.PricePolicy.billing_unit == billing_unit.value)
+    stmt = (
+        stmt.order_by(models.PricePolicy.created_at.asc(), models.PricePolicy.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_price_policy_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_price_policies(
+    session: AsyncSession,
+    *,
+    route_binding_id: RouteBindingId | None = None,
+    enabled: bool | None = None,
+    billing_unit: BillingUnit | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.PricePolicy)
+    if route_binding_id is not None:
+        stmt = stmt.where(models.PricePolicy.route_binding_id == str(route_binding_id))
+    if enabled is not None:
+        stmt = stmt.where(models.PricePolicy.enabled.is_(enabled))
+    if billing_unit is not None:
+        stmt = stmt.where(models.PricePolicy.billing_unit == billing_unit.value)
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def update_price_policy(
+    session: AsyncSession,
+    policy_id: PricePolicyId,
+    *,
+    billing_unit: str,
+    currency: str,
+    unit_scale: int,
+    request_price: Decimal | None,
+    input_price: Decimal | None,
+    output_price: Decimal | None,
+    enabled: bool,
+    name: str | None,
+) -> domain.PricePolicy | None:
+    """Apply a fully-validated resulting price-policy shape under a row lock.
+
+    The service layer validates the complete resulting shape (including the
+    one-enabled-per-route invariant's pre-check) before calling this. The row
+    lock serializes edits against scheduler admission; the partial unique index
+    remains the authoritative backstop for concurrent enable races.
+    """
+    row = (
+        await session.execute(
+            select(models.PricePolicy)
+            .where(models.PricePolicy.id == str(policy_id))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    if enabled and not row.enabled:
+        existing = (
+            await session.execute(
+                select(models.PricePolicy)
+                .where(
+                    models.PricePolicy.route_binding_id == row.route_binding_id,
+                    models.PricePolicy.enabled.is_(True),
+                    models.PricePolicy.id != row.id,
+                )
+                .with_for_update()
+            )
+        ).scalars().first()
+        if existing is not None:
+            raise PricePolicyConflictError(row.route_binding_id)
+    row.billing_unit = billing_unit
+    row.currency = currency
+    row.unit_scale = unit_scale
+    row.request_price = request_price
+    row.input_price = input_price
+    row.output_price = output_price
+    row.enabled = enabled
+    row.name = name
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _is_price_policy_conflict(exc):
+            raise PricePolicyConflictError(row.route_binding_id) from exc
+        raise
+    return _price_policy_to_domain(row)
+
+
+def _budget_window_to_domain(row: models.BudgetWindow) -> domain.BudgetWindow:
+    return domain.BudgetWindow(
+        id=BudgetWindowId(row.id),
+        budget_policy_id=BudgetPolicyId(row.budget_policy_id),
+        window_start=row.window_start,
+        committed_amount=row.committed_amount,
+        reserved_amount=row.reserved_amount,
+    )
+
+
+async def get_budget_window(
+    session: AsyncSession, *, budget_policy_id: BudgetPolicyId, window_start: datetime
+) -> domain.BudgetWindow | None:
+    row = (
+        await session.execute(
+            select(models.BudgetWindow).where(
+                models.BudgetWindow.budget_policy_id == str(budget_policy_id),
+                models.BudgetWindow.window_start == window_start,
+            )
+        )
+    ).scalar_one_or_none()
+    return _budget_window_to_domain(row) if row else None
+
+
+def _budget_reservation_to_domain(
+    row: models.BudgetReservation,
+) -> domain.BudgetReservation:
+    return domain.BudgetReservation(
+        id=BudgetReservationId(row.id),
+        request_id=RequestId(row.request_id),
+        budget_policy_id=BudgetPolicyId(row.budget_policy_id),
+        price_snapshot_id=PriceSnapshotId(row.price_snapshot_id)
+        if row.price_snapshot_id
+        else None,
+        window_start=row.window_start,
+        reserved_amount=row.reserved_amount,
+        committed_amount=row.committed_amount,
+        state=BudgetReservationState(row.state),
+        settlement_reason=row.settlement_reason,
+    )
+
+
+async def get_budget_reservation(
+    session: AsyncSession, reservation_id: BudgetReservationId
+) -> domain.BudgetReservation | None:
+    row = await session.get(models.BudgetReservation, str(reservation_id))
+    return _budget_reservation_to_domain(row) if row else None
+
+
+async def list_budget_reservations(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    request_id: RequestId | None = None,
+    budget_policy_id: BudgetPolicyId | None = None,
+    state: BudgetReservationState | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.BudgetReservation]:
+    stmt = select(models.BudgetReservation)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.join(
+            models.ProjectBudgetPolicy,
+            models.ProjectBudgetPolicy.id == models.BudgetReservation.budget_policy_id,
+        ).where(
+            models.ProjectBudgetPolicy.project_id.in_([str(p) for p in project_ids])
+        )
+    if request_id is not None:
+        stmt = stmt.where(models.BudgetReservation.request_id == str(request_id))
+    if budget_policy_id is not None:
+        stmt = stmt.where(
+            models.BudgetReservation.budget_policy_id == str(budget_policy_id)
+        )
+    if state is not None:
+        stmt = stmt.where(models.BudgetReservation.state == state.value)
+    stmt = (
+        stmt.order_by(
+            models.BudgetReservation.created_at.asc(),
+            models.BudgetReservation.id.asc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_budget_reservation_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_budget_reservations(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    request_id: RequestId | None = None,
+    budget_policy_id: BudgetPolicyId | None = None,
+    state: BudgetReservationState | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.BudgetReservation)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.join(
+            models.ProjectBudgetPolicy,
+            models.ProjectBudgetPolicy.id == models.BudgetReservation.budget_policy_id,
+        ).where(
+            models.ProjectBudgetPolicy.project_id.in_([str(p) for p in project_ids])
+        )
+    if request_id is not None:
+        stmt = stmt.where(models.BudgetReservation.request_id == str(request_id))
+    if budget_policy_id is not None:
+        stmt = stmt.where(
+            models.BudgetReservation.budget_policy_id == str(budget_policy_id)
+        )
+    if state is not None:
+        stmt = stmt.where(models.BudgetReservation.state == state.value)
+    return (await session.execute(stmt)).scalar_one()
+
+
+def _usage_record_to_domain(row: models.UsageRecord) -> domain.UsageRecord:
+    return domain.UsageRecord(
+        id=UsageRecordId(row.id),
+        request_id=RequestId(row.request_id),
+        execution_attempt_id=ExecutionAttemptId(row.execution_attempt_id),
+        project_id=ProjectId(row.project_id),
+        principal_id=PrincipalId(row.principal_id) if row.principal_id else None,
+        api_credential_id=ApiCredentialId(row.api_credential_id)
+        if row.api_credential_id
+        else None,
+        model_alias_id=ModelAliasId(row.model_alias_id),
+        route_binding_id=RouteBindingId(row.route_binding_id),
+        provider_account_id=ProviderAccountId(row.provider_account_id),
+        price_snapshot_id=PriceSnapshotId(row.price_snapshot_id),
+        billing_unit=BillingUnit(row.billing_unit),
+        input_units=row.input_units,
+        output_units=row.output_units,
+        request_units=row.request_units,
+        amount=row.amount,
+        currency=row.currency,
+        recorded_at=row.recorded_at,
+        upstream_request_id=row.upstream_request_id,
+    )
+
+
+async def get_usage_record(
+    session: AsyncSession, record_id: UsageRecordId
+) -> domain.UsageRecord | None:
+    row = await session.get(models.UsageRecord, str(record_id))
+    return _usage_record_to_domain(row) if row else None
+
+
+async def list_usage_records(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    request_id: RequestId | None = None,
+    principal_id: PrincipalId | None = None,
+    api_credential_id: ApiCredentialId | None = None,
+    model_alias_id: ModelAliasId | None = None,
+    route_binding_id: RouteBindingId | None = None,
+    provider_account_id: ProviderAccountId | None = None,
+    billing_unit: BillingUnit | None = None,
+    currency: str | None = None,
+    recorded_from: datetime | None = None,
+    recorded_to: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.UsageRecord]:
+    stmt = select(models.UsageRecord)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.where(models.UsageRecord.project_id.in_([str(p) for p in project_ids]))
+    if request_id is not None:
+        stmt = stmt.where(models.UsageRecord.request_id == str(request_id))
+    if principal_id is not None:
+        stmt = stmt.where(models.UsageRecord.principal_id == str(principal_id))
+    if api_credential_id is not None:
+        stmt = stmt.where(models.UsageRecord.api_credential_id == str(api_credential_id))
+    if model_alias_id is not None:
+        stmt = stmt.where(models.UsageRecord.model_alias_id == str(model_alias_id))
+    if route_binding_id is not None:
+        stmt = stmt.where(models.UsageRecord.route_binding_id == str(route_binding_id))
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.UsageRecord.provider_account_id == str(provider_account_id)
+        )
+    if billing_unit is not None:
+        stmt = stmt.where(models.UsageRecord.billing_unit == billing_unit.value)
+    if currency is not None:
+        stmt = stmt.where(models.UsageRecord.currency == currency)
+    if recorded_from is not None:
+        stmt = stmt.where(models.UsageRecord.recorded_at >= recorded_from)
+    if recorded_to is not None:
+        stmt = stmt.where(models.UsageRecord.recorded_at <= recorded_to)
+    stmt = (
+        stmt.order_by(models.UsageRecord.recorded_at.asc(), models.UsageRecord.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_usage_record_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_usage_records(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    request_id: RequestId | None = None,
+    principal_id: PrincipalId | None = None,
+    api_credential_id: ApiCredentialId | None = None,
+    model_alias_id: ModelAliasId | None = None,
+    route_binding_id: RouteBindingId | None = None,
+    provider_account_id: ProviderAccountId | None = None,
+    billing_unit: BillingUnit | None = None,
+    currency: str | None = None,
+    recorded_from: datetime | None = None,
+    recorded_to: datetime | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.UsageRecord)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.where(models.UsageRecord.project_id.in_([str(p) for p in project_ids]))
+    if request_id is not None:
+        stmt = stmt.where(models.UsageRecord.request_id == str(request_id))
+    if principal_id is not None:
+        stmt = stmt.where(models.UsageRecord.principal_id == str(principal_id))
+    if api_credential_id is not None:
+        stmt = stmt.where(models.UsageRecord.api_credential_id == str(api_credential_id))
+    if model_alias_id is not None:
+        stmt = stmt.where(models.UsageRecord.model_alias_id == str(model_alias_id))
+    if route_binding_id is not None:
+        stmt = stmt.where(models.UsageRecord.route_binding_id == str(route_binding_id))
+    if provider_account_id is not None:
+        stmt = stmt.where(
+            models.UsageRecord.provider_account_id == str(provider_account_id)
+        )
+    if billing_unit is not None:
+        stmt = stmt.where(models.UsageRecord.billing_unit == billing_unit.value)
+    if currency is not None:
+        stmt = stmt.where(models.UsageRecord.currency == currency)
+    if recorded_from is not None:
+        stmt = stmt.where(models.UsageRecord.recorded_at >= recorded_from)
+    if recorded_to is not None:
+        stmt = stmt.where(models.UsageRecord.recorded_at <= recorded_to)
+    return (await session.execute(stmt)).scalar_one()
+
+
+def _ledger_entry_to_domain(row: models.LedgerEntry) -> domain.LedgerEntry:
+    return domain.LedgerEntry(
+        id=LedgerEntryId(row.id),
+        project_id=ProjectId(row.project_id),
+        usage_record_id=UsageRecordId(row.usage_record_id)
+        if row.usage_record_id
+        else None,
+        entry_type=LedgerEntryType(row.entry_type),
+        amount=row.amount,
+        currency=row.currency,
+        created_at=row.created_at,
+        idempotency_key=row.idempotency_key,
+        reason=row.reason,
+    )
+
+
+async def get_ledger_entry(
+    session: AsyncSession, entry_id: LedgerEntryId
+) -> domain.LedgerEntry | None:
+    row = await session.get(models.LedgerEntry, str(entry_id))
+    return _ledger_entry_to_domain(row) if row else None
+
+
+async def list_ledger_entries(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    usage_record_id: UsageRecordId | None = None,
+    entry_type: LedgerEntryType | None = None,
+    currency: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.LedgerEntry]:
+    stmt = select(models.LedgerEntry)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.where(models.LedgerEntry.project_id.in_([str(p) for p in project_ids]))
+    if usage_record_id is not None:
+        stmt = stmt.where(models.LedgerEntry.usage_record_id == str(usage_record_id))
+    if entry_type is not None:
+        stmt = stmt.where(models.LedgerEntry.entry_type == entry_type.value)
+    if currency is not None:
+        stmt = stmt.where(models.LedgerEntry.currency == currency)
+    if created_from is not None:
+        stmt = stmt.where(models.LedgerEntry.created_at >= created_from)
+    if created_to is not None:
+        stmt = stmt.where(models.LedgerEntry.created_at <= created_to)
+    stmt = (
+        stmt.order_by(models.LedgerEntry.created_at.asc(), models.LedgerEntry.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_ledger_entry_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_ledger_entries(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    usage_record_id: UsageRecordId | None = None,
+    entry_type: LedgerEntryType | None = None,
+    currency: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.LedgerEntry)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.where(models.LedgerEntry.project_id.in_([str(p) for p in project_ids]))
+    if usage_record_id is not None:
+        stmt = stmt.where(models.LedgerEntry.usage_record_id == str(usage_record_id))
+    if entry_type is not None:
+        stmt = stmt.where(models.LedgerEntry.entry_type == entry_type.value)
+    if currency is not None:
+        stmt = stmt.where(models.LedgerEntry.currency == currency)
+    if created_from is not None:
+        stmt = stmt.where(models.LedgerEntry.created_at >= created_from)
+    if created_to is not None:
+        stmt = stmt.where(models.LedgerEntry.created_at <= created_to)
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def get_audit_event(
+    session: AsyncSession, event_id: AuditEventId
+) -> domain.AuditEvent | None:
+    row = await session.get(models.AuditEvent, str(event_id))
+    return _audit_event_to_domain(row) if row else None
+
+
+async def list_audit_events_paged(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    actor_principal_id: PrincipalId | None = None,
+    action: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    occurred_from: datetime | None = None,
+    occurred_to: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[domain.AuditEvent]:
+    """List audit events, scoped to ``project_ids`` when non-None.
+
+    ``None`` means the caller is deployment-wide (``system_admin``) and sees all
+    events including deployment-scoped (``project_id`` NULL) ones; a set restricts
+    to project-scoped events within those projects (NULL project_id is excluded).
+    """
+    stmt = select(models.AuditEvent)
+    if project_ids is not None:
+        if not project_ids:
+            return []
+        stmt = stmt.where(
+            models.AuditEvent.project_id.in_([str(p) for p in project_ids])
+        )
+    if actor_principal_id is not None:
+        stmt = stmt.where(models.AuditEvent.actor_principal_id == str(actor_principal_id))
+    if action is not None:
+        stmt = stmt.where(models.AuditEvent.action == action)
+    if resource_type is not None:
+        stmt = stmt.where(models.AuditEvent.resource_type == resource_type)
+    if resource_id is not None:
+        stmt = stmt.where(models.AuditEvent.resource_id == resource_id)
+    if occurred_from is not None:
+        stmt = stmt.where(models.AuditEvent.occurred_at >= occurred_from)
+    if occurred_to is not None:
+        stmt = stmt.where(models.AuditEvent.occurred_at <= occurred_to)
+    stmt = (
+        stmt.order_by(models.AuditEvent.occurred_at.asc(), models.AuditEvent.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return [_audit_event_to_domain(r) for r in result.scalars().all()]
+
+
+async def count_audit_events(
+    session: AsyncSession,
+    *,
+    project_ids: set[ProjectId] | None = None,
+    actor_principal_id: PrincipalId | None = None,
+    action: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    occurred_from: datetime | None = None,
+    occurred_to: datetime | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(models.AuditEvent)
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        stmt = stmt.where(
+            models.AuditEvent.project_id.in_([str(p) for p in project_ids])
+        )
+    if actor_principal_id is not None:
+        stmt = stmt.where(models.AuditEvent.actor_principal_id == str(actor_principal_id))
+    if action is not None:
+        stmt = stmt.where(models.AuditEvent.action == action)
+    if resource_type is not None:
+        stmt = stmt.where(models.AuditEvent.resource_type == resource_type)
+    if resource_id is not None:
+        stmt = stmt.where(models.AuditEvent.resource_id == resource_id)
+    if occurred_from is not None:
+        stmt = stmt.where(models.AuditEvent.occurred_at >= occurred_from)
+    if occurred_to is not None:
+        stmt = stmt.where(models.AuditEvent.occurred_at <= occurred_to)
+    return (await session.execute(stmt)).scalar_one()

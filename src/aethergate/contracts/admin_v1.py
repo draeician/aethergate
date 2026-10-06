@@ -13,6 +13,7 @@ explicit create/rotate boundary in a future contract).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import Field, model_validator
 
@@ -31,6 +32,7 @@ from aethergate.domain.enums import (
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
+    AuditEventId,
     BrowserSessionId,
     BudgetPolicyId,
     BudgetReservationId,
@@ -512,6 +514,27 @@ class PricePolicyUpdate(ContractModel):
         return self
 
 
+class PriceSnapshotRead(ContractModel):
+    """Immutable captured price at a dispatch decision (read-only historical).
+
+    Never exposes prompt/completion/provider-secret content; it is route/catalog
+    pricing history, not project-owned accounting data.
+    """
+
+    id: PriceSnapshotId
+    source_price_policy_id: PricePolicyId
+    route_binding_id: RouteBindingId
+    provider_account_id: ProviderAccountId
+    model_alias_id: ModelAliasId
+    billing_unit: BillingUnit
+    currency: Currency
+    unit_scale: int
+    request_price: NonNegativeMoney | None = None
+    input_price: NonNegativeMoney | None = None
+    output_price: NonNegativeMoney | None = None
+    captured_at: datetime
+
+
 # --- Project budget policies -------------------------------------------------
 
 
@@ -555,13 +578,15 @@ class BudgetStatusRead(ContractModel):
     headroom: Money  # limit - committed - reserved; may be negative after overage
     window_start: datetime
     window_end: datetime
+    enabled: bool = True
 
 
 class BudgetReservationRead(ContractModel):
     id: BudgetReservationId
     request_id: RequestId
     budget_policy_id: BudgetPolicyId
-    price_snapshot_id: PriceSnapshotId
+    # Released pre-dispatch reservations detach their snapshot (NULL in the DB).
+    price_snapshot_id: PriceSnapshotId | None = None
     reserved_amount: NonNegativeMoney
     committed_amount: NonNegativeMoney
     state: str
@@ -605,6 +630,25 @@ class LedgerEntryRead(ContractModel):
     created_at: datetime
     idempotency_key: str | None = None
     reason: str | None = None
+
+
+# --- Audit events ------------------------------------------------------------
+
+class AuditEventRead(ContractModel):
+    """Safe immutable administrative audit event (never secret-bearing metadata).
+
+    ``project_id`` is ``None`` for deployment-scoped events; only a ``system_admin``
+    may read those. ``metadata`` carries safe non-secret fields only.
+    """
+
+    id: AuditEventId
+    actor_principal_id: PrincipalId | None = None
+    project_id: ProjectId | None = None
+    action: str
+    resource_type: str
+    resource_id: str
+    occurred_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 __all__ = [
@@ -657,6 +701,7 @@ __all__ = [
     "PricePolicyCreate",
     "PricePolicyRead",
     "PricePolicyUpdate",
+    "PriceSnapshotRead",
     "ProjectBudgetPolicyCreate",
     "ProjectBudgetPolicyRead",
     "ProjectBudgetPolicyUpdate",
@@ -664,4 +709,5 @@ __all__ = [
     "BudgetReservationRead",
     "UsageRecordRead",
     "LedgerEntryRead",
+    "AuditEventRead",
 ]

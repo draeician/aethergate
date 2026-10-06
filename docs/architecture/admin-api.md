@@ -157,6 +157,86 @@ scopes, because deployment scope is also required.
   admission without rewriting historical reservation/window rows; `metric` and `quota_group_id` are
   immutable.
 
+## Accounting admin surface (AGV2-017)
+
+`/admin/v1` now exposes the accounting control plane through the same thin routers + centralized
+accounting admin service + authorization/pagination foundations. Accounting resources split into
+**deployment-scoped** pricing (route `PricePolicy`/`PriceSnapshot`) and **project-scoped** budget/usage/
+ledger state; authorization follows the existing typed permissions `admin:accounting:read`/`write` and
+`admin:audit:read`.
+
+### Deployment-scoped pricing (`system_admin` only)
+
+- Price policies: `POST /price-policies`, `GET /price-policies` (filter `route_binding_id`, `enabled`,
+  `billing_unit`), `GET /price-policies/{id}`, `PATCH /price-policies/{id}`.
+- Price snapshots (immutable, read-only): `GET /price-snapshots` (filter `route_binding_id`,
+  `model_alias_id`, `provider_account_id`, `source_price_policy_id`), `GET /price-snapshots/{id}`.
+
+Project roles must not mutate route pricing; snapshots carry no prompt/completion/provider-secret
+content.
+
+### Project-scoped budget/usage/ledger (system_admin any project; project_admin read/write own;
+project_viewer read own)
+
+- Project budget policies: `POST /project-budget-policies`, `GET /project-budget-policies` (filter
+  `project_id`, `enabled`, `currency`), `GET /project-budget-policies/{id}`,
+  `PATCH /project-budget-policies/{id}`.
+- Budget status/headroom: `GET /projects/{project_id}/budget-status` — one `BudgetStatusRead` per
+  applicable policy/current window (`limit_amount`, `committed_amount`, `reserved_amount`, `headroom`,
+  `window_start`/`window_end`, `enabled`). A read computes current-window zero state when no persisted
+  `BudgetWindow` exists, without fabricating reservation history; negative headroom is allowed after
+  honest overage.
+- Budget reservations (read-only): `GET /budget-reservations` (filter `project_id`, `request_id`,
+  `budget_policy_id`, `state`), `GET /budget-reservations/{id}`. A released pre-dispatch reservation
+  returns `price_snapshot_id: null`.
+- Usage records (immutable, read-only): `GET /usage-records` (filters incl. `project_id`, `request_id`,
+  `principal_id`, `api_credential_id`, `model_alias_id`, `route_binding_id`, `provider_account_id`,
+  `billing_unit`, `currency`, `recorded_at` range), `GET /usage-records/{id}`.
+- Ledger entries (immutable, append-only, read-only): `GET /ledger-entries` (filter `project_id`,
+  `usage_record_id`, `entry_type`, `currency`, `created_at` range), `GET /ledger-entries/{id}`.
+  `usage_debit` links to its `UsageRecord`; adjustment entries may have no `usage_record_id`; signed
+  fixed-point `Decimal` amounts are preserved exactly.
+- Audit reads: `GET /audit-events` (filter `actor_principal_id`, `project_id`, `action`,
+  `resource_type`, `resource_id`, `occurred_at` range), `GET /audit-events/{id}` — `admin:audit:read`.
+  `system_admin` reads all; project roles read only events explicitly scoped to their authorized
+  project; a `project_id = NULL` event is deployment-scoped and not exposed to project roles.
+
+### Invariants and semantics
+
+- **Money is fixed-point `Decimal`** (`Numeric(24,12)`); binary float is rejected at the contract
+  boundary. Request-priced policies require `request_price` and forbid input/output price; token-priced
+  require `input_price` + `output_price` and forbid `request_price`; `unit_scale > 0`; prices
+  non-negative; currency validated.
+- **At most one enabled price policy per route** (migration `0008` partial unique index + service
+  validation): a conflicting second enabled policy returns `409 price_policy_conflict`; disabled
+  historical/edit records may coexist; DB unique races are translated (never raw `IntegrityError`/500).
+- **`PriceSnapshot` is immutable historical evidence**; editing a policy never rewrites existing
+  snapshot rows.
+- **PricePolicy PATCH validates the complete resulting shape**, not just present fields; omitted means
+  unchanged, explicit `null` clears a price only when the resulting billing-unit shape stays valid.
+- **Budget mutation safety.** `name`, `limit_amount`, `enabled` are mutable for future admission;
+  `currency` and `window_seconds` are immutable after creation (changing them requires a replacement
+  policy). A PATCH attempting to change an immutable field returns a stable `400`. Edits never rewrite
+  historical `BudgetWindow`/`BudgetReservation` rows.
+- **No manual ledger adjustment writes** in this task; adjustment HTTP writes stay deferred (policy not
+  settled).
+- **Price/budget config writes serialize with scheduler admission** using the existing canonical lock
+  order (price-policy lock; budget policy-row lock); no reverse-order deadlock is introduced.
+- **No-op PATCH emits no audit event**; reads never create usage/ledger/snapshot/reservation history.
+
+### Error translation
+
+Stable codes, never SQL/constraint names/stack traces/secrets: `404 not_found` (cross-project opaque ID
+is indistinguishable from nonexistent), `403 forbidden`, `400 invalid_request` (shape/currency/Decimal/
+time-range), `400 parent_mismatch`, `409 price_policy_conflict`, plus immutable-field validation errors
+for budget currency/window. Conflict races are translated via savepoint + `IntegrityError` recovery.
+
+### Audit
+
+Config state changes emit immutable audit events — `price_policy.created`/`updated` (deployment-scoped,
+`project_id = null`) and `project_budget_policy.created`/`updated` (project-scoped) — with the actor
+principal ID and safe non-secret metadata only.
+
 ## Human OIDC/session auth surface (AGV2-015)
 
 Human administrators authenticate with an OIDC Authorization Code + PKCE flow and receive a

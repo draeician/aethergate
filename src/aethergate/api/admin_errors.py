@@ -28,6 +28,7 @@ from aethergate.errors import (
     OidcAuthenticationFailed,
     OidcConfigurationError,
     OidcLoginStateInvalid,
+    PricePolicyConflictError,
     SessionInvalid,
 )
 
@@ -224,6 +225,17 @@ async def catalog_destination_denied_error_handler(
     )
 
 
+async def price_policy_conflict_error_handler(
+    request: Request, exc: PricePolicyConflictError
+) -> JSONResponse:
+    return _admin_error(
+        409,
+        "price_policy_conflict",
+        "The route binding already has an enabled price policy.",
+        get_gateway_request_id(request),
+    )
+
+
 __all__ = [
     "admin_auth_error_handler",
     "admin_authorization_error_handler",
@@ -241,4 +253,5 @@ __all__ = [
     "active_route_conflict_error_handler",
     "catalog_parent_mismatch_error_handler",
     "catalog_destination_denied_error_handler",
+    "price_policy_conflict_error_handler",
 ]

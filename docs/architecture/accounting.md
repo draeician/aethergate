@@ -236,20 +236,51 @@ oversubscribe, endpoint cannot oversubscribe, and no partial reservation survive
 admission. A budget-blocked project does not head-of-line block another project sharing the same
 endpoint/quota resources (the scheduling scope includes project identity).
 
-## Domain / admin contract foundation
+## Admin surface (AGV2-017)
 
-Typed IDs and contracts exist for price policy, budget policy, budget reservation, budget window,
-price snapshot, usage record, and ledger entry (Settled). Admin-v1 DTO foundations exist for:
+The accounting control plane is exposed under `/admin/v1` through a thin router + a centralized
+accounting admin service (`accounting/admin.py`) that accepts a typed `AdminRequestContext` and
+authorizes internally — an internal caller cannot bypass RBAC merely by supplying an actor principal
+ID. (Settled)
 
-- route pricing create/read/update;
-- project budget policy create/read/update;
-- budget status/headroom read;
-- budget reservation read;
-- usage-record read;
-- ledger-entry read.
+- **Route pricing** — `PricePolicy` create/read/list/update (deployment-scoped `system_admin` +
+  `admin:accounting:read`/`write`), immutable `PriceSnapshot` list/read (deployment-scoped, read-only).
+- **Project budgets** — `ProjectBudgetPolicy` create/read/list/update; `GET
+  /projects/{id}/budget-status` (one `BudgetStatusRead` per policy/window, current-window zero state
+  computed without fabricating history); `BudgetReservation` list/read (read-only; a released
+  pre-dispatch reservation exposes `price_snapshot_id = null`).
+- **Usage/ledger** — immutable `UsageRecord` and append-only `LedgerEntry` list/read (read-only, no
+  update/delete).
+- **Audit** — `GET /audit-events` / `GET /audit-events/{id}` under `admin:audit:read`; `system_admin`
+  reads all, project roles read only events explicitly scoped to their project; a `project_id = null`
+  event is deployment-scoped and hidden from project roles.
 
-No admin HTTP CRUD routes yet; mutable historical accounting fields are not exposed through update
-DTOs. (Deferred)
+### Authorization (project vs deployment scope)
+
+- Deployment-scoped (route `PricePolicy`/`PriceSnapshot`): `system_admin` only.
+- Project-scoped (`ProjectBudgetPolicy`, budget status, reservations, usage, ledger): `system_admin`
+  any project; `project_admin` read/write own; `project_viewer` read own; cross-project opaque IDs are
+  indistinguishable from nonexistent (`404`), and deployment-scoped IDs follow the same
+  non-enumeration pattern.
+
+### Budget mutation safety
+
+`name`, `limit_amount`, and `enabled` are mutable for future admission; `currency` and `window_seconds`
+are immutable after creation (changing them requires a replacement policy — a PATCH attempting to
+mutate them returns a stable validation error). Edits never rewrite historical `BudgetWindow`/
+`BudgetReservation` rows, and budget config writes serialize with scheduler admission using the
+existing canonical lock order.
+
+### Audit
+
+Config changes emit immutable audit events — `price_policy.created`/`updated` (deployment-scoped) and
+`project_budget_policy.created`/`updated` (project-scoped) — with actor principal ID and safe non-secret
+metadata. No-op PATCHes emit no event. Usage/ledger/snapshot reads do not create audit noise.
+
+### Deferred in this task
+
+- Manual ledger adjustment HTTP writes (adjustment policy/approval not settled).
+- Invoice/payment/prepaid/exports/FX (unchanged from the accounting foundation).
 
 ## Deferred
 

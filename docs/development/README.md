@@ -114,6 +114,33 @@ Catalog errors use stable codes: `409 resource_conflict` (unique name), `409 act
 (second active route), `400 parent_mismatch` (route/endpoint/quota-group account mismatch),
 `400 destination_denied` (egress), `404 not_found`.
 
+Accounting control-plane endpoints (AGV2-017) — route pricing is deployment-scoped (`system_admin` +
+`admin:accounting:*`); project budget/usage/ledger/audit are project-scoped (`system_admin` any
+project, `project_admin` read/write own, `project_viewer` read own):
+
+- Price policies: `POST /admin/v1/price-policies`, `GET /admin/v1/price-policies` (filter
+  `route_binding_id`/`enabled`/`billing_unit`), `GET /admin/v1/price-policies/{id}`,
+  `PATCH /admin/v1/price-policies/{id}`.
+- Price snapshots (immutable, read-only): `GET /admin/v1/price-snapshots`,
+  `GET /admin/v1/price-snapshots/{id}`.
+- Project budget policies: `POST /admin/v1/project-budget-policies`,
+  `GET /admin/v1/project-budget-policies` (filter `project_id`/`enabled`/`currency`),
+  `GET /admin/v1/project-budget-policies/{id}`, `PATCH /admin/v1/project-budget-policies/{id}`.
+- Budget status/headroom: `GET /admin/v1/projects/{project_id}/budget-status`.
+- Budget reservations (read-only): `GET /admin/v1/budget-reservations`,
+  `GET /admin/v1/budget-reservations/{id}`.
+- Usage records (read-only): `GET /admin/v1/usage-records`, `GET /admin/v1/usage-records/{id}`.
+- Ledger entries (read-only): `GET /admin/v1/ledger-entries`, `GET /admin/v1/ledger-entries/{id}`.
+- Audit events: `GET /admin/v1/audit-events`, `GET /admin/v1/audit-events/{id}` (`admin:audit:read`;
+  project roles see only their own project's events).
+
+Accounting errors use stable codes: `409 price_policy_conflict` (second enabled policy per route),
+`400 invalid_request` (shape/currency/Decimal/time-range), `400 parent_mismatch`, `404 not_found`
+(cross-project opaque IDs are non-enumerating), plus stable immutable-field validation errors for
+budget `currency`/`window_seconds`. Money is fixed-point `Decimal` end to end; binary float is
+rejected. `currency` and `window_seconds` are immutable after budget creation; `limit_amount`/`name`/
+`enabled` are mutable for future admission. Manual ledger adjustment writes are deferred.
+
 Admin auth requires an `admin`-audience credential (`Authorization: Bearer agk_...`) plus an active
 role assignment granting the needed `admin:*` permission (`system_admin` deployment-wide;
 `project_admin`/`project_viewer` scoped to one project). Admin errors use

@@ -112,7 +112,7 @@ Quota DTOs (scheduler phase 2):
 - `RouteBindingCreate`/`Read`/`Update` carry `default_output_tokens` (positive) and
   `quota_group_id`, for the default bounded output-token reservation.
 
-Accounting DTOs (AGV2-010/011):
+Accounting DTOs (AGV2-010/011, refined AGV2-017):
 
 - `PricePolicyCreate`/`Read`/`Update` — route pricing (request or token billing unit), currency,
   positive `unit_scale`, non-negative `request_price`/`input_price`/`output_price`, `enabled`.
@@ -122,17 +122,24 @@ Accounting DTOs (AGV2-010/011):
   fields (partial updates cannot require a price).
 - `ProjectBudgetPolicyCreate`/`Read`/`Update` — project spending-cap policy (positive
   `limit_amount`, positive `window_seconds`, currency, `enabled`). Update DTOs do not expose mutable
-  historical accounting fields.
+  historical accounting fields (`currency`/`window_seconds` are immutable after creation).
 - `BudgetStatusRead` — project/policy headroom (`limit - committed - reserved`), current
-  window start/end.
-- `BudgetReservationRead` — per-request reservation (reserved/committed, state, settlement reason).
+  window start/end, plus `enabled` state.
+- `BudgetReservationRead` — per-request reservation (reserved/committed, state, settlement reason);
+  `price_snapshot_id` is **nullable** to match a released/detached pre-dispatch reservation.
+- `PriceSnapshotRead` — immutable snapshot read shape (route/model/account/source-policy attribution,
+  billing unit, currency, prices, captured timestamp; no content/secrets).
 - `UsageRecordRead` — measured usage read shape (no content/secrets).
 - `LedgerEntryRead` — ledger entry read shape (signed amount, entry type, idempotency key, reason).
+- `AuditEventRead` — safe audit read shape (`actor_principal_id`, optional `project_id`, `action`,
+  `resource_type`, `resource_id`, `occurred_at`, safe details; never secret material).
 
-No admin HTTP CRUD routes yet; these are the persistence/transport-independent foundations. A
-minimal protected admin surface (bootstrap, whoami, credential list/create/rotate/revoke) exists
-since AGV2-013 to prove the identity model; the remaining resource CRUD reuses the same DTOs and
-services.
+These DTOs now back the full `/admin/v1` accounting surface introduced in AGV2-017: route
+price-policy CRUD, immutable price-snapshot reads, project budget-policy CRUD, budget-status/headroom,
+budget-reservation reads, usage/ledger reads, and deployment-vs-project-scoped audit reads, all reusing
+the shared `Page[T]` shape and PATCH omitted-vs-null semantics. A minimal protected admin surface
+(bootstrap, whoami, credential list/create/rotate/revoke) exists since AGV2-013 to prove the identity
+model; the remaining resource CRUD reuses the same DTOs and services.
 
 ## Requirements honored
 
