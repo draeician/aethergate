@@ -2,212 +2,178 @@
 
 ## Current State
 - Branch: `v2`.
-- AGV2-016 implementation commit: `3243efc` (`feat(admin): add catalog and routing control plane`),
-  pushed to `origin/v2`. AGV2-016V (live browser-session catalog RBAC/CSRF verification) is now
-  complete and pushed to `origin/v2`; this handoff supersedes the AGV2-015C handoff.
-- Migration head: `0014` (no new migration; empty -> `0014` re-verified live).
-- Full containerized suite: **386 passed** (was 364; +22: 21 new `tests/test_catalog_admin.py` +
-  1 new migration test). Re-confirmed green this session.
+- AGV2-017 implementation complete on `v2` (see "Task Completed"). This handoff supersedes the
+  AGV2-016V handoff.
+- Migration head: `0014` (no new migration; the nullable `budget_reservations.price_snapshot_id` was
+  already introduced by `0008`, so the AGV2-017 read-contract fix needs no schema change; empty ->
+  `0014` re-verified live).
+- Full containerized suite: **399 passed** (was 386; +13 new `tests/test_accounting_admin.py`). `ruff
+  check src tests` clean; `git diff --check` clean; staged secret scan clean.
 
 ## Task Completed
-AGV2-016 — Catalog and routing admin API with configuration invariants.
+AGV2-017 — Accounting admin API: pricing, project budgets, usage/ledger, and audit reads.
 
-### Endpoints added (deployment-scoped `/admin/v1`)
-- Providers: `POST /providers`, `GET /providers` (paginated), `GET /providers/{id}`,
-  `PATCH /providers/{id}`.
-- Secret refs (metadata only): `POST /secret-refs`, `GET /secret-refs`, `GET /secret-refs/{id}`.
-- Provider accounts: `POST /provider-accounts`, `GET /provider-accounts` (filter `provider_id`),
-  `GET /provider-accounts/{id}`, `PATCH /provider-accounts/{id}`.
-- Endpoints: `POST /endpoints`, `GET /endpoints` (filter `provider_account_id`),
-  `GET /endpoints/{id}`, `PATCH /endpoints/{id}`.
-- Quota groups: `POST /quota-groups`, `GET /quota-groups` (filter `provider_account_id`),
-  `GET /quota-groups/{id}`, `PATCH /quota-groups/{id}`.
-- Quota limits: `POST /quota-limits`, `GET /quota-limits` (filter `quota_group_id`),
-  `GET /quota-limits/{id}`, `PATCH /quota-limits/{id}`.
-- Model aliases: `POST /model-aliases`, `GET /model-aliases`, `GET /model-aliases/{id}`,
-  `PATCH /model-aliases/{id}`.
-- Route bindings: `POST /route-bindings`, `GET /route-bindings` (filter `model_alias_id` /
-  `provider_account_id`), `GET /route-bindings/{id}`, `PATCH /route-bindings/{id}`.
+### Endpoints added (`/admin/v1`)
+- **Deployment-scoped** (route pricing, `system_admin` + `admin:accounting:read`/`write`):
+  `POST /price-policies`, `GET /price-policies` (filter `route_binding_id`/`enabled`/`billing_unit`),
+  `GET /price-policies/{id}`, `PATCH /price-policies/{id}`; immutable read-only
+  `GET /price-snapshots`, `GET /price-snapshots/{id}`.
+- **Project-scoped** (budget/usage/ledger; `system_admin` any project, `project_admin` read/write own,
+  `project_viewer` read own): `POST /project-budget-policies`, `GET /project-budget-policies`,
+  `GET /project-budget-policies/{id}`, `PATCH /project-budget-policies/{id}`; `GET
+  /projects/{project_id}/budget-status`; read-only `GET /budget-reservations`,
+  `GET /budget-reservations/{id}`; `GET /usage-records`, `GET /usage-records/{id}`;
+  `GET /ledger-entries`, `GET /ledger-entries/{id}`.
+- **Audit** (`admin:audit:read`): `GET /audit-events`, `GET /audit-events/{id}`.
 
-Routers are thin; all authorization/validation lives in `src/aethergate/catalog/admin.py`, which
-accepts a typed `AdminRequestContext` and authorizes internally.
+Routers are thin (`src/aethergate/api/accounting_admin.py`); all authorization/validation lives in
+`src/aethergate/accounting/admin.py`, which accepts a typed `AdminRequestContext` and authorizes
+internally — an internal caller cannot bypass RBAC merely by supplying an actor principal ID.
 
-### Deployment-scope authorization
-Catalog resources are deployment infrastructure, not project-owned. Every list/read/mutation
-requires deployment-scoped authority (`system_admin`) **and** the matching `admin:catalog:read`/
-`write` permission. A `project_admin`/`project_viewer` credential is denied (`403`) regardless of its
-`admin:catalog:*` scopes. Bearer admin credentials and human OIDC browser sessions share the same
-service layer; browser mutations remain CSRF-protected via the existing session machinery.
+### Deployment vs project authorization
+Route pricing (deployment infrastructure) requires `system_admin` authority **and** the matching
+`admin:accounting:*` permission; project roles are denied (`403`) regardless of their scopes. Project
+budget policy/status/reservations/usage/ledger are project-scoped; cross-project opaque IDs (and
+deployment-scoped IDs for a project-scoped caller) are indistinguishable from nonexistent (`404`).
+Audit reads are deployment-vs-project scoped: `system_admin` reads all; project roles read only events
+with `project_id` in their scope; a `project_id = null` event is deployment-scoped and hidden from
+project roles.
 
-### Egress validation
-Endpoint create and `base_destination` updates run the same `DestinationPolicy` used before dispatch:
-non-allowlisted hosts, URL userinfo, and metadata/link-local/loopback/reserved destinations return
-`400 destination_denied`; allowlisted private-LAN hosts are accepted. A destination dispatch would
-reject is never persisted.
+### Price policy mutation / locking
+`PricePolicy` CRUD enforces the AGV2-010/011 invariants: route must exist; request pricing requires
+`request_price` and forbids token prices; token pricing requires `input_price`+`output_price` and
+forbids `request_price`; `unit_scale > 0`; non-negative prices; at most one enabled policy per route
+(partial unique index `0008` + service validation => stable `409 price_policy_conflict`, DB unique
+races translated via savepoint + `IntegrityError` recovery). PATCH validates the complete resulting
+shape, not just present fields; omitted means unchanged; explicit `null` clears a price only if the
+resulting shape stays valid. Edits serialize with scheduler admission via the existing price-policy
+lock order; no reverse-order deadlock.
 
-### One-active-route enforcement
-Migration `0014` adds the partial unique index `uq_route_bindings_one_active_per_alias`
-(`model_alias_id WHERE is_active = true`). Together with service-layer validation this guarantees
-exactly one active `RouteBinding` per alias: a second active route (or activating an inactive
-alternate while another is active) returns `409 active_route_conflict`; inactive alternates are
-allowed; deactivate-then-activate swaps work; concurrent activations resolve to exactly one winner.
-The migration fails with a clear diagnostic if an existing DB already has multiple active routes per
-alias (no silent winner selection).
+### Immutable snapshot proof
+`PriceSnapshot` is read-only (no POST/PATCH/DELETE). Editing a live `PricePolicy` never rewrites
+existing snapshot rows; live scenario A proved an old `0.05` snapshot and a new `0.10` snapshot coexist
+after a PATCH. Snapshots expose no prompt/completion/provider-secret content.
 
-### Route/account/quota consistency
-`route_binding.provider_account_id` must equal `endpoint.provider_account_id`, and any
-`route_binding.quota_group_id` must belong to that same account. Violations return `400
-parent_mismatch` and are never persisted. `devseed` was refactored only as necessary so it still
-cannot create inconsistent routes or multiple active routes (no HTTP authentication required).
+### Budget policy mutation safety
+`name`, `limit_amount`, `enabled` are mutable for future admission; `currency` and `window_seconds`
+are immutable after creation (a PATCH attempting to change them returns a stable `400`; changing them
+requires a replacement policy). Edits never rewrite historical `BudgetWindow`/`BudgetReservation`
+rows; budget config writes serialize with scheduler budget admission using the policy-row lock order.
 
-### PATCH omitted-vs-null semantics
-Via Pydantic `model_fields_set`: `external_account_id`, `secret_ref_id`, `upstream_model`,
-`quota_group_id`, `default_output_tokens` (and nullable `description`/`name`) distinguish omitted
-(unchanged) from explicit `null` (clear where clearing is supported). Direct HTTP tests cover both.
+### Budget status / headroom
+`GET /projects/{id}/budget-status` returns one `BudgetStatusRead` per applicable policy/window with
+`limit_amount`, `committed_amount`, `reserved_amount`, `headroom = limit - committed - reserved`,
+`window_start`/`window_end`, `enabled`. A read computes current-window zero state without fabricating
+reservation history; negative headroom is allowed after honest overage.
 
-### Secret-ref metadata decision
-`SecretRef` exposes only `id`/`name`/`created_at`; no raw secret value is accepted or returned, and
-no environment-variable value is exposed. The production secret backend remains deferred;
-`EnvSecretResolver` stays a dev/test convenience. No delete/rotate in this task.
+### Budget reservation reads
+Read-only. `BudgetReservationRead.price_snapshot_id` is now **nullable** (contract + domain entity
+aligned to persistence: a released/detached pre-dispatch reservation stores `NULL`). No reservation
+mutation via admin HTTP.
+
+### Usage/ledger reads
+Read-only immutable/append-only reads with bounded pagination (`Page[T]`, default 50, max 200, stable
+sort) and the documented filters. No content/secrets; signed fixed-point `Decimal` amounts preserved
+exactly; `usage_debit` links its `UsageRecord`; adjustment entries may have no `usage_record_id`.
+Manual ledger adjustment writes remain deferred (no HTTP path).
 
 ### Audit behavior
-Immutable audit events on actual state changes only: `provider.created`/`updated`,
-`secret_ref.created`, `provider_account.created`/`updated`, `endpoint.created`/`updated`,
-`quota_group.created`/`updated`, `quota_limit.created`/`updated`, `model_alias.created`/`updated`,
-`route_binding.created`/`updated`. Actor principal ID and safe metadata only; no raw secrets,
-Authorization/session/CSRF/OIDC tokens; idempotent no-op PATCH emits no event.
+Config changes emit immutable audit events — `price_policy.created`/`updated` (deployment-scoped,
+`project_id = null`) and `project_budget_policy.created`/`updated` (project-scoped) — with actor
+principal ID and safe metadata. No-op PATCHes emit no event; usage/ledger/snapshot reads create no
+audit noise.
 
 ### Error translation
-Stable admin codes, never SQL text/constraint names/stack traces: `409 resource_conflict` (unique
-name, including DB-constraint races), `409 active_route_conflict`, `400 parent_mismatch`,
-`400 destination_denied`, `404 not_found`, `400 invalid_request` (validation). Conflict races are
-translated (savepoint + `IntegrityError` recovery), not only pre-checked.
+Stable codes only (no SQL/constraint names/stack traces/secrets): `404 not_found`,
+`403 forbidden`, `400 invalid_request`, `400 parent_mismatch`, `409 price_policy_conflict`, plus
+stable immutable-field validation errors for budget `currency`/`window_seconds`.
 
-## Live nomnom verification (dynamic host port 44777)
+## Live nomnom verification (all scenarios green)
+
 Clean reset -> `scripts/dev/v2 migrate` (empty -> `0014`) -> one-use bootstrap -> catalog built
-entirely through `/admin/v1` (no direct DB inserts). Backend Ollama `http://192.168.22.50:11434`,
-upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
+entirely through `/admin/v1`. Backend Ollama `http://192.168.22.50:11434`, upstream
+`qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`. Bearer
+scenarios A-H/J (35/35) ran against a dynamic loopback port; browser scenario I (7/7) ran against a
+pinned `44777` port with an uncommitted compose override + a local `MultiSubjectIdp`.
 
-- **A catalog via admin API.** Created provider/account/endpoint/quota-group/request-limit/alias/
-  active route; every list/read DTO round-tripped; pagination bounded (`limit=1000` -> `400`).
-- **B real SDK inference.** Official OpenAI Python SDK `/v1/models` listed `gpt-4`; non-stream and
-  stream chat completions both succeeded; both `inference_requests` rows recorded `succeeded` with
-  `project_id`/`principal_id`/`api_credential_id` matching the minted inference credential.
-- **C active-state.** Deactivating alias (absent from `/v1/models`, inference fails safely),
-  endpoint, provider account, and provider each failed inference without hidden fallback; reactivation
-  restored inference.
-- **D egress.** Non-allowlisted, URL-userinfo, metadata, and link-local destinations each returned
-  `400 destination_denied`; the allowlisted Ollama host was accepted.
-- **E route ambiguity.** Inactive second route allowed; activating it while the first is active
-  returned `409 active_route_conflict`.
-- **F route/account mismatch.** Route with endpoint-A + account-B, and quota-group-A on a route for
-  account-B, both returned `400 parent_mismatch`; `route-bindings` total stayed 2 (no invalid row).
-- **G quota edit live effect.** PATCH `limit_units=1/window_seconds=60`; request #1 succeeded;
-  request #2 observed `wait_reason=quota_window_exhausted` in the DB then auto-dispatched on the
-  fixed-window reset; `enabled` toggled false/true; limit restored. Historical reservation/window rows
-  remained coherent.
-- **H RBAC/CSRF (browser session) — now proven live.** See the AGV2-016V section below; the live
-  human browser-session catalog read/write, CSRF, and project_admin denial scenarios are now
-  exercised end-to-end against a fresh local IdP (they were previously deferred because the
-  host-network IdP was unreachable).
-
-## AGV2-016V — live browser-session catalog RBAC/CSRF + regressions (complete)
-
-The previously-deferred live scenario H is now closed. Verification ran against a fresh, controlled,
-deterministic local OIDC provider started on the nomnom host (not the unreachable host-network IdP).
-No production code changed; this is verification evidence only.
-
-### Controlled local IdP
-- A `MultiSubjectIdp` (a small `DevOidcIdp` subclass) served by uvicorn on the host, bound
-  `0.0.0.0:8491`, issuer `http://192.168.22.50:8491`, client `aethergate-dev-client`. Two distinct
-  human identities share one issuer: `dev-admin` -> `system_admin` and `dev-padmin` ->
-  `project_admin`, selected per-login via a `login_hint` query parameter on `/authorize`.
-- The API was recreated with `AETHERGATE_OIDC_ISSUER=http://192.168.22.50:8491` and
-  `AETHERGATE_OIDC_REDIRECT_URI=http://127.0.0.1:44777/admin/v1/auth/oidc/callback` via an
-  uncommitted compose override (same mechanism as AGV2-016). Recreating the API also cleared the
-  development JWKS cache.
-
-### Live results (38/38 checks passed)
-- **system_admin browser catalog read/write (A).** Real OIDC Authorization Code + PKCE login for
-  `dev-admin` established a `browser_session` with role `system_admin`; `GET /admin/v1/providers`
-  and `GET /admin/v1/model-aliases` succeeded; a catalog mutation (`POST /admin/v1/model-aliases`)
-  with the correct CSRF token returned `201`.
-- **Browser CSRF (B).** Missing `X-CSRF-Token` -> `403 invalid_csrf_token`; wrong token ->
-  `403 invalid_csrf_token`; correct token -> `201`.
-- **project_admin denial (C).** Real login for `dev-padmin` established a valid `browser_session`
-  (role `project_admin` scoped to `project-a`); `GET /admin/v1/providers` and `/model-aliases` ->
-  `403 forbidden`, and a catalog mutation with correct CSRF -> `403 forbidden`. The denial comes from
-  deployment-scope catalog authorization, not broken session auth (`whoami` showed a healthy session).
-- **Bearer regression (D).** system_admin Bearer `GET /admin/v1/providers` -> `200`; catalog
-  mutation without CSRF -> `201`. CSRF remains specific to ambient browser-session authority.
-- **OIDC + inference regression (E).** OIDC happy path (200), cross-browser forged transaction
-  cookie rejected (400) while the legitimate browser completed, logout revoked the session (200) and
-  the revoked session was denied (401). Official OpenAI Python SDK `models.list()` listed `gpt-4`;
-  non-stream and stream chat completions both succeeded with
-  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`.
-
-### Ports / backend
-- API host port (dynamic, loopback): `44777`. IdP port: `8491`.
-- Backend: Ollama `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`.
-
-### Migration
-- None. Migration head remains `0014`; empty -> `0014` was re-verified during the clean reset.
+- **A price policy + snapshot + inference.** Created request-priced `0.05` policy via `/admin/v1`; read
+  returned fixed-point `0.050000000000`; real SDK inference succeeded; immutable `PriceSnapshot`
+  captured; PATCH to `0.10`; second inference; both `0.05` and `0.10` snapshots preserved.
+- **B one-enabled invariant.** Disabled alternate created; enabling it while another enabled =>
+  `409 price_policy_conflict`.
+- **C budget live.** Budget created via `/admin/v1`; status zero-state `headroom == limit`; inference
+  committed `0.10`; an over-budget request returned `502 budget_request_too_large`; a budget-exhausted
+  request blocked in the queue with `wait_reason = budget_window_exhausted`; PATCH `limit_amount`
+  admitted a new request and `committed_amount` reflected the raised limit (historical window intact).
+- **D budget scope RBAC.** `project_admin(A)` read its own budget; `project_admin(B)` saw only B's
+  budget; `project_viewer` write => `403`; `project_admin(A)` PATCH own budget => `200`.
+- **E usage + ledger.** Real request-priced inference produced exactly one `UsageRecord` and one
+  `usage_debit` `LedgerEntry` with positive fixed-point amounts matching snapshot pricing.
+- **F idempotent settlement.** Repeated usage/ledger reads did not change row counts or amounts.
+- **G reservation read.** `budget-reservations` listed the committed reservation (with snapshot id).
+- **H audit reads.** `system_admin` saw deployment + project events; `project_admin(A)` saw its own
+  `project_budget_policy.*` events but not deployment `price_policy.*`; a project credential without
+  `admin:audit:read` => `403`; audit payloads contained no secret material.
+- **I browser session/CSRF (local IdP).** Real OIDC login for `dev-admin` (system_admin),
+  `dev-padmin` (project_admin), `dev-pviewer` (project_viewer). system_admin price-policy create with
+  correct CSRF => `201`; missing CSRF => `403`; wrong CSRF => `403`; project_admin budget PATCH with
+  CSRF => `200`; project_admin missing CSRF => `403`; project_viewer mutation => `403`; Bearer
+  mutation without CSRF => `201`.
+- **J SDK regressions.** Official OpenAI SDK `models.list()` listed `gpt-4`; non-stream and stream
+  chat completions both succeeded with inference auth bypass false.
 
 ## Migration
-- `0014` (`src/aethergate/migrations/versions/0014_one_active_route_per_alias.py`): partial unique
-  index `uq_route_bindings_one_active_per_alias` plus an explicit diagnostic pre-flight for
-  pre-existing ambiguous active routes. `0001`–`0013` untouched. Live `0013 -> 0014` and empty-DB ->
-  latest both succeeded.
+- None. Head remains `0014`; `0001`–`0014` untouched. `budget_reservations.price_snapshot_id`
+  nullable came from `0008`, so the AGV2-017 read-contract fix required no schema change.
 
 ## Automated tests
-- `scripts/dev/v2 test` -> **386 passed**. New `tests/test_catalog_admin.py` (21 tests: deployment
-  authorization, project_admin denial, provider CRUD/pagination/conflict, secret-ref metadata only,
-  provider-account parent/omitted-vs-null, endpoint parent/egress/max-concurrency, quota-group CRUD,
-  quota-limit validation/update/no-historical-mutation, model-alias CRUD/conflict/`/v1/models`
-  reflection, route parent/mismatch/omitted-vs-null/one-active/inactive-alternate/concurrent-activation/
-  409-translation, list filter bounds, no-op-audit, audit-no-secret-material). `tests/test_migrations.py`
-  gained `0013 -> 0014`. `tests/test_catalog.py`/`tests/test_scheduler_quota.py` updated for the new
-  typed errors (`ActiveRouteConflictError`, `CatalogParentMismatchError`).
-- `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean (one pre-commit
-  hook false positive on the local `clear_secret` flag resolved by renaming it to `clear_secret_ref`).
+- Full containerized suite: **399 passed**. New `tests/test_accounting_admin.py` (13 tests: service-layer
+  authorization cannot be bypassed; price-policy CRUD/shape/one-enabled/409 + PATCH full-shape;
+  immutable snapshot after edit; budget CRUD/immutable-currency/window + RBAC + non-enumeration;
+  budget status zero-state + exact headroom; reservation nullable snapshot; usage/ledger reads +
+  non-enumeration + signed Decimal; audit scoping + no-op-audit + no-secret; Bearer CSRF-exempt).
+  `ruff check src tests` clean; `git diff --check` clean; staged secret scan clean (only the test-only
+  `test-bootstrap-secret-*` literal, matching existing test conventions).
 
 ## Key files
-- `src/aethergate/catalog/admin.py` — catalog admin service (authz, invariants, egress, audit, conflict
-  translation).
-- `src/aethergate/api/catalog_admin.py` — thin `/admin/v1` catalog router (PATCH `model_fields_set`).
-- `src/aethergate/api/admin_errors.py`, `src/aethergate/errors.py` — catalog error types + handlers.
-- `src/aethergate/contracts/admin_v1.py` — catalog DTOs (create/read/update + `Page[T]`).
-- `src/aethergate/persistence/models.py`, `src/aethergate/persistence/repository.py` — `RouteBinding`
-  partial unique index + catalog repository functions.
-- `src/aethergate/migrations/versions/0014_one_active_route_per_alias.py` — migration 0014.
-- `src/aethergate/main.py` — router registration.
-- `tests/test_catalog_admin.py` — new suite; `tests/test_migrations.py`, `tests/test_catalog.py`,
-  `tests/test_scheduler_quota.py` — updated.
+- `src/aethergate/accounting/admin.py` — accounting admin service (authz, invariants, audit,
+  `BudgetStatus` dataclass, conflict translation).
+- `src/aethergate/api/accounting_admin.py` — thin `/admin/v1` accounting router + converters.
+- `src/aethergate/contracts/admin_v1.py` — `PriceSnapshotRead`, `AuditEventRead`, `enabled` on
+  `BudgetStatusRead`, nullable `BudgetReservationRead.price_snapshot_id`.
+- `src/aethergate/domain/entities.py` — `BudgetReservation.price_snapshot_id` nullable.
+- `src/aethergate/persistence/repository.py` — new accounting read/list/update repository functions.
+- `src/aethergate/api/admin_errors.py` — `PricePolicyConflictError` handler.
+- `src/aethergate/main.py` — router + exception registration.
+- `tests/test_accounting_admin.py` — new suite.
+- Docs: `docs/architecture/accounting.md`, `docs/architecture/admin-api.md`,
+  `docs/contracts/domain-model.md`, `docs/contracts/admin-v1-foundation.md`,
+  `docs/development/README.md`.
 
 ## Decisions
-- Catalog resources are deployment-scoped; project roles never see them.
-- SecretRef is metadata only; production secret backend still deferred.
-- `provider.kind` stays an opaque non-empty string (not a restrictive enum) so LiteLLM-backed providers
-  are not over-constrained.
-- The one-active-route invariant is enforced by a DB partial unique index plus service validation; a
-  cross-table trigger was deliberately avoided.
-- `quota_limit.metric` and `quota_group_id` are immutable; only `limit_units`/`window_seconds`/`enabled`
-  (and `name`) are editable, and edits never rewrite historical reservation/window rows.
+- Route pricing is deployment-scoped (`system_admin` only); project roles never mutate it.
+- `PriceSnapshot` stays deployment-scoped and read-only (no project ownership inference from a
+  route/catalog-history snapshot).
+- Budget `currency`/`window_seconds` immutable after creation; `name`/`limit_amount`/`enabled` mutable.
+- Manual ledger adjustment HTTP writes deferred (adjustment policy/approval not settled).
+- No accounting-summary endpoint added (optional; not required, avoids multi-currency distortion).
+- No new migration: the nullable snapshot column already existed in `0008`.
 
 ## Issues / Risks
 - `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
   `--no-deps`.
-- The full suite has pre-existing flaky concurrency tests
-  (`test_scheduler_quota.py::test_saturated_quota_group_does_not_block_unrelated_group` and
-  `test_accounting.py::test_two_workers_cannot_oversubscribe_budget`) that fail intermittently only
-  under full-suite load; they pass in isolation/targeted runs and are unrelated to AGV2-016. (Both
-  were green in the AGV2-016V full-suite run.)
-- `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; live verification used an
-  uncommitted compose override to pin the host port (`44777`) and set the OIDC issuer/redirect.
-- litellm still has no trusted token estimator; token-priced quotas fail closed (request-only quota used
-  in the smoke).
+- Pre-existing flaky concurrency tests (`test_scheduler_quota.py::test_saturated_quota_group_does_not_block_unrelated_group`
+  and `test_accounting.py::test_two_workers_cannot_oversubscribe_budget`) can fail intermittently only
+  under full-suite load; they pass in isolation/targeted runs and were green this session.
+- `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; live scenario I used an
+  uncommitted compose override (pinned host port `44777`, local `MultiSubjectIdp` on `8491`) — the same
+  mechanism as AGV2-016V. A budget-exhausted request stays held until its next eligible window by
+  design; a PATCH `limit_amount` raise affects *future* admission (and is proven), it does not
+  auto-wake the already-held request.
+- litellm still has no trusted token estimator; token-priced quotas fail closed (request-only pricing
+  used in the smoke).
 
 ## Recommended Next Step
-Queue the next workstream task (pricing/budget admin CRUD, usage/ledger admin reads, or the
-queue/operator admin API). Live scenario H is now closed; no further browser-session catalog
-verification is outstanding.
+Queue the queue/operator admin API (`admin:queue:*` — queue state inspection, outcome_unknown
+reconciliation, and explicit queue lifecycle) as the next workstream task, reusing the now-proven
+thin-router + centralized-service + RBAC + pagination pattern.
