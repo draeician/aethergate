@@ -1,41 +1,72 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-018
+AGV2-019
 
 ## Title
-Queue and operator admin API — inspection, cancellation, reconciliation, pause, and drain
+Linux CLI foundation and human OAuth device-flow authentication
 
 ## Ownership
-Primary: scheduler/queueing + admin API
-Coordinating: identity/RBAC, accounting, catalog/routing, audit, platform/testing
+Primary: CLI + identity/auth
+Coordinating: admin API/contracts, platform/testing, security
+
+## WIP Marker — FIRST LOCAL ACTION
+
+The repository-wide WIP marker protocol in AGENTS.md is mandatory.
+
+Immediately after entering the repository, **before pull/read/implementation work**, create:
+
+`.aethergate-wip`
+
+Safe contents:
+- task ID: AGV2-019
+- branch: v2
+- UTC start timestamp
+
+The marker:
+- is already gitignored;
+- must never be staged, committed, or pushed;
+- must contain no secrets;
+- must remain present for the entire incomplete task;
+- must be recreated after restart/compaction if missing while work is incomplete;
+- must be removed only after every completion criterion is green, the handoff is committed, all
+  commits are pushed to origin/v2, and origin/v2 is verified to contain the completed work.
+
+If the task is blocked/incomplete, leave the marker present.
 
 ## Why This Task Exists
 
-The inference scheduler is durable and multi-worker safe, and the identity/catalog/accounting control
-planes are now exposed through /admin/v1.
+The v2 backend management surface is now broad enough for an operator client:
 
-The remaining backend control-plane gap before the CLI/web console is queue/operator administration:
+- identity/RBAC/bootstrap;
+- human OIDC browser auth;
+- catalog/routing;
+- accounting/budgets/usage/ledger;
+- queue/operator controls.
 
-- inspect queued and in-flight work without exposing inference content;
-- explain why a request is waiting;
-- inspect endpoint slot occupancy;
-- safely cancel work;
-- reconcile outcome_unknown requests;
-- temporarily pause/drain endpoint dispatch without abusing catalog is_active.
+The project specification requires an installable Linux CLI that is a thin client over the same
+/admin/v1 API, with:
+- human login through an approved OAuth device flow;
+- protected token storage;
+- profiles and trusted CA configuration;
+- machine-readable JSON;
+- predictable non-zero exit codes;
+- shell completion;
+- secret input through prompt/stdin, never argv.
 
-Existing development-only tools (inspect_queue.py and reconcile.py) already prove parts of this
-internally. This task turns the same invariants into the authenticated /admin/v1 product surface.
+This task builds that foundation and enough resource/operator commands to prove the CLI is a real
+product client, not a database wrapper.
 
 ## Recovery
 
 If context is compacted/restarted/uncertain:
-1. re-read AGENTS.md;
-2. re-read project_spec.md;
-3. re-read this file;
-4. re-read docs/development/agent-handoff.md;
-5. inspect git status/history;
-6. continue from repository state.
+1. ensure `.aethergate-wip` exists; recreate if the task is incomplete;
+2. re-read AGENTS.md;
+3. re-read project_spec.md;
+4. re-read this file;
+5. re-read docs/development/agent-handoff.md;
+6. inspect git status/history;
+7. continue from repository state.
 
 current-task.md is authoritative.
 
@@ -47,666 +78,645 @@ current-task.md is authoritative.
    - project_spec.md
    - docs/development/current-task.md
    - docs/development/agent-handoff.md
-   - docs/architecture/scheduler.md
+   - docs/architecture/security.md
    - docs/architecture/admin-api.md
-   - docs/architecture/accounting.md
-   - src/aethergate/scheduler/service.py
-   - src/aethergate/scheduler/repository.py
-   - src/aethergate/inspect_queue.py
-   - src/aethergate/reconcile.py
-   - current scheduler/accounting tests
-   - current admin authorization/pagination patterns
-3. Preserve all scheduler lease/fencing, quota, budget, accounting, and ambiguous-outcome invariants.
-4. Preserve all OIDC/session/CSRF behavior.
-5. Preserve catalog is_active semantics.
-6. Do not modify/delete legacy v1 app/ or frontend/src/.
-7. Do not commit unrelated local/untracked files.
+   - current OIDC/browser-session implementation
+   - current AdminRequestContext/authentication dependency
+   - all current /admin/v1 routers/contracts
+   - pyproject.toml
+3. Preserve existing browser OIDC/session/CSRF behavior.
+4. Preserve service-account admin Bearer auth.
+5. Preserve inference/admin audience separation.
+6. Do not access PostgreSQL directly from the product CLI.
+7. Do not modify/delete legacy v1 app/ or frontend/src/.
+8. Do not commit unrelated local/untracked files.
 
-## Core safety rules
+## 1. Device-flow architecture
 
-- Never expose/decrypt prompt content, completion content, encrypted payloads, encrypted results, or
-  stream event bodies through the operator API.
-- No admin action may fabricate a succeeded result.
-- outcome_unknown is never auto-retried or auto-released.
-- Pause/drain is not the same as catalog deactivation.
-- No DB transaction spans upstream inference.
-- Existing scheduler lock order, leases, fencing, quota, and accounting correctness remain intact.
-- CLI and future web console must consume this API rather than editing scheduler tables directly.
+Implement RFC 8628-style human device authorization against the configured OIDC provider.
 
-## Authorization model
+Do not implement OAuth cryptography by hand when the existing standards-aware OIDC/JWT libraries can
+validate provider responses.
 
-Use:
-- admin:queue:read
-- admin:queue:write
+### Provider configuration
 
-### Project-scoped queue access
+Add typed config for a public CLI/device OAuth client:
+- device_client_id;
+- device scopes with openid required;
+- optional display name if useful.
 
-- system_admin: read all requests and cancel any eligible request.
-- project_admin: read and cancel requests belonging to its authorized project.
-- project_viewer: read requests belonging to its authorized project; no mutation.
-- cross-project opaque request IDs are non-enumerating for project-scoped callers.
-- project roles may not see requests with project_id = NULL.
+Preferred:
+- reuse the configured issuer/discovery/JWKS;
+- discover `device_authorization_endpoint` and `token_endpoint` from provider metadata;
+- the CLI/device client is public and has no embedded client secret.
 
-### Deployment-only operations
+Do not place the browser confidential-client secret into the Linux CLI.
 
-Require system_admin deployment authority plus admin:queue:*:
-- endpoint runtime/slot summaries;
-- pause/drain/resume endpoint dispatch;
-- global provider-quota runtime status;
-- outcome_unknown reconciliation.
+If the provider does not advertise a device authorization endpoint, return a stable
+device_flow_unavailable error.
 
-A project_admin must not gain deployment operator authority merely because its credential contains
-admin:queue:*.
+## 2. Gateway-mediated device transaction
 
-## 1. Scheduler operator service boundary
+The CLI talks to AetherGate, not directly to internal DB/auth state.
 
-Create a dedicated scheduler/operator administration service, e.g.:
-- src/aethergate/scheduler/admin.py
+Add:
+- POST /admin/v1/auth/device/start
+- POST /admin/v1/auth/device/poll
 
-It must:
-- accept typed AdminRequestContext;
-- authorize internally;
-- resolve project/deployment scope centrally;
-- use safe scheduler transition primitives rather than duplicating lifecycle logic in routers;
-- emit immutable safe audit events for mutations;
-- never decrypt inference content.
+### Start
 
-Routers remain thin.
+AetherGate:
+1. calls the configured provider device authorization endpoint;
+2. receives provider device_code/user_code/verification URI metadata;
+3. creates a short-lived durable AetherGate device transaction;
+4. returns to the CLI:
+   - user_code;
+   - verification_uri;
+   - verification_uri_complete when provider supplies it;
+   - expires_in;
+   - poll interval;
+   - the provider device_code or an equivalent high-entropy poll secret needed for subsequent poll.
 
-Refactor existing SchedulingService cancellation/reconciliation internals only as necessary so:
-- normal inference paths;
-- development reconcile CLI;
-- new admin API
-reuse the same transition implementation.
+Security:
+- raw device_code/poll secret is a bearer secret;
+- never log/audit it;
+- never put it in a URL generated by AetherGate;
+- if persisted, persist only a one-way verifier/hash;
+- preferred design: the CLI sends the raw device_code back on each poll; PostgreSQL stores only its
+  hash and safe transaction metadata.
 
-Do not maintain two subtly different cancellation/reconciliation state machines.
+### Poll
 
-## 2. Queue request metadata reads
+CLI POSTs the raw device polling secret in the JSON body.
 
-Add safe DTOs and endpoints:
+AetherGate:
+- hashes it to find the transaction;
+- enforces expiry and provider-recommended polling interval;
+- calls the provider token endpoint using the device authorization grant;
+- translates authorization_pending and slow_down safely;
+- on success validates the ID token:
+  - issuer;
+  - audience == device_client_id;
+  - signature/algorithm;
+  - expiry/not-before where applicable;
+  - subject required;
+- resolves the existing ExternalIdentity by issuer + subject;
+- requires active Principal/project;
+- does not grant roles from IdP claims;
+- creates a fresh AetherGate CLI session;
+- marks the device transaction consumed;
+- returns the raw AetherGate CLI session token exactly once.
 
-- GET /admin/v1/queue/requests
-- GET /admin/v1/queue/requests/{request_id}
+Unknown identity:
+- follow the same safe JIT policy as browser OIDC if JIT is enabled;
+- JIT may create only an unprivileged USER principal;
+- no role is inferred from email/domain/group/username.
 
-Bounded pagination, default 50 / max 200.
+## 3. Durable CLI sessions
 
-Filters at minimum:
-- project_id;
+Do not fake an ApiCredential for a human.
+
+Add a distinct durable CLI session model.
+
+Suggested:
+- CliSessionId;
 - principal_id;
-- api_credential_id;
-- model_alias_id;
-- endpoint_id;
-- state;
-- stream;
-- wait_reason;
-- created/queued time range as practical.
-
-Safe request metadata may include:
-- request_id;
-- project_id;
-- principal_id;
-- api_credential_id;
-- model_alias_id;
-- endpoint_id;
-- quota_group_id;
-- state;
-- stream;
-- queued_at;
-- started_at;
-- finished_at;
-- queue_wait_until;
+- token_hash;
+- created_at;
 - expires_at;
-- cancellation_requested;
-- wait_reason;
-- wait_limit_id;
-- wait_limit_metric;
-- next_eligible_at;
-- error_code;
-- price_snapshot_id;
-- reconciled_state;
-- reconciled_at;
-- reconciled_by;
-- worker_id and lease_expires_at if useful.
+- last_seen_at optional/throttled;
+- revoked_at;
+- safe device transaction / external identity reference if useful.
 
-Do NOT expose:
-- payload_encrypted;
-- result_encrypted;
-- decrypted prompt/completion;
-- stream-event content;
-- fencing_token;
-- provider secret material.
+Raw CLI session token:
+- >=256 bits CSPRNG;
+- use a distinct recognizable prefix, e.g. `ags_`;
+- returned once;
+- PostgreSQL stores only SHA-256 verifier/hash;
+- never logged/audited.
 
-### Effective waiting reason
+Session lifetime:
+- configurable;
+- finite;
+- safe default such as 8 or 12 hours;
+- no refresh token storage in the CLI or gateway in this phase;
+- expired login requires another device flow.
 
-A queued request must explain temporary endpoint operator holds even if the persisted scheduler
-wait_reason currently describes quota/budget state.
+Add:
+- GET /admin/v1/auth/cli/session or reuse whoami cleanly;
+- POST /admin/v1/auth/cli/logout.
 
-Prefer a computed safe field such as effective_wait_reason:
-- endpoint_paused when its endpoint operational state is paused;
-- endpoint_draining when draining;
-- otherwise the persisted wait_reason/capacity reason.
+Logout:
+- durably revokes current CLI session;
+- idempotent;
+- raw bearer token remains absent from logs/audit.
 
-Do not overwrite quota/budget historical wait metadata merely to display an operator hold.
+## 4. Admin authentication unification
 
-## 3. Queue summary
+Protected /admin/v1 endpoints must accept:
+- admin API credential (`agk_...`);
+- browser session cookie;
+- human CLI session Bearer (`ags_...` or chosen prefix).
 
-Implement:
-- GET /admin/v1/queue/summary
+Extend AdminAuthenticationKind with CLI_SESSION.
 
-Return safe operational counts for the caller's authorized scope:
-- counts by request state;
-- queued total;
-- in-flight total (reserved/dispatched/streaming);
-- outcome_unknown total;
-- oldest queued timestamp;
-- oldest wait duration or equivalent;
-- counts by effective wait reason where practical.
+AdminRequestContext:
+- principal_id/project_id;
+- active roles;
+- authentication_kind;
+- api_credential_id for service credential;
+- browser_session_id for browser session;
+- cli_session_id for CLI session;
+- service credential scopes only when applicable.
 
-Authorization:
-- system_admin => deployment-wide;
-- project roles => their authorized project(s) only.
+CLI sessions use the same Principal/RoleAssignment RBAC engine as browser sessions.
 
-Repeated reads must be side-effect free.
+Rules:
+- role revocation applies on the next CLI request;
+- principal/project deactivation applies immediately;
+- CLI session is admin-only and never authenticates /v1 inference;
+- invalid supplied Authorization never falls through to a browser cookie;
+- CLI bearer requests do not require browser CSRF.
 
-Do not add expensive unbounded scans; use aggregate SQL.
+## 5. Migration 0016
 
-## 4. Endpoint runtime / slot status
+Add linear migration 0016 for:
+- device authorization transactions;
+- CLI sessions;
+- indexes/constraints.
 
-Implement deployment-only:
-- GET /admin/v1/queue/endpoints
-- GET /admin/v1/queue/endpoints/{endpoint_id}
+Do not rewrite 0001-0015.
 
-Return:
-- endpoint_id/name;
-- catalog is_active;
-- operational_state;
-- max_concurrency;
-- occupied_slots from active physical reservations;
-- available_slots = max(0, max_concurrency - occupied_slots);
-- draining_complete or equivalent;
-- oldest queued work for the endpoint if useful.
+Required:
+- 0015 -> 0016 succeeds;
+- empty DB -> latest succeeds;
+- existing sessions/credentials remain unchanged;
+- raw device_code/session token/provider tokens are not stored;
+- device transaction is one-time/expiry constrained by application and DB shape where practical.
 
-Never count a released Reservation as occupied.
+## 6. Deterministic local device-flow IdP
 
-If occupied_slots > max_concurrency after an operator reduces configured capacity, report honestly and
-available_slots = 0; do not rewrite active reservations.
+Extend the existing deterministic local OIDC test provider to support device authorization:
 
-## 5. Durable endpoint operational state
+- discovery advertises device_authorization_endpoint;
+- device start returns device_code/user_code/verification URI;
+- a deterministic test helper can authorize a pending device code for a chosen subject;
+- token polling returns:
+  - authorization_pending before approval;
+  - slow_down when deliberately exercised if supported;
+  - signed ID token after approval;
+  - expired_token for expired transaction;
+- signed ID token validates through the same production verification path.
 
-Catalog Endpoint.is_active remains configuration/lifecycle state.
+No Internet IdP dependency and no real provider credentials in tests.
 
-Add a separate durable scheduling/operator state:
-- active
-- paused
-- draining
+## 7. Installable CLI entry point
 
-Recommended name:
-- EndpointOperationalState
+Add a console entry point, preferably:
 
-Semantics:
+`aethergate`
 
-### active
-Normal scheduler dispatch.
+via pyproject.toml.
 
-### paused
-- no new request may acquire endpoint capacity after the pause transaction commits;
-- already reserved/dispatched/streaming work is not killed;
-- queued work remains queued;
-- resume re-enables future dispatch.
+Use a mature CLI framework if useful (Click/Typer acceptable) but keep dependency weight reasonable.
 
-### draining
-- also prevents new capacity reservations;
-- existing in-flight work continues to terminal settlement;
-- draining_complete is true when active physical reservations reach zero;
-- state remains draining until an explicit resume (do not require a background state flip).
+The CLI must never import persistence/repository modules for normal product operations.
 
-Pause and drain intentionally share the "no new dispatch" gate; the distinction is operator intent and
-the runtime drained indicator.
+All product commands use HTTP /admin/v1.
 
-Do not model pause/drain by setting is_active=false. Catalog deactivation retains its existing
-resource-unavailable semantics.
+## 8. CLI profiles
 
-## 6. Migration 0015
+Implement profiles stored under XDG conventions, e.g.:
 
-Add linear migration 0015:
-- add endpoint operational state with default active for all existing endpoints;
-- DB CHECK / equivalent allows only active, paused, draining;
-- preserve all existing endpoint IDs/configuration;
-- 0014 -> 0015 succeeds;
-- empty DB -> latest succeeds.
+`~/.config/aethergate/config.toml`
 
-Do not rewrite 0001-0014.
-
-Update domain/entity/repository mappings and typed DTOs as needed.
-
-## 7. Scheduler pause/drain correctness
-
-The worker must not reserve capacity on a paused/draining endpoint.
-
-Correctness requirement:
-- after a pause/drain transaction commits, no later capacity reservation may be granted for that
-  endpoint until resume.
-
-Handle races safely:
-- scheduler must re-check endpoint operational_state under the same endpoint row lock used for
-  physical capacity admission, immediately before reserving;
-- a claim already holding the endpoint lock before pause may complete its reservation first; the
-  pause waits and then commits;
-- after pause commit, subsequent claims cannot reserve.
-
-Filtering paused/draining endpoints out of queue scans is an optimization, not the only correctness
-check.
-
-Add a real DB concurrency race test using barriers/events between:
-- worker claim/reserve;
-- operator pause/drain.
-
-No arbitrary sleeps as the correctness mechanism.
-
-## 8. Pause / drain / resume API
-
-Implement deployment-only mutations:
-
-- POST /admin/v1/queue/endpoints/{endpoint_id}/pause
-- POST /admin/v1/queue/endpoints/{endpoint_id}/drain
-- POST /admin/v1/queue/endpoints/{endpoint_id}/resume
+Profile fields:
+- name;
+- base URL;
+- trusted CA bundle path or system trust;
+- optional default output mode.
 
 Requirements:
-- system_admin + admin:queue:write;
-- project roles => 403;
-- missing endpoint => 404;
-- idempotent repeated same-state request;
-- transitions are durable across API/worker restart;
-- response returns current runtime status;
-- audit actual state changes only;
-- no-op repeat does not create misleading duplicate audit.
+- profile config contains no raw bearer token;
+- default profile support;
+- create/list/show/delete/set-default commands;
+- base URL validated;
+- HTTPS expected for production profiles;
+- explicit `--insecure` may exist only as a per-command dev/test escape hatch if strongly labeled
+  and never saved silently as production default;
+- trusted custom CA bundle supported.
 
-Suggested audit actions:
-- endpoint_dispatch.paused
-- endpoint_dispatch.draining
-- endpoint_dispatch.resumed
+No arbitrary proxying of secrets/headers.
 
-Browser-session mutation requires CSRF; Bearer mutation does not.
+## 9. Protected token storage
 
-## 9. Safe request cancellation
+Persistent admin/service tokens must not be stored in plaintext profile TOML.
 
-Implement:
-- POST /admin/v1/queue/requests/{request_id}/cancel
+Use a protected OS credential store on Linux, preferably Python `keyring` backed by Secret Service /
+KWallet where available.
 
-Use the existing scheduler cancellation semantics.
+Abstract storage behind a TokenStore interface so tests use an in-memory fake.
 
-Required state behavior:
-- queued => terminal cancelled immediately;
-- reserved/pre-dispatch => cancelled, release endpoint/quota/budget reservations, discard pre-dispatch
-  price snapshot as today;
-- dispatched/streaming => set cancellation_requested; do NOT claim upstream execution has already
-  stopped; owning worker settles safely;
-- already cancelled => idempotent success;
-- succeeded/failed/expired => stable conflict/no-op policy, document it;
-- outcome_unknown => do not pretend cancel resolves ambiguity; require reconciliation.
+Requirements:
+- human CLI session token stored under profile after successful login;
+- service-account admin credential may also be stored via explicit login/import;
+- logout deletes/revokes human session and removes local token;
+- profile delete removes its stored token;
+- no token printed in normal output.
 
-Return a typed result that distinguishes:
-- cancelled_now;
-- cancellation_requested;
-- already_cancelled;
-or an equally clear contract.
+If a usable protected keyring is unavailable:
+- fail safely with an actionable message;
+- optionally support an explicit ephemeral `--no-store` login for the current process if clean;
+- do not silently fall back to plaintext disk.
 
-Project authorization:
-- project_admin may cancel its own project's request;
-- project_viewer denied;
-- cross-project request ID => 404 for project-scoped caller.
+## 10. Service-account credential input
+
+For automation/admin service credentials support an explicit command, e.g.:
+
+- `aethergate auth set-token --stdin`
+- or interactive hidden prompt.
+
+Never accept raw admin/inference credentials as a normal CLI argv option.
+
+Requirements:
+- stdin/prompt only;
+- admin credential validated with /admin/v1/whoami before storage;
+- inference credentials rejected for admin CLI auth;
+- token never echoed/logged.
+
+Environment-variable token injection for CI may be supported if documented and if it overrides
+persistent storage only for the current process; do not persist it automatically.
+
+## 11. Output and exit-code contract
+
+Every command supports:
+- human-readable default output;
+- `--json` machine-readable JSON.
+
+Do not mix progress text into JSON stdout.
+
+Use stderr for human diagnostics.
+
+Define predictable non-zero exit codes, at minimum distinct categories for:
+- usage/validation error;
+- authentication required/expired;
+- authorization denied;
+- not found;
+- conflict/invalid lifecycle;
+- network/TLS failure;
+- server/internal failure.
+
+Document the mapping and test it.
+
+Never dump Python tracebacks by default.
+
+## 12. HTTP client behavior
+
+Implement one reusable typed-ish CLI HTTP client layer.
+
+Requirements:
+- profile base URL;
+- trusted CA;
+- Authorization injection from TokenStore/env;
+- JSON request/response;
+- structured AetherGate error parsing;
+- request timeout;
+- safe retries only for idempotent GETs on transport failures if you choose to add retries;
+- never retry state-changing POST/PATCH automatically;
+- user-agent with CLI version;
+- no sensitive headers in debug output.
+
+Handle 401:
+- clear an expired/revoked CLI session token when appropriate;
+- do not erase a service credential on one transient server error.
+
+## 13. CLI command coverage
+
+Implement enough coverage to make the CLI useful over the backend already built.
+
+### Core
+- `aethergate profile ...`
+- `aethergate auth login` (device flow)
+- `aethergate auth logout`
+- `aethergate auth whoami`
+
+### Projects / identities
+At minimum:
+- projects list/show/create/update;
+- principals list/show;
+- credentials list;
+- role assignments list.
+
+### Catalog
+At minimum:
+- providers list/show;
+- provider-accounts list/show;
+- endpoints list/show;
+- model-aliases list/show;
+- route-bindings list/show.
+
+Provide create/update for at least providers/endpoints/model aliases/routes if clean; otherwise
+document that write expansion is a follow-up CLI coverage task. Do not use a generic unsafe
+"POST arbitrary JSON to arbitrary path" escape hatch.
+
+### Accounting
+At minimum:
+- price-policies list/show;
+- budgets list/show/status;
+- usage list/show;
+- ledger list/show;
+- audit list/show.
+
+### Queue/operator
+At minimum:
+- queue list/show/summary;
+- endpoints runtime list/show;
+- queue cancel;
+- endpoint pause/drain/resume;
+- outcome-unknown list;
+- reconcile;
+- quota-status.
+
+Critical operator mutations must require normal RBAC and never bypass server checks.
+
+## 14. Shell completion
+
+Provide shell-completion support for at least bash/zsh/fish via the selected CLI framework or
+documented generated completion command.
+
+Do not require root installation.
+
+Add tests that the completion command can render without contacting the server.
+
+## 15. Version / package behavior
+
+CLI version comes from package metadata and matches `aethergate.__version__` if that convention
+already exists.
+
+Do not perform an unrelated SemVer release/tag.
+
+Ensure:
+- editable/installable package exposes the console command;
+- `aethergate --version` works without server access;
+- `aethergate --help` works without server access.
+
+## 16. Device-flow audit safety
 
 Audit:
-- immediate cancellation vs cancellation request should be distinguishable;
-- actor principal/project/resource ID;
-- no content.
+- device login success may record resulting principal/session ID;
+- CLI logout/revoke may be audited;
+- fixed safe failure categories only if useful.
 
-## 10. outcome_unknown reads and reconciliation
-
-Implement deployment-only:
-- GET /admin/v1/queue/outcome-unknown
-- POST /admin/v1/queue/requests/{request_id}/reconcile
-
-Reconcile body:
-- disposition = failed | cancelled
-
-Do NOT accept:
-- succeeded;
-- arbitrary operator identity from client input.
-
-Use authenticated context.principal_id as reconciled_by/audit actor.
-
-Preserve existing reconciliation semantics:
-- physical reservation released only through the established reconcile path;
-- quota/accounting behavior remains conservative;
-- held budget reservation commits conservatively with settlement reason;
-- no UsageRecord is fabricated without trustworthy usage;
-- result content is not invented.
-
-Repeat reconciliation:
-- must not double release or double commit accounting;
-- return stable conflict/idempotent result according to existing lifecycle semantics.
-
-Project admins may read their own request metadata through the general queue read API, but
-reconciliation itself is system_admin-only because it resolves deployment capacity and ambiguous
-provider outcome.
-
-## 11. Provider quota runtime status
-
-Expose deployment-only read:
-- GET /admin/v1/queue/quota-status
-
-This is runtime inspection, not configuration CRUD.
-
-For each configured quota limit/current persisted window where applicable, expose safe metadata:
-- quota_group_id/name;
-- provider_account_id;
-- quota_limit_id/name;
-- metric;
-- limit_units;
-- window_seconds;
-- current window_start/window_end;
-- committed_units;
-- reserved_units;
-- remaining = max(0, limit - committed - reserved);
-- enabled;
-- group cooldown_until.
-
-Do not create fake QuotaWindow rows just for a read.
-If no current window exists, report zero committed/reserved computed state.
-
-Project roles do not see provider-account quota topology in this phase.
-
-Project budget headroom remains served by the accounting API; do not duplicate it here.
-
-## 12. Audit queue/operator mutations
-
-Emit immutable safe events for actual transitions:
-- request.cancelled
-- request.cancellation_requested
-- request.reconciled
-- endpoint_dispatch.paused
-- endpoint_dispatch.draining
-- endpoint_dispatch.resumed
-
-For request events use project_id when present so project audit readers can see appropriate events.
-Endpoint operational events are deployment-scoped.
-
-Never include:
-- prompt/completion content;
-- encrypted payload/result;
-- stream chunks;
-- API/OIDC/session/CSRF/provider secrets;
-- fencing tokens.
-
-## 13. Error translation
-
-Stable admin errors for:
-- request/endpoint not found;
-- cross-project non-enumeration;
-- invalid lifecycle transition;
-- reconcile non-outcome_unknown;
-- invalid reconcile disposition;
-- unauthorized deployment operation.
-
-Do not expose SQL, stack traces, raw provider errors, or internal encryption data.
-
-## 14. Existing development tools
-
-inspect_queue.py and reconcile.py may remain for development/offline operations, but:
-- normal product administration uses /admin/v1;
-- reconcile.py should reuse the same scheduler transition primitive where practical;
-- do not make the CLI module an HTTP client yet; Linux product CLI is the next workstream.
-
-Document the distinction.
-
-## 15. What is intentionally NOT in this task
-
-Do not implement:
-- force-kill of upstream inference;
-- fabricated success reconciliation;
-- automatic retry of outcome_unknown;
-- priority/fairness queue reordering;
-- queue item manual reordering;
-- provider retry orchestration not already present;
-- TTFT/latency percentile metrics if the required timestamp instrumentation is not already reliable;
-- upstream health probing subsystem;
-- Linux product CLI;
-- web console;
-- Responses API;
-- embeddings;
-- v1 migration.
-
-Those can be separate tasks. This milestone provides the reliable operator control surface they need.
+Never log/audit:
+- device_code;
+- user_code if treated as authentication material;
+- provider access token;
+- ID token;
+- raw CLI session token;
+- API credential;
+- Authorization header.
 
 ## Real nomnom Verification — Required
 
-Use dynamic API ports, the real internal Ollama backend, and inference auth bypass false.
+Use dynamic API ports and a fresh deterministic local IdP with device support.
 
-### A. Queue inspection / explanation
+### A. WIP marker
+At the beginning of the task:
+- prove `.aethergate-wip` exists locally;
+- prove `git check-ignore .aethergate-wip` succeeds;
+- prove it is absent from staged/tracked files.
 
-With endpoint max_concurrency=2:
-- submit six concurrent real requests;
-- observe queued + in-flight states through /admin/v1/queue/requests;
-- queue summary counts are coherent;
-- endpoint runtime reports occupied <= 2 and correct available slots;
-- request payload/completion content is absent from all operator DTOs.
+Do not remove it until the very end.
 
-### B. Project queue RBAC
+### B. Package / profile
+On a Linux environment:
+- install package/CLI;
+- `aethergate --version`;
+- create profile for live AetherGate;
+- custom CA/system CA behavior exercised as practical;
+- profile TOML contains no token.
 
-Projects A and B:
-- system_admin sees both;
-- project_admin(A) sees A requests only;
-- project_viewer(A) sees A requests read-only;
-- A caller querying B request ID => 404;
-- project_admin(A) cannot use deployment endpoint/quota operator endpoints.
+### C. Human device login
+- start device login through CLI;
+- CLI displays verification URL + user code without leaking device_code;
+- IdP initially returns authorization_pending;
+- authorize system_admin subject in local IdP;
+- polling succeeds;
+- raw CLI session token is stored only in protected test keyring / memory fake, not config;
+- `aethergate auth whoami --json` reports authentication_kind=cli_session and system_admin role.
 
-### C. Pause live behavior
+### D. Device negative cases
+- expired device transaction;
+- unknown/unlinked identity with JIT off;
+- invalid/replayed/consumed device code;
+- provider slow_down/poll interval enforcement;
+- provider ID token audience/issuer failure;
+- no CLI session created for failures.
 
-- pause endpoint while workers are running;
-- after pause commits, no new reservation/dispatch begins;
-- already in-flight request(s) complete normally;
-- queued requests remain queued;
-- queue read explains endpoint_paused;
-- restart API/worker and prove pause persists;
-- resume;
-- queued work begins dispatching again.
-
-### D. Drain live behavior
-
-- create in-flight + queued work;
-- drain endpoint;
-- no new reservations after drain commit;
-- current in-flight work completes;
-- runtime reports draining_complete once occupied_slots reaches zero;
-- queued work remains held;
-- resume dispatches it.
-
-### E. Pause/claim race
-
-Use a controlled concurrency harness:
-- worker claim/reservation races operator pause;
-- prove lock semantics: either reservation commits before pause, or pause wins and claim does not
-  reserve afterward;
-- never observe a capacity reservation created after the pause commit boundary.
-
-### F. Queued cancellation
-
-Cancel queued request:
-- immediately cancelled;
-- never contacts upstream;
-- no endpoint/quota/budget reservation survives;
-- no usage/ledger record.
-
-### G. Reserved pre-dispatch cancellation
-
-Exercise real reserved state:
-- cancel;
-- endpoint/quota/budget reservations released;
-- pre-dispatch price snapshot discarded;
-- no upstream call;
-- queue API shows cancelled.
-
-### H. In-flight cancellation
-
-For a controlled slow real/test adapter request:
-- cancel after durable dispatch intent;
-- response clearly says cancellation_requested rather than claiming upstream was killed;
-- worker settles according to established safe semantics;
-- no duplicate settlement.
-
-### I. outcome_unknown reconciliation
-
-Create a real controlled ambiguous outcome via worker lease loss/death after durable dispatch intent.
+### E. RBAC continuity
+Create human project_admin(A) and project_viewer(A) device logins.
 
 Prove:
-- request becomes outcome_unknown;
-- physical slot stays occupied before reconciliation;
-- outcome_unknown API shows safe metadata only;
-- project_admin cannot reconcile;
-- system_admin reconcile failed/cancelled succeeds;
-- slot releases only after reconciliation;
-- budget reservation commits conservatively;
-- no fabricated UsageRecord;
-- repeated reconcile does not double-release/double-commit;
-- succeeded disposition rejected.
+- project_admin reads/writes permitted project resources;
+- project_admin cannot see B;
+- project_viewer reads but cannot mutate;
+- revoke role during active CLI session -> next command denied without relogin;
+- deactivate principal/project -> next command denied.
 
-### J. Quota runtime status
+### F. Operator workflow
+Using CLI session as system_admin:
+- queue summary;
+- queue list;
+- endpoint runtime;
+- pause -> resume;
+- outcome_unknown list and controlled reconcile;
+- JSON outputs parse cleanly.
 
-With a request quota:
-- status shows configured limit/window;
-- committed/reserved values track real admission;
-- cooldown metadata remains visible when set;
-- read creates no fake window history.
+### G. Service credential workflow
+- import admin service credential through stdin/hidden prompt;
+- whoami succeeds;
+- inference-audience credential is rejected for admin CLI;
+- no raw key appears in shell argv/process command line/logs/config.
 
-### K. Browser RBAC/CSRF
+### H. Token persistence/logout
+- stored human CLI token survives a new CLI process via protected token-store test backend or real
+  available keyring;
+- logout revokes server session and removes local token;
+- replay old token fails;
+- profile delete removes local token entry.
 
-With deterministic local OIDC provider:
-- human system_admin can pause/resume and reconcile with correct CSRF;
-- missing/wrong CSRF => 403;
-- human project_admin can cancel own queued request with correct CSRF;
-- project_viewer mutation => 403;
-- Bearer system_admin operations remain CSRF-exempt.
+### I. TLS/network/error exits
+Prove:
+- unreachable server -> documented network exit code;
+- unauthorized -> auth exit code;
+- forbidden -> authorization exit code;
+- not found -> not-found exit code;
+- conflict -> conflict exit code;
+- JSON mode emits only valid JSON on stdout.
 
-### L. Regression
-
+### J. Existing backend regression
 Re-run:
-- six-request/two-slot scheduler regression;
-- dead-worker/outcome_unknown regression;
-- quota/accounting settlement;
-- catalog route invariants;
-- OIDC browser binding/logout;
-- official OpenAI Python SDK non-stream + stream inference.
+- full containerized test suite;
+- OIDC browser auth + CSRF;
+- queue/operator tests;
+- catalog/accounting admin tests;
+- official OpenAI Python SDK non-stream + stream with inference auth bypass false.
 
 ## Automated Tests
 
 Add deterministic coverage for at least:
 
-1. service-layer queue authorization cannot be bypassed;
-2. project queue list filtering;
-3. cross-project request ID non-enumeration;
-4. queue request DTO contains no content/encrypted fields/fencing token;
-5. queue summary counts/stable scope;
-6. endpoint runtime occupied/available calculation;
-7. operational state default active;
-8. pause prevents new reserve;
-9. draining prevents new reserve;
-10. existing in-flight work not killed by pause/drain;
-11. resume restores dispatch;
-12. operational state survives service restart/DB reload;
-13. pause-vs-claim true concurrency race;
-14. repeated pause/drain/resume idempotency/audit behavior;
-15. queued cancellation;
-16. reserved cancellation releases physical/quota/accounting state;
-17. dispatched cancellation only requests cancellation;
-18. already-cancelled idempotency;
-19. terminal succeeded/failed/expired cancellation contract;
-20. outcome_unknown cannot use cancel as fake reconciliation;
-21. outcome_unknown list safe metadata;
-22. reconcile only failed/cancelled;
-23. reconciliation uses authenticated principal ID;
-24. project role cannot reconcile;
-25. reconciliation releases held slot exactly once;
-26. reconciliation conservative budget settlement exactly once;
-27. reconciliation creates no fabricated usage;
-28. quota runtime zero-state read without row creation;
-29. quota runtime committed/reserved/cooldown values;
-30. browser CSRF on operator mutation;
-31. Bearer operator mutation CSRF-exempt;
-32. audit events safe/no content/secrets;
-33. migration 0014 -> 0015;
-34. empty DB -> latest;
-35. existing 402-test baseline remains green or higher;
-36. official SDK inference regressions remain green.
+1. device config/discovery validation;
+2. missing device endpoint => stable unavailable;
+3. device transaction raw code not persisted;
+4. device poll pending;
+5. device slow_down/interval enforcement;
+6. device expiry;
+7. one-time consumption/replay rejection;
+8. ID-token issuer/audience/signature/expiry validation;
+9. unknown identity/JIT policy;
+10. CLI session raw token not persisted;
+11. CLI session expiry/revocation;
+12. role revocation reflected next request;
+13. project/principal deactivation reflected next request;
+14. CLI session rejected on inference surface;
+15. service admin credential remains supported;
+16. browser session behavior unchanged;
+17. migration 0015 -> 0016;
+18. empty DB -> latest;
+19. profile CRUD;
+20. token absent from config file;
+21. keyring TokenStore fake;
+22. keyring-unavailable fail-safe;
+23. service credential stdin/prompt path;
+24. secret rejected from argv if such option is attempted;
+25. HTTP error -> exit-code mapping;
+26. JSON stdout purity;
+27. trusted CA wiring;
+28. no automatic retry of mutations;
+29. CLI whoami;
+30. representative project/catalog/accounting commands;
+31. queue pause/resume/cancel/reconcile commands;
+32. shell completion generation;
+33. CLI help/version offline;
+34. secret/token/log canary scan;
+35. existing 425-test baseline remains green or higher;
+36. official SDK regressions remain green.
 
 ## Migration
 
-Add migration 0015 for Endpoint operational state.
+Add migration 0016.
 
-Do not rewrite migrations 0001-0014.
+Do not rewrite 0001-0015.
 
 Verify:
-- 0014 -> 0015;
+- 0015 -> 0016;
 - empty DB -> latest;
-- existing endpoint rows become active;
-- invalid operational state rejected;
-- downgrade is explicit/reasonable.
+- existing browser sessions/API credentials remain valid;
+- no raw OAuth/provider/session secrets are introduced.
 
 ## Documentation
 
 Update:
-- docs/architecture/scheduler.md
+- docs/architecture/security.md
 - docs/architecture/admin-api.md
+- add docs/cli.md or equivalent living CLI document
 - docs/contracts/domain-model.md
 - docs/contracts/admin-v1-foundation.md
 - docs/development/README.md
 - docs/development/agent-handoff.md
+- README.md if installation entry point belongs there
 
 Document:
-- safe queue metadata contract;
-- project/deployment queue authorization;
-- endpoint operational state vs catalog is_active;
-- pause/drain/resume semantics;
-- cancellation truthfulness;
-- outcome_unknown reconciliation;
-- quota runtime status;
-- audit behavior;
-- migration 0015.
+- device-flow trust model;
+- CLI session vs API credential vs browser session;
+- profiles;
+- protected token storage;
+- trusted CA;
+- JSON/output/exit code contract;
+- command coverage;
+- service-token stdin/prompt handling;
+- WIP marker remained local and was removed only after completion.
 
 Do not modify the dated architecture audit.
+
+## Still Deferred
+
+Do not implement:
+- web console;
+- SAML;
+- SCIM;
+- IdP group-to-role mapping;
+- multiple OIDC providers;
+- plaintext fallback token store;
+- arbitrary admin-path passthrough command;
+- v1 migration;
+- Responses API;
+- embeddings;
+- production secret backend choice;
+- release/tagging.
+
+## Verification Before Commit
+
+- full containerized suite;
+- CLI deterministic tests;
+- device-flow tests;
+- migration 0015 -> 0016;
+- empty DB -> latest;
+- ruff/lint;
+- git diff --check;
+- secret/token/content canary scan;
+- no token in profile/argv/logs;
+- legacy v1 untouched;
+- dated audit unchanged;
+- all required live nomnom scenarios complete.
 
 ## Handoff
 
 Include:
 - implementation commit(s);
-- migration revision;
-- endpoints added;
-- queue DTO safe-field list;
-- authorization/scoping;
-- pause/drain lock semantics;
-- cancellation state semantics;
-- reconciliation/accounting semantics;
-- live six/two proof;
-- live pause/drain + restart proof;
-- live outcome_unknown proof;
-- browser CSRF proof;
+- migration 0016;
+- device-flow architecture;
+- provider/client configuration;
+- CLI session model/lifetime;
+- token-storage model;
+- profile/TLS behavior;
+- command coverage;
+- JSON/exit-code contract;
+- local IdP device verification;
+- RBAC/revocation proof;
+- operator workflow proof;
+- service credential stdin proof;
 - final test count;
 - dynamic API/IdP ports;
-- backend/model;
 - issues/risks;
 - exactly one recommended next step.
 
-Never include API/bootstrap/OIDC/session/CSRF/provider secrets, prompt/completion content, encrypted
-payload/result bytes, stream chunks, or large logs.
+Never include raw device codes, user codes if sensitive, OIDC/provider tokens, CLI session tokens,
+API credentials, bootstrap/session/CSRF secrets, prompt/completion content, or large logs.
+
+## Completion / WIP Marker Removal
+
+The task is not complete until every stated criterion is green and origin/v2 contains the
+implementation, migration, tests, docs, and updated handoff.
+
+After:
+1. final verification passes;
+2. handoff is committed;
+3. all commits are pushed to origin/v2;
+4. origin/v2 is verified to contain the final commits;
+
+then and only then remove local `.aethergate-wip`.
+
+Finally verify:
+- `.aethergate-wip` no longer exists;
+- it was never tracked/staged/committed.
 
 ## Commit and Push
 
 Suggested primary commit:
-`feat(admin): add queue and operator control plane`
+`feat(cli): add device login and Linux admin client`
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to commit/push.
-
-The task is complete only when every stated automated/live criterion is green and origin/v2 contains
-the implementation and updated handoff.
