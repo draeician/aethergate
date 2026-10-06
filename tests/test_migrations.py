@@ -428,3 +428,28 @@ def test_migration_0013_to_0014() -> None:
         )
     finally:
         asyncio.run(drop_database(url))
+
+
+def test_migration_0014_to_0015() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1415")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0014", env=env)
+        assert "operational_state" not in _columns(url, "endpoints")
+        assert "ck_endpoints_operational_state" not in _check_constraints(url, "endpoints")
+
+        _run_alembic("upgrade", "head", env=env)
+        assert "operational_state" in _columns(url, "endpoints")
+        assert "operational_state" not in _nullable_columns(url, "endpoints")
+        assert "ck_endpoints_operational_state" in _check_constraints(url, "endpoints")
+
+        # Explicit downgrade is reasonable.
+        _run_alembic("downgrade", "0014", env=env)
+        assert "operational_state" not in _columns(url, "endpoints")
+    finally:
+        asyncio.run(drop_database(url))
