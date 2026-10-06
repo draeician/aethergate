@@ -49,6 +49,8 @@ async def _run_once(worker_id: str, service) -> str:
         return "quota"
     if outcome == "budget":
         return "budget"
+    if outcome == "paused":
+        return "paused"
     return "idle"
 
 
@@ -68,7 +70,7 @@ async def run(
             result = await _run_once(worker_id, service)
             if once:
                 return
-            if result in ("idle", "full", "quota", "budget"):
+            if result in ("idle", "full", "quota", "budget", "paused"):
                 await asyncio.sleep(poll_interval)
             # "dispatched"/"processed" loop again immediately to drain the queue.
         except asyncio.CancelledError:

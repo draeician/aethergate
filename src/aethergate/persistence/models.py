@@ -345,6 +345,10 @@ class Endpoint(Base, TimestampMixin):
     __tablename__ = "endpoints"
     __table_args__ = (
         CheckConstraint("max_concurrency >= 1", name="ck_endpoints_max_concurrency_positive"),
+        CheckConstraint(
+            "operational_state IN ('active', 'paused', 'draining')",
+            name="ck_endpoints_operational_state",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
@@ -357,6 +361,9 @@ class Endpoint(Base, TimestampMixin):
         Integer, nullable=False, default=1, server_default="1"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    operational_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active", server_default="active"
+    )
 
 
 class QuotaGroup(Base, TimestampMixin):

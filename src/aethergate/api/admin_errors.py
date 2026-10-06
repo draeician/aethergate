@@ -29,6 +29,7 @@ from aethergate.errors import (
     OidcConfigurationError,
     OidcLoginStateInvalid,
     PricePolicyConflictError,
+    QueueTransitionError,
     SessionInvalid,
 )
 
@@ -236,6 +237,17 @@ async def price_policy_conflict_error_handler(
     )
 
 
+async def queue_transition_error_handler(
+    request: Request, exc: QueueTransitionError
+) -> JSONResponse:
+    return _admin_error(
+        409,
+        exc.detail,
+        str(exc),
+        get_gateway_request_id(request),
+    )
+
+
 __all__ = [
     "admin_auth_error_handler",
     "admin_authorization_error_handler",
@@ -254,4 +266,5 @@ __all__ = [
     "catalog_parent_mismatch_error_handler",
     "catalog_destination_denied_error_handler",
     "price_policy_conflict_error_handler",
+    "queue_transition_error_handler",
 ]

@@ -20,6 +20,7 @@ from aethergate.domain.enums import (
     Capability,
     CredentialAudience,
     CredentialScope,
+    EndpointOperationalState,
     LedgerEntryType,
     PrincipalKind,
     QuotaMetric,
@@ -426,6 +427,7 @@ def _endpoint_to_domain(row: models.Endpoint) -> domain.Endpoint:
         base_destination=row.base_destination,
         max_concurrency=row.max_concurrency,
         is_active=row.is_active,
+        operational_state=EndpointOperationalState(row.operational_state),
     )
 
 
@@ -437,6 +439,7 @@ async def create_endpoint(session: AsyncSession, entity: domain.Endpoint) -> dom
         base_destination=entity.base_destination,
         max_concurrency=entity.max_concurrency,
         is_active=entity.is_active,
+        operational_state=entity.operational_state.value,
     )
     session.add(row)
     await session.flush()

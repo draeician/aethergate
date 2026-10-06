@@ -203,6 +203,20 @@ class QueueTimeout(DomainError):
     """A queued request expired before it could be dispatched or completed."""
 
 
+class QueueTransitionError(DomainError):
+    """A queue operator action cannot apply to a request in its current state.
+
+    Raised by the operator control plane for deterministic 409 responses: e.g.
+    cancelling an already-terminal request, or reconciling a request that is not
+    ``outcome_unknown``. ``detail`` is a stable machine keyword
+    (``invalid_transition``), never request content.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"invalid queue transition: {detail}")
+        self.detail = detail
+
+
 class SchedulerInvariantError(Exception):
     """A coupled scheduler state transition failed atomically (internal invariant).
 

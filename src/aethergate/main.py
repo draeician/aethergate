@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from aethergate import __version__
-from aethergate.api import accounting_admin, admin_errors, catalog_admin, session_auth
+from aethergate.api import accounting_admin, admin_errors, catalog_admin, queue_admin, session_auth
 from aethergate.api import admin as admin_api
 from aethergate.api.deps import get_gateway_request_id
 from aethergate.api.health import router as health_router
@@ -32,6 +32,7 @@ from aethergate.errors import (
     OidcConfigurationError,
     OidcLoginStateInvalid,
     PricePolicyConflictError,
+    QueueTransitionError,
     SessionInvalid,
 )
 
@@ -42,6 +43,7 @@ app.include_router(chat_router)
 app.include_router(admin_api.router)
 app.include_router(catalog_admin.router)
 app.include_router(accounting_admin.router)
+app.include_router(queue_admin.router)
 app.include_router(session_auth.router)
 
 app.add_exception_handler(DomainError, domain_error_handler)
@@ -89,6 +91,9 @@ app.add_exception_handler(
 )
 app.add_exception_handler(
     PricePolicyConflictError, admin_errors.price_policy_conflict_error_handler
+)
+app.add_exception_handler(
+    QueueTransitionError, admin_errors.queue_transition_error_handler
 )
 
 

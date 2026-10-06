@@ -651,6 +651,124 @@ class AuditEventRead(ContractModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+# --- Queue / operator control plane ------------------------------------------
+
+
+class QueueRequestRead(ContractModel):
+    """Safe queue request metadata (never prompt/completion/stream content).
+
+    Explicitly omits ``payload_encrypted``, ``result_encrypted``, stream-event
+    bodies, ``fencing_token``, and any provider secret material.
+    """
+
+    request_id: RequestId
+    project_id: ProjectId | None = None
+    principal_id: PrincipalId | None = None
+    api_credential_id: ApiCredentialId | None = None
+    model_alias_id: ModelAliasId
+    endpoint_id: EndpointId | None = None
+    quota_group_id: QuotaGroupId | None = None
+    state: str
+    stream: bool
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    queue_wait_until: datetime | None = None
+    expires_at: datetime | None = None
+    cancellation_requested: bool
+    wait_reason: str | None = None
+    wait_limit_id: str | None = None
+    wait_limit_metric: str | None = None
+    next_eligible_at: datetime | None = None
+    error_code: str | None = None
+    price_snapshot_id: PriceSnapshotId | None = None
+    reconciled_state: str | None = None
+    reconciled_at: datetime | None = None
+    reconciled_by: str | None = None
+    worker_id: str | None = None
+    lease_expires_at: datetime | None = None
+    effective_wait_reason: str | None = None
+
+
+class QueueSummaryRead(ContractModel):
+    """Side-effect-free operational counts for the caller's authorized scope."""
+
+    counts_by_state: dict[str, int]
+    queued_total: int
+    in_flight_total: int
+    outcome_unknown_total: int
+    oldest_queued_at: datetime | None = None
+    oldest_wait_seconds: int | None = None
+
+
+class EndpointRuntimeRead(ContractModel):
+    """Runtime/slot status for one endpoint (deployment-scoped).
+
+    ``operational_state`` is the durable scheduler/operator state
+    (``active``/``paused``/``draining``), distinct from catalog ``is_active``.
+    """
+
+    endpoint_id: EndpointId
+    name: str
+    is_active: bool
+    operational_state: str
+    max_concurrency: int
+    occupied_slots: int
+    available_slots: int
+    draining_complete: bool
+    oldest_queued_at: datetime | None = None
+
+
+class CancelResult(ContractModel):
+    """Result of a safe request cancellation.
+
+    ``result`` is one of ``cancelled_now``, ``cancellation_requested``, or
+    ``already_cancelled``. A terminal-state request and an ``outcome_unknown``
+    request return ``409 invalid_transition`` rather than a result.
+    """
+
+    request_id: RequestId
+    result: str
+    state: str
+
+
+class ReconcileRequest(ContractModel):
+    """Reconciliation disposition. Only ``failed``/``cancelled`` are accepted."""
+
+    disposition: str
+
+
+class ReconcileResult(ContractModel):
+    request_id: RequestId
+    disposition: str
+    reconciled_by: str
+
+
+class QuotaStatusRead(ContractModel):
+    """Runtime provider-quota status for one limit (deployment-scoped).
+
+    A read never fabricates a ``QuotaWindow`` row; absent current window reports
+    zero committed/reserved. ``remaining_units = max(0, limit - committed -
+    reserved)``.
+    """
+
+    quota_group_id: QuotaGroupId
+    quota_group_name: str
+    provider_account_id: ProviderAccountId
+    quota_limit_id: QuotaLimitId
+    quota_limit_name: str | None = None
+    metric: str
+    limit_units: int
+    window_seconds: int
+    window_start: datetime
+    window_end: datetime
+    committed_units: int
+    reserved_units: int
+    remaining_units: int
+    enabled: bool
+    cooldown_until: datetime | None = None
+
+
 __all__ = [
     "ProjectCreate",
     "ProjectRead",
@@ -710,4 +828,11 @@ __all__ = [
     "UsageRecordRead",
     "LedgerEntryRead",
     "AuditEventRead",
+    "QueueRequestRead",
+    "QueueSummaryRead",
+    "EndpointRuntimeRead",
+    "CancelResult",
+    "ReconcileRequest",
+    "ReconcileResult",
+    "QuotaStatusRead",
 ]

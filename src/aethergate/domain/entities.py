@@ -21,6 +21,7 @@ from aethergate.domain.enums import (
     Capability,
     CredentialAudience,
     CredentialScope,
+    EndpointOperationalState,
     LedgerEntryType,
     PrincipalKind,
     QuotaMetric,
@@ -284,6 +285,7 @@ class Endpoint(Entity):
     base_destination: str
     max_concurrency: int = 1
     is_active: bool = True
+    operational_state: EndpointOperationalState = EndpointOperationalState.ACTIVE
 
     @field_validator("max_concurrency")
     @classmethod

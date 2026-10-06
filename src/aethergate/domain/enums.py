@@ -156,6 +156,19 @@ class BudgetReservationState(StrEnum):
     RELEASED = "released"
 
 
+class EndpointOperationalState(StrEnum):
+    """Durable scheduler/operator state of an endpoint's dispatch.
+
+    Distinct from catalog ``Endpoint.is_active`` (configuration/lifecycle).
+    ``active`` is normal dispatch; ``paused`` and ``draining`` gate new capacity
+    reservations while leaving existing in-flight work to settle.
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    DRAINING = "draining"
+
+
 __all__ = [
     "Capability",
     "BillingUnit",
@@ -171,4 +184,5 @@ __all__ = [
     "QuotaMetric",
     "QuotaReservationState",
     "BudgetReservationState",
+    "EndpointOperationalState",
 ]

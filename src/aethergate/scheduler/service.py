@@ -27,7 +27,12 @@ from aethergate.catalog.service import (
 )
 from aethergate.config import Settings
 from aethergate.domain.entities import RequestContext
-from aethergate.domain.enums import BillingUnit, QuotaMetric, RequestState
+from aethergate.domain.enums import (
+    BillingUnit,
+    EndpointOperationalState,
+    QuotaMetric,
+    RequestState,
+)
 from aethergate.domain.ids import (
     ApiCredentialId,
     ExecutionAttemptId,
@@ -268,6 +273,109 @@ def _error_hint(exc: BaseException) -> str:
     return "dispatch_error"
 
 
+# --- shared scheduler transition primitives ---------------------------------
+#
+# These session-bound functions are the single implementation of the
+# cancellation and reconciliation state machines. The inference scheduler, the
+# development reconcile CLI, and the operator admin API all call them, so there
+# is no second, subtly different lifecycle to drift out of sync.
+
+
+async def _release_pre_dispatch_accounting(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    snapshot_id: str | None,
+    now: datetime,
+) -> None:
+    """Release budget and discard the pre-dispatch snapshot for a request that
+    never reached durable dispatch intent (so no orphan snapshot survives)."""
+    await accounting_repository.release_budget_reservations(
+        session, request_id=request_id, now=now
+    )
+    if snapshot_id is not None:
+        await scheduler_repository.clear_price_snapshot_reference(session, request_id)
+        await accounting_repository.discard_price_snapshot(session, snapshot_id=snapshot_id)
+
+
+async def cancel_request_transition(
+    session: AsyncSession, request_id: str, now: datetime
+) -> tuple[str, str | None]:
+    """Apply safe cancellation within an existing transaction.
+
+    Returns ``(outcome, state)`` where ``outcome`` is one of ``cancelled_now``,
+    ``cancellation_requested``, ``already_cancelled``, ``terminal``,
+    ``outcome_unknown``, or ``not_found``, and ``state`` is the request's
+    resulting (or current) state. Only non-terminal, non-ambiguous states are
+    mutated; the caller owns the surrounding transaction and must commit.
+    """
+    row = await scheduler_repository.get_request_for_update(session, request_id)
+    if row is None:
+        return "not_found", None
+    if row.state == RequestState.CANCELLED:
+        return "already_cancelled", RequestState.CANCELLED
+    if row.state == RequestState.OUTCOME_UNKNOWN:
+        return "outcome_unknown", RequestState.OUTCOME_UNKNOWN
+    if row.state in (
+        RequestState.SUCCEEDED,
+        RequestState.FAILED,
+        RequestState.EXPIRED,
+    ):
+        return "terminal", row.state
+    if row.state == RequestState.QUEUED:
+        row.state = RequestState.CANCELLED
+        row.cancellation_requested = True
+        row.finished_at = now
+        return "cancelled_now", RequestState.CANCELLED
+    if row.state == RequestState.RESERVED:
+        row.state = RequestState.CANCELLED
+        row.cancellation_requested = True
+        row.finished_at = now
+        await scheduler_repository.release_active_reservation(session, request_id, now)
+        await scheduler_repository.abandon_reserved_attempts(session, request_id, now)
+        await scheduler_repository.release_quota_reservations(
+            session, request_id=request_id, now=now
+        )
+        await _release_pre_dispatch_accounting(
+            session, request_id=request_id, snapshot_id=row.price_snapshot_id, now=now
+        )
+        return "cancelled_now", RequestState.CANCELLED
+    # dispatched / streaming: flag for the owning worker; do not claim upstream
+    # execution has already stopped.
+    await scheduler_repository.set_cancellation_requested(session, request_id)
+    return "cancellation_requested", row.state
+
+
+async def reconcile_transition(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    disposition: str,
+    operator: str,
+    now: datetime,
+) -> bool:
+    """Explicitly reconcile an ``outcome_unknown`` request within a transaction.
+
+    ``disposition`` must be in :data:`RECONCILABLE_STATES` (``failed``/
+    ``cancelled``). The held reservation is released and the budget reservation
+    is conservatively committed through the established reconciliation path.
+    """
+    if disposition not in RECONCILABLE_STATES:
+        raise ValueError(f"disposition must be one of {sorted(RECONCILABLE_STATES)}")
+    result = await scheduler_repository.reconcile_request(
+        session,
+        request_id=request_id,
+        disposition=disposition,
+        operator=operator,
+        now=now,
+    )
+    if result:
+        await accounting_repository.commit_budget_reservations_conservative(
+            session, request_id=request_id, now=now, reason=disposition
+        )
+    return result
+
+
 class SchedulingService:
     """Orchestrates admission, durable queueing, dispatch, and recovery."""
 
@@ -376,30 +484,20 @@ class SchedulingService:
         now = utcnow()
         async with self._session_factory() as session:
             async with session.begin():
-                row = await scheduler_repository.get_request_for_update(session, request_id)
-                if row is None or row.state in TERMINAL_STATES:
-                    return
-                if row.state == RequestState.QUEUED:
-                    row.state = RequestState.CANCELLED
-                    row.cancellation_requested = True
-                    row.finished_at = now
-                elif row.state == RequestState.RESERVED:
-                    row.state = RequestState.CANCELLED
-                    row.cancellation_requested = True
-                    row.finished_at = now
-                    await scheduler_repository.release_active_reservation(session, request_id, now)
-                    await scheduler_repository.abandon_reserved_attempts(session, request_id, now)
-                    await scheduler_repository.release_quota_reservations(
-                        session, request_id=request_id, now=now
-                    )
-                    await self._release_pre_dispatch_accounting(
-                        session,
-                        request_id=request_id,
-                        snapshot_id=row.price_snapshot_id,
-                        now=now,
-                    )
-                else:
-                    await scheduler_repository.set_cancellation_requested(session, request_id)
+                await cancel_request_transition(session, request_id, now)
+
+    async def cancel_request(
+        self, request_id: str
+    ) -> tuple[str, str | None]:
+        """Cancel a request and return ``(outcome, state)`` for the admin API.
+
+        The transition primitive is shared with :meth:`request_cancellation` so
+        operator and client cancellation cannot diverge.
+        """
+        now = utcnow()
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await cancel_request_transition(session, request_id, now)
 
     async def is_cancelled(self, request_id: str) -> bool:
         async with self._session_factory() as session:
@@ -445,25 +543,16 @@ class SchedulingService:
 
     async def reconcile(self, request_id: str, disposition: str, operator: str) -> bool:
         """Explicitly reconcile an outcome_unknown request to a terminal state."""
-        if disposition not in RECONCILABLE_STATES:
-            raise ValueError(
-                f"disposition must be one of {sorted(RECONCILABLE_STATES)}"
-            )
         now = utcnow()
         async with self._session_factory() as session:
             async with session.begin():
-                result = await scheduler_repository.reconcile_request(
+                return await reconcile_transition(
                     session,
                     request_id=request_id,
                     disposition=disposition,
                     operator=operator,
                     now=now,
                 )
-                if result:
-                    await accounting_repository.commit_budget_reservations_conservative(
-                        session, request_id=request_id, now=now, reason=disposition
-                    )
-                return result
 
     # --- worker-side --------------------------------------------------------
 
@@ -476,7 +565,7 @@ class SchedulingService:
                 reclaimed = await scheduler_repository.reclaim_expired_reserved(session, now)
                 for request_id in reclaimed:
                     row = await scheduler_repository.get_request_for_update(session, request_id)
-                    await self._release_pre_dispatch_accounting(
+                    await _release_pre_dispatch_accounting(
                         session,
                         request_id=request_id,
                         snapshot_id=row.price_snapshot_id if row is not None else None,
@@ -512,6 +601,7 @@ class SchedulingService:
         saw_processed = False
         saw_quota = False
         saw_budget = False
+        saw_paused = False
         for endpoint_id, quota_group_id, project_id, _oldest in scopes:
             outcome = await self._claim_scope(
                 worker_id, endpoint_id, quota_group_id, project_id
@@ -526,6 +616,8 @@ class SchedulingService:
                 saw_quota = True
             elif outcome == "budget":
                 saw_budget = True
+            elif outcome == "paused":
+                saw_paused = True
 
         if saw_processed:
             return "processed"
@@ -535,6 +627,8 @@ class SchedulingService:
             return "budget"
         if saw_full:
             return "full"
+        if saw_paused:
+            return "paused"
         return None
 
     async def _claim_scope(
@@ -739,9 +833,34 @@ class SchedulingService:
                     )
                     return "processed"
 
+                if endpoint.operational_state == EndpointOperationalState.PAUSED.value:
+                    await scheduler_repository.set_request_wait_metadata(
+                        session, request_id=request_id, wait_reason="endpoint_paused"
+                    )
+                    return "paused"
+
                 active = await scheduler_repository.count_active_reservations(
                     session, resolved_endpoint_id
                 )
+
+                if endpoint.operational_state == EndpointOperationalState.DRAINING.value:
+                    # Draining admits no new reservations: requests wait until the
+                    # endpoint drains to zero occupied slots, then fail cleanly so
+                    # operators can confirm drain completion.
+                    if active > 0:
+                        await scheduler_repository.set_request_wait_metadata(
+                            session, request_id=request_id, wait_reason="endpoint_draining"
+                        )
+                        return "full"
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="endpoint_draining",
+                        finished_at=now,
+                    )
+                    return "processed"
+
                 if active >= endpoint.max_concurrency:
                     await scheduler_repository.set_request_wait_metadata(
                         session, request_id=request_id, wait_reason="endpoint_full"
@@ -834,7 +953,7 @@ class SchedulingService:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
-                    await self._release_pre_dispatch_accounting(
+                    await _release_pre_dispatch_accounting(
                         session, request_id=request_id, snapshot_id=price_snapshot_id, now=now
                     )
                     return None
@@ -843,7 +962,7 @@ class SchedulingService:
                         await scheduler_repository.release_quota_reservations(
                             session, request_id=request_id, now=now
                         )
-                    await self._release_pre_dispatch_accounting(
+                    await _release_pre_dispatch_accounting(
                         session, request_id=request_id, snapshot_id=price_snapshot_id, now=now
                     )
                     return None
@@ -869,27 +988,6 @@ class SchedulingService:
             prepared=prepared,
             quota_group_id=effective_group_id,
         )
-
-    async def _release_pre_dispatch_accounting(
-        self,
-        session: AsyncSession,
-        *,
-        request_id: str,
-        snapshot_id: str | None,
-        now: datetime,
-    ) -> None:
-        """Release budget and discard the pre-dispatch snapshot for a request that
-        never reached durable dispatch intent (so no orphan snapshot survives)."""
-        await accounting_repository.release_budget_reservations(
-            session, request_id=request_id, now=now
-        )
-        if snapshot_id is not None:
-            await scheduler_repository.clear_price_snapshot_reference(
-                session, request_id
-            )
-            await accounting_repository.discard_price_snapshot(
-                session, snapshot_id=snapshot_id
-            )
 
     async def _evaluate_quota(
         self,

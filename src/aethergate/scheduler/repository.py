@@ -263,6 +263,17 @@ async def count_active_reservations(session: AsyncSession, endpoint_id: str) -> 
     return int(result.scalar_one())
 
 
+async def update_endpoint_operational_state(
+    session: AsyncSession, endpoint_id: str, state: str
+) -> None:
+    """Set an endpoint's durable operational state under its row lock."""
+    await session.execute(
+        update(models.Endpoint)
+        .where(models.Endpoint.id == endpoint_id)
+        .values(operational_state=state)
+    )
+
+
 async def create_reservation(
     session: AsyncSession,
     *,
@@ -1100,3 +1111,202 @@ async def clear_request_wait_metadata(session: AsyncSession, request_id: str) ->
             next_eligible_at=None,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Queue / operator control-plane reads (no content, no secrets)
+# ---------------------------------------------------------------------------
+
+
+def _queue_request_filters(
+    *,
+    project_ids: set[str] | None,
+    principal_id: str | None,
+    api_credential_id: str | None,
+    model_alias_id: str | None,
+    endpoint_id: str | None,
+    state: str | None,
+    stream: bool | None,
+    wait_reason: str | None,
+    queued_from: datetime | None,
+    queued_to: datetime | None,
+    created_from: datetime | None,
+    created_to: datetime | None,
+) -> list:
+    preds = []
+    if project_ids is not None:
+        preds.append(models.InferenceRequest.project_id.in_(project_ids))
+    if principal_id is not None:
+        preds.append(models.InferenceRequest.principal_id == principal_id)
+    if api_credential_id is not None:
+        preds.append(models.InferenceRequest.api_credential_id == api_credential_id)
+    if model_alias_id is not None:
+        preds.append(models.InferenceRequest.model_alias_id == model_alias_id)
+    if endpoint_id is not None:
+        preds.append(models.InferenceRequest.endpoint_id == endpoint_id)
+    if state is not None:
+        preds.append(models.InferenceRequest.state == state)
+    if stream is not None:
+        preds.append(models.InferenceRequest.stream == stream)
+    if wait_reason is not None:
+        preds.append(models.InferenceRequest.wait_reason == wait_reason)
+    if queued_from is not None:
+        preds.append(models.InferenceRequest.queued_at >= queued_from)
+    if queued_to is not None:
+        preds.append(models.InferenceRequest.queued_at <= queued_to)
+    if created_from is not None:
+        preds.append(models.InferenceRequest.created_at >= created_from)
+    if created_to is not None:
+        preds.append(models.InferenceRequest.created_at <= created_to)
+    return preds
+
+
+async def list_requests_paged(
+    session: AsyncSession, *, limit: int, offset: int, **filters
+) -> list[models.InferenceRequest]:
+    preds = _queue_request_filters(**filters)
+    stmt = (
+        select(models.InferenceRequest)
+        .where(*preds)
+        .order_by(models.InferenceRequest.created_at.asc(), models.InferenceRequest.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def count_requests(session: AsyncSession, **filters) -> int:
+    preds = _queue_request_filters(**filters)
+    stmt = select(func.count()).select_from(models.InferenceRequest).where(*preds)
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def count_requests_by_state(
+    session: AsyncSession, *, project_ids: set[str] | None = None
+) -> dict[str, int]:
+    stmt = select(models.InferenceRequest.state, func.count())
+    if project_ids is not None:
+        stmt = stmt.where(models.InferenceRequest.project_id.in_(project_ids))
+    stmt = stmt.group_by(models.InferenceRequest.state)
+    result = await session.execute(stmt)
+    return {row[0]: int(row[1]) for row in result.all()}
+
+
+async def oldest_queued_at(
+    session: AsyncSession, *, project_ids: set[str] | None = None
+) -> datetime | None:
+    stmt = select(func.min(models.InferenceRequest.queued_at)).where(
+        models.InferenceRequest.state == RequestState.QUEUED
+    )
+    if project_ids is not None:
+        stmt = stmt.where(models.InferenceRequest.project_id.in_(project_ids))
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_endpoint_row(
+    session: AsyncSession, endpoint_id: str
+) -> models.Endpoint | None:
+    return await session.get(models.Endpoint, endpoint_id)
+
+
+async def list_all_endpoints(session: AsyncSession) -> list[models.Endpoint]:
+    result = await session.execute(
+        select(models.Endpoint).order_by(models.Endpoint.name.asc(), models.Endpoint.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def count_active_reservations_by_endpoint(session: AsyncSession) -> dict[str, int]:
+    stmt = (
+        select(models.Reservation.endpoint_id, func.count())
+        .where(models.Reservation.released_at.is_(None))
+        .group_by(models.Reservation.endpoint_id)
+    )
+    result = await session.execute(stmt)
+    return {row[0]: int(row[1]) for row in result.all()}
+
+
+async def oldest_queued_for_endpoint(
+    session: AsyncSession, endpoint_id: str
+) -> datetime | None:
+    stmt = select(func.min(models.InferenceRequest.queued_at)).where(
+        models.InferenceRequest.state == RequestState.QUEUED,
+        models.InferenceRequest.endpoint_id == endpoint_id,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def list_endpoint_operational_states(
+    session: AsyncSession, endpoint_ids: set[str]
+) -> dict[str, str]:
+    if not endpoint_ids:
+        return {}
+    stmt = select(models.Endpoint.id, models.Endpoint.operational_state).where(
+        models.Endpoint.id.in_(list(endpoint_ids))
+    )
+    result = await session.execute(stmt)
+    return {row[0]: row[1] for row in result.all()}
+
+
+async def list_outcome_unknown_paged(
+    session: AsyncSession, *, limit: int, offset: int
+) -> list[models.InferenceRequest]:
+    stmt = (
+        select(models.InferenceRequest)
+        .where(models.InferenceRequest.state == RequestState.OUTCOME_UNKNOWN)
+        .order_by(models.InferenceRequest.created_at.asc(), models.InferenceRequest.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def count_outcome_unknown(session: AsyncSession) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(models.InferenceRequest)
+        .where(models.InferenceRequest.state == RequestState.OUTCOME_UNKNOWN)
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def list_quota_runtime_rows(session: AsyncSession) -> list:
+    stmt = (
+        select(
+            models.QuotaGroup.id,
+            models.QuotaGroup.name,
+            models.QuotaGroup.provider_account_id,
+            models.QuotaGroup.cooldown_until,
+            models.QuotaLimit.id,
+            models.QuotaLimit.name,
+            models.QuotaLimit.metric,
+            models.QuotaLimit.limit_units,
+            models.QuotaLimit.window_seconds,
+            models.QuotaLimit.enabled,
+        )
+        .join(models.QuotaLimit, models.QuotaLimit.quota_group_id == models.QuotaGroup.id)
+        .order_by(
+            models.QuotaGroup.name.asc(),
+            models.QuotaLimit.metric.asc(),
+            models.QuotaLimit.id.asc(),
+        )
+    )
+    result = await session.execute(stmt)
+    return result.all()
+
+
+async def list_quota_windows_for_limits(
+    session: AsyncSession, limit_ids: set[str]
+) -> dict[str, list[models.QuotaWindow]]:
+    if not limit_ids:
+        return {}
+    stmt = select(models.QuotaWindow).where(
+        models.QuotaWindow.quota_limit_id.in_(list(limit_ids))
+    )
+    result = await session.execute(stmt)
+    grouped: dict[str, list[models.QuotaWindow]] = {}
+    for row in result.scalars().all():
+        grouped.setdefault(row.quota_limit_id, []).append(row)
+    return grouped
