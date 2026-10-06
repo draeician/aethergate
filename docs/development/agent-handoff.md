@@ -2,217 +2,142 @@
 
 ## Current State
 - Branch: `v2`.
-- AGV2-017V complete (see below); AGV2-017 remains complete underneath. This handoff
-  supersedes the AGV2-017 handoff.
-- Migration head: `0014` (unchanged; AGV2-017V added no migration and modified none of
-  `0001`–`0014`).
-- Full containerized suite: **402 passed** (was 399; +2 concurrent price-policy race tests,
-  +1 budget double-commit settlement-replay test). `ruff check src tests` clean;
-  `git diff --check` clean; staged secret/token/content canary scan clean.
+- AGV2-018 (queue/operator admin API) implementation and automated tests are complete; live nomnom
+  verification (scenarios A–L) has **not** been re-run this session and remains the open item (see
+  "Live verification status").
+- Migration head: `0015` (adds `endpoints.operational_state`). `0001`–`0014` untouched.
+- Full suite (with `DATABASE_URL` + `AETHERGATE_TEST_DATABASE_URL`): **425 passed** (was 402; +22
+  queue-admin DB-gated tests + 1 migration test). `ruff check src tests` clean.
 
-## AGV2-017V Completed — close accounting concurrency + release verification gaps
+## AGV2-018 Completed — queue and operator admin API
 
-### 1. True concurrent PricePolicy race (new tests, no production change)
-Added to `tests/test_accounting_admin.py` (DB-gated, independent `async_sessionmaker`
-sessions, `asyncio.Barrier(2)` synchronization so this is a genuine race, not sequential
-calls):
+### 1. Durable endpoint operational state (migration 0015)
+- `EndpointOperationalState` enum (`active` | `paused` | `draining`) in `domain/enums.py`.
+- `domain.Endpoint.operational_state` (default `active`), mapped in `persistence/repository.py`.
+- `models.Endpoint.operational_state` column + CHECK `IN ('active','paused','draining')`, server
+  default `active`; migration `0015` (linear, `down_revision="0014"`, downgrade implemented).
 
-- `test_concurrent_price_policy_create_race` — two sessions race to create the first enabled
-  policy on the same route. Exactly one winner; the loser receives the typed
-  `PricePolicyConflictError`; exactly one enabled policy remains; no raw `IntegrityError`
-  escapes; and the loser's aborted transaction does not corrupt a subsequent disabled create.
-- `test_concurrent_price_policy_enable_race` — two disabled policies race to enable via
-  `repository.update_price_policy` under the same barrier. Same invariants.
+### 2. Scheduler operator service boundary
+`src/aethergate/scheduler/admin.py` — centralized operator service that accepts a typed
+`AdminRequestContext`, authorizes internally, resolves project/deployment scope centrally, and uses
+safe scheduler transition primitives (no lifecycle logic in routers). Routers (`api/queue_admin.py`)
+are thin.
 
-No production change was required: the partial unique index
-`uq_price_policies_one_enabled_per_route` (migration `0008`) plus the
-`_is_price_policy_conflict` `IntegrityError` translation already backstop the race correctly.
+### 3. Refactor to a single cancellation/reconciliation state machine
+`SchedulingService.request_cancellation`, the reconcile CLI path, and the new admin service all reuse
+the module-level `cancel_request_transition` / `reconcile_transition` / `_release_pre_dispatch_accounting`
+primitives in `scheduler/service.py`. No divergent lifecycle copies remain.
 
-### 2. Live released pre-dispatch budget reservation (nomnom, 18/18)
-Real admin API setup (bootstrap, `ollama` provider/account/endpoint, model alias
-`gpt-4-release`, request-priced `0.05` policy, project, inference credential, budget
-`1.00`/3600s), then the real `SchedulingService` drove `admit_and_enqueue` +
-`claim_and_reserve` (acquiring a budget reservation + immutable price snapshot, state
-`reserved`). The request was reverted to the pre-dispatch `reserved` window (the same harness
-step as the deterministic `test_pre_dispatch_cancel_releases_budget`) and then
-`request_cancellation` ran the real release lifecycle (`_release_pre_dispatch_accounting`).
+### 4. Pause/drain admission gate
+The worker re-checks `operational_state` under the same endpoint `FOR UPDATE` row lock used for
+physical capacity admission, immediately before reserving. Filtering paused/draining endpoints out of
+queue scans is an optimization only. A paused claim returns `"paused"` (worker waits, no hot-spin); a
+draining endpoint with occupied slots returns `"full"`; draining with zero occupied slots resolves the
+request to a failure. In-flight reserved/dispatched/streaming work is never killed; `resume` restores
+dispatch; `draining_complete` flips when active physical reservations reach zero.
 
-Proven from PostgreSQL **and** the admin API:
+### 5. Endpoints added (`/admin/v1/queue`)
+- Reads: `GET /queue/requests` (paginated, filters), `GET /queue/requests/{request_id}`,
+  `GET /queue/summary`, `GET /queue/outcome-unknown`, `GET /queue/quota-status`.
+- Endpoint runtime: `GET /queue/endpoints`, `GET /queue/endpoints/{endpoint_id}`.
+- Mutations: `POST /queue/endpoints/{endpoint_id}/pause` / `drain` / `resume`,
+  `POST /queue/requests/{request_id}/cancel`, `POST /queue/requests/{request_id}/reconcile`.
 
-- `BudgetReservation.state == released`, `reserved_amount == 0`, `committed_amount == 0`,
-  `price_snapshot_id == null`;
-- the pre-dispatch `PriceSnapshot` was discarded;
-- no `UsageRecord` and no `usage_debit LedgerEntry` for that request;
-- the `InferenceRequest` is `cancelled`; the budget window `reserved_amount == 0` and
-  `committed_amount == 0`;
-- no upstream dispatch evidence (`upstream_request_id` null; worker was stopped so
-  `run_complete`/`run_stream` never executed);
-- `GET /admin/v1/budget-reservations?request_id=…` serializes `price_snapshot_id: null` and
-  `state: "released"`; `GET /admin/v1/projects/{id}/budget-status` reports
-  `reserved=0 committed=0`.
+### 6. Queue DTO safe-field list
+`QueueRequestRead` exposes only: `request_id`, `project_id`, `principal_id`, `api_credential_id`,
+`model_alias_id`, `endpoint_id`, `quota_group_id`, `state`, `stream`, `queued_at`, `started_at`,
+`finished_at`, `queue_wait_until`, `expires_at`, `cancellation_requested`, `wait_reason`,
+`wait_limit_id`, `wait_limit_metric`, `next_eligible_at`, `error_code`, `price_snapshot_id`,
+`reconciled_state`, `reconciled_at`, `reconciled_by`, optional `worker_id`/`lease_expires_at`, and a
+computed `effective_wait_reason`. It never exposes `payload_encrypted`, `result_encrypted`, decrypted
+prompt/completion, stream-event bodies, `fencing_token`, or provider secret material.
 
-The released row came from the real scheduler/accounting lifecycle, not a manual insert.
+### 7. Authorization / scoping
+- Project-scoped (`admin:queue:read`/`write`): `system_admin` reads all + cancels any eligible request;
+  `project_admin` reads/cancels own project; `project_viewer` reads own project only. Cross-project
+  opaque request IDs are non-enumerating (`404`); project roles never see `project_id = NULL` requests.
+- Deployment-only (`system_admin` deployment authority + `admin:queue:*`, regardless of scopes):
+  endpoint runtime, pause/drain/resume, quota-status, outcome_unknown reconciliation. A `project_admin`
+  cannot gain operator authority merely by holding `admin:queue:*`.
 
-### 3. Settlement idempotency (rerun existing regression + 1 narrow addition)
-The prior "repeated GET reads prove idempotency" claim was removed. Settlement replay is now
-proven by the containerized regression in `tests/test_accounting.py`:
+### 8. Cancellation semantics
+`queued`/`reserved` → terminal `cancelled` immediately (release endpoint/quota/budget reservations,
+discard pre-dispatch price snapshot); `dispatched`/`streaming` → set `cancellation_requested` only
+(never claim upstream stopped; owning worker settles conservatively); already-cancelled → idempotent
+`already_cancelled`; `succeeded`/`failed`/`expired` → stable `terminal` no-op conflict;
+`outcome_unknown` → `outcome_unknown` (cannot cancel; requires reconciliation). Typed result
+distinguishes all five; audit distinguishes `request.cancelled` vs `request.cancellation_requested`.
 
-- `test_usage_record_and_ledger_idempotent` — a same-canonical settlement replay does not
-  duplicate the `UsageRecord` (unique per `request_id`) and a duplicate ledger
-  `idempotency_key` collapses to one entry.
-- `test_settlement_replay_does_not_double_commit_budget` (**new**) — replays
-  `settle_budget_reservations_to_actual` for the already-committed request (no second upstream
-  charge); the budget window `committed_amount` stays `0.05`, never `0.10`.
-- `test_conflicting_usage_record_replay_raises` and `test_conflicting_ledger_entry_replay_raises`
-  — a conflicting replay raises `AccountingInvariantError` and mutates nothing.
+### 9. Reconciliation semantics
+Disposition `failed` | `cancelled` only (`succeeded` rejected); `reconciled_by` = authenticated
+`principal_id` (never client-supplied); releases the held physical reservation exactly once; settles
+budget conservatively; no fabricated `UsageRecord`; repeat reconciliation is a stable conflict with no
+double release/commit.
 
-### 4. Regression / SDK
-- Full containerized suite: **402 passed**.
-- Official OpenAI SDK non-stream and stream (`32` chunks) inference with
-  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false` — `3/3` green (alias listed by
-  `models.list()`, non-stream completion, stream completion).
-- Backend Ollama `http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias
-  `gpt-4`/`gpt-4-release`; API dynamic loopback host port (release proof ran the scheduler
-  driver inside the `api` container against `http://api:8000`).
-
-## Task Completed (AGV2-017, still the base)
-AGV2-017 — Accounting admin API: pricing, project budgets, usage/ledger, and audit reads.
-
-### Endpoints added (`/admin/v1`)
-- **Deployment-scoped** (route pricing, `system_admin` + `admin:accounting:read`/`write`):
-  `POST /price-policies`, `GET /price-policies` (filter `route_binding_id`/`enabled`/`billing_unit`),
-  `GET /price-policies/{id}`, `PATCH /price-policies/{id}`; immutable read-only
-  `GET /price-snapshots`, `GET /price-snapshots/{id}`.
-- **Project-scoped** (budget/usage/ledger; `system_admin` any project, `project_admin` read/write own,
-  `project_viewer` read own): `POST /project-budget-policies`, `GET /project-budget-policies`,
-  `GET /project-budget-policies/{id}`, `PATCH /project-budget-policies/{id}`; `GET
-  /projects/{project_id}/budget-status`; read-only `GET /budget-reservations`,
-  `GET /budget-reservations/{id}`; `GET /usage-records`, `GET /usage-records/{id}`;
-  `GET /ledger-entries`, `GET /ledger-entries/{id}`.
-- **Audit** (`admin:audit:read`): `GET /audit-events`, `GET /audit-events/{id}`.
-
-Routers are thin (`src/aethergate/api/accounting_admin.py`); all authorization/validation lives in
-`src/aethergate/accounting/admin.py`, which accepts a typed `AdminRequestContext` and authorizes
-internally — an internal caller cannot bypass RBAC merely by supplying an actor principal ID.
-
-### Deployment vs project authorization
-Route pricing (deployment infrastructure) requires `system_admin` authority **and** the matching
-`admin:accounting:*` permission; project roles are denied (`403`) regardless of their scopes. Project
-budget policy/status/reservations/usage/ledger are project-scoped; cross-project opaque IDs (and
-deployment-scoped IDs for a project-scoped caller) are indistinguishable from nonexistent (`404`).
-Audit reads are deployment-vs-project scoped: `system_admin` reads all; project roles read only events
-with `project_id` in their scope; a `project_id = null` event is deployment-scoped and hidden from
-project roles.
-
-### Price policy mutation / locking
-`PricePolicy` CRUD enforces the AGV2-010/011 invariants: route must exist; request pricing requires
-`request_price` and forbids token prices; token pricing requires `input_price`+`output_price` and
-forbids `request_price`; `unit_scale > 0`; non-negative prices; at most one enabled policy per route
-(partial unique index `0008` + service validation => stable `409 price_policy_conflict`, DB unique
-races translated via savepoint + `IntegrityError` recovery). PATCH validates the complete resulting
-shape, not just present fields; omitted means unchanged; explicit `null` clears a price only if the
-resulting shape stays valid. Edits serialize with scheduler admission via the existing price-policy
-lock order; no reverse-order deadlock.
-
-### Immutable snapshot proof
-`PriceSnapshot` is read-only (no POST/PATCH/DELETE). Editing a live `PricePolicy` never rewrites
-existing snapshot rows; live scenario A proved an old `0.05` snapshot and a new `0.10` snapshot coexist
-after a PATCH. Snapshots expose no prompt/completion/provider-secret content.
-
-### Budget policy mutation safety
-`name`, `limit_amount`, `enabled` are mutable for future admission; `currency` and `window_seconds`
-are immutable after creation (a PATCH attempting to change them returns a stable `400`; changing them
-requires a replacement policy). Edits never rewrite historical `BudgetWindow`/`BudgetReservation`
-rows; budget config writes serialize with scheduler budget admission using the policy-row lock order.
-
-### Budget status / headroom
-`GET /projects/{id}/budget-status` returns one `BudgetStatusRead` per applicable policy/window with
-`limit_amount`, `committed_amount`, `reserved_amount`, `headroom = limit - committed - reserved`,
-`window_start`/`window_end`, `enabled`. A read computes current-window zero state without fabricating
-reservation history; negative headroom is allowed after honest overage.
-
-### Budget reservation reads
-Read-only. `BudgetReservationRead.price_snapshot_id` is now **nullable** (contract + domain entity
-aligned to persistence: a released/detached pre-dispatch reservation stores `NULL`). No reservation
-mutation via admin HTTP.
-
-### Usage/ledger reads
-Read-only immutable/append-only reads with bounded pagination (`Page[T]`, default 50, max 200, stable
-sort) and the documented filters. No content/secrets; signed fixed-point `Decimal` amounts preserved
-exactly; `usage_debit` links its `UsageRecord`; adjustment entries may have no `usage_record_id`.
-Manual ledger adjustment writes remain deferred (no HTTP path).
-
-### Audit behavior
-Config changes emit immutable audit events — `price_policy.created`/`updated` (deployment-scoped,
-`project_id = null`) and `project_budget_policy.created`/`updated` (project-scoped) — with actor
-principal ID and safe metadata. No-op PATCHes emit no event; usage/ledger/snapshot reads create no
-audit noise.
-
-### Error translation
-Stable codes only (no SQL/constraint names/stack traces/secrets): `404 not_found`,
-`403 forbidden`, `400 invalid_request`, `400 parent_mismatch`, `409 price_policy_conflict`, plus
-stable immutable-field validation errors for budget `currency`/`window_seconds`.
-
-## Live nomnom verification (AGV2-017, still green)
-Clean reset -> `scripts/dev/v2 migrate` (empty -> `0014`) -> one-use bootstrap -> catalog built
-entirely through `/admin/v1`. Backend Ollama `http://192.168.22.50:11434`, upstream
-`qwen3.8-2b-distill:Q6_K`, alias `gpt-4`, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`. Bearer
-scenarios A-H/J (35/35) and browser scenario I (7/7) were green; AGV2-017V re-verified the normal
-inference path (SDK non-stream + stream) and added the released-reservation proof (18/18).
-
-## Migration
-- None (both AGV2-017 and AGV2-017V). Head remains `0014`; `0001`–`0014` untouched.
-  `budget_reservations.price_snapshot_id` nullable came from `0008`, so the AGV2-017 read-contract
-  fix required no schema change.
+### 10. Error translation
+Stable codes: `404 not_found`, `403 forbidden`, `400 invalid_request` (bad disposition),
+`409 invalid_lifecycle` (cancel a terminal request / reconcile a non-`outcome_unknown` request).
+No SQL, stack traces, raw provider errors, or encryption data.
 
 ## Automated tests
-- Full containerized suite: **402 passed**.
-  - `tests/test_accounting_admin.py`: 15 tests (13 AGV2-017 + 2 new concurrent race tests).
-  - `tests/test_accounting.py`: +1 new `test_settlement_replay_does_not_double_commit_budget`
-    (settlement idempotency).
-  - `ruff check src tests` clean; `git diff --check` clean; staged secret/token/content canary scan
-    clean (only the pre-existing test-only `test-bootstrap-secret-*` literal).
+- `tests/test_queue_admin.py` (new, DB-gated, 22 tests): operational-state default/slot calc,
+  pause/drain prevent-reserve + survive restart + idempotent audit, pause-vs-claim DB row-lock race,
+  queued/reserved/dispatched/idempotent/terminal/outcome_unknown cancellation, reconcile once + reject
+  succeeded/project-role, quota zero-state, project RBAC/non-enumeration, and HTTP DTO-safety/404/403/
+  cancel coverage.
+- `tests/test_migrations.py`: +1 `test_migration_0014_to_0015`.
+- Full suite: **425 passed** (`DATABASE_URL` must be set in addition to `AETHERGATE_TEST_DATABASE_URL`;
+  two pre-existing tests `test_http_admin_key_rejected_on_inference` and
+  `test_credential_audience_separation_via_endpoint` hit the real `get_settings()` and need
+  `DATABASE_URL`).
+- `ruff check src tests` clean.
+
+## Live verification status
+Not performed this session. Remaining scenarios A–L from `current-task.md`:
+- A queue inspection/explanation (six concurrent, two slots), B project RBAC, C pause live +
+  restart persistence, D drain live, E pause/claim race harness, F queued cancel, G reserved cancel,
+  H in-flight cancel, I outcome_unknown reconciliation, J quota runtime status, K browser RBAC/CSRF
+  (requires the local OIDC IdP), L full regression + official OpenAI SDK.
+- Backend Ollama `http://192.168.22.50:11434` is reachable; image `aethergate-v2:local` is already
+  built, so `scripts/dev/v2 up`/`migrate`/`workers` and the dynamic host port are the entry point.
 
 ## Key files
-- `tests/test_accounting_admin.py` — accounting admin suite + concurrent price-policy race tests.
-- `tests/test_accounting.py` — accounting foundation suite + settlement idempotency regressions.
-- (AGV2-017, unchanged): `src/aethergate/accounting/admin.py`, `src/aethergate/api/accounting_admin.py`,
-  `src/aethergate/contracts/admin_v1.py`, `src/aethergate/domain/entities.py`,
-  `src/aethergate/persistence/repository.py`, `src/aethergate/api/admin_errors.py`,
-  `src/aethergate/main.py`.
-- Docs (AGV2-017): `docs/architecture/accounting.md`, `docs/architecture/admin-api.md`,
+- `src/aethergate/migrations/versions/0015_endpoint_operational_state.py` — new migration.
+- `src/aethergate/domain/enums.py`, `domain/entities.py` — `EndpointOperationalState` + field.
+- `src/aethergate/persistence/models.py`, `persistence/repository.py` — column/check + mapping.
+- `src/aethergate/scheduler/service.py` — shared transitions + pause/drain admission gate.
+- `src/aethergate/scheduler/repository.py` — queue/runtime/quota aggregate helpers.
+- `src/aethergate/scheduler/admin.py` — operator admin service.
+- `src/aethergate/api/queue_admin.py` — `/admin/v1/queue` router.
+- `src/aethergate/api/admin_errors.py`, `errors.py` — queue transition error handling.
+- `src/aethergate/contracts/admin_v1.py` — queue DTOs.
+- `src/aethergate/main.py`, `worker.py` — router/handler registration + `"paused"` handling.
+- `tests/test_queue_admin.py`, `tests/test_migrations.py`.
+- Docs: `docs/architecture/scheduler.md`, `docs/architecture/admin-api.md`,
   `docs/contracts/domain-model.md`, `docs/contracts/admin-v1-foundation.md`,
   `docs/development/README.md`.
 
 ## Decisions
-- Route pricing is deployment-scoped (`system_admin` only); project roles never mutate it.
-- `PriceSnapshot` stays deployment-scoped and read-only (no project ownership inference from a
-  route/catalog-history snapshot).
-- Budget `currency`/`window_seconds` immutable after creation; `name`/`limit_amount`/`enabled` mutable.
-- Manual ledger adjustment HTTP writes deferred (adjustment policy/approval not settled).
-- No accounting-summary endpoint added (optional; not required, avoids multi-currency distortion).
-- No new migration: the nullable snapshot column already existed in `0008`.
-- The concurrent price-policy race needed no production fix; the `0008` partial unique index + typed
-  `IntegrityError` translation already handled it.
+- Pause/drain and catalog `is_active` are distinct; pause/drain never sets `is_active=false`.
+- Pause and drain intentionally share the "no new dispatch" gate; `draining` additionally reports
+  `draining_complete` at zero reservations and is not auto-flipped by a background job.
+- The cancellation/reconciliation state machine is single-sourced in the shared transitions, reused by
+  the normal scheduler path, the reconcile CLI, and the admin API.
+- `terminal` and `outcome_unknown` cancel outcomes are returned (not raised) at the service layer and
+  mapped to `409 invalid_lifecycle` at the HTTP boundary; reconciliation raises `QueueTransitionError`
+  for repeat/non-`outcome_unknown` at the service layer.
 
 ## Issues / Risks
-- `docker` on nomnom is podman; keep compose healthchecks single-token; `docker compose run` needs
-  `--no-deps`. A transient podman DNS resolution failure (`Temporary failure in name resolution`)
-  can surface on the first bootstrap immediately after a `reset`; wait for `/health/ready` and retry.
-- Pre-existing flaky concurrency tests (`test_scheduler_quota.py::test_saturated_quota_group_does_not_block_unrelated_group`
-  and `test_accounting.py::test_two_workers_cannot_oversubscribe_budget`) can fail intermittently only
-  under full-suite load; they pass in isolation/targeted runs and were green this session.
-- `deploy/v2/compose.yaml` still does not wire OIDC env passthrough; browser scenario I used an
-  uncommitted compose override. A budget-exhausted request stays held until its next eligible window
-  by design; a PATCH `limit_amount` raise affects *future* admission, it does not auto-wake the
-  already-held request.
-- litellm still has no trusted token estimator; token-priced quotas fail closed (request-only pricing
-  used in the smoke).
-- The live released-reservation proof requires the worker to be stopped (so the real scheduler driver
-  can claim then cancel before autonomous dispatch); this is a test-harness orchestration step, not a
-  production behavior.
+- `scripts/dev/v2` runs the full suite inside the container, which already sets both
+  `DATABASE_URL` and `AETHERGATE_TEST_DATABASE_URL`; running DB-gated tests on the host requires
+  setting **both** env vars (the two inference-path admin tests use the un-monkeypatched
+  `get_settings()`).
+- The pause-vs-claim race test uses `asyncio.sleep(0.05)` only to let the pause task reach its blocking
+  `FOR UPDATE`; correctness is the endpoint row lock, not the sleep.
+- Live browser CSRF (scenario K) needs the deterministic local OIDC IdP and an uncommitted compose
+  override to wire OIDC env passthrough (the same gap noted in the AGV2-017 handoff remains).
 
 ## Recommended Next Step
-Queue the queue/operator admin API (`admin:queue:*` — queue state inspection, outcome_unknown
-reconciliation, and explicit queue lifecycle) as the next workstream task, reusing the now-proven
-thin-router + centralized-service + RBAC + pagination pattern.
+Run the AGV2-018 live nomnom verification (scenarios A–L) against the reachable Ollama backend and
+`scripts/dev/v2`, then record the live proofs (six/two queue, pause/drain + restart persistence,
+outcome_unknown reconcile, browser CSRF, official SDK regression) here and close the task.

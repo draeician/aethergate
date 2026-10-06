@@ -141,6 +141,28 @@ budget `currency`/`window_seconds`. Money is fixed-point `Decimal` end to end; b
 rejected. `currency` and `window_seconds` are immutable after budget creation; `limit_amount`/`name`/
 `enabled` are mutable for future admission. Manual ledger adjustment writes are deferred.
 
+Queue/operator control-plane endpoints (AGV2-018) — queue reads/cancellation are project-scoped
+(`system_admin` all, `project_admin`/`project_viewer` own project); endpoint runtime/pause/drain/
+resume, quota-status, and outcome_unknown reconciliation are deployment-only (`system_admin` +
+`admin:queue:*`):
+
+- `GET /admin/v1/queue/requests` (paginated, filters), `GET /admin/v1/queue/requests/{request_id}`
+  — safe metadata only (never content, encrypted bytes, stream events, or fencing tokens).
+- `GET /admin/v1/queue/summary` — side-effect-free aggregate counts by state / wait reason.
+- `GET /admin/v1/queue/endpoints`, `GET /admin/v1/queue/endpoints/{endpoint_id}` — runtime slot
+  status (deployment-only).
+- `POST /admin/v1/queue/endpoints/{endpoint_id}/pause` / `drain` / `resume` (deployment-only;
+  idempotent, durable).
+- `POST /admin/v1/queue/requests/{request_id}/cancel` — typed result (`cancelled_now` /
+  `cancellation_requested` / `already_cancelled` / `terminal` / `outcome_unknown`).
+- `GET /admin/v1/queue/outcome-unknown`, `POST /admin/v1/queue/requests/{request_id}/reconcile`
+  (deployment-only; disposition `failed` | `cancelled`).
+- `GET /admin/v1/queue/quota-status` (deployment-only; runtime quota metadata, never fabricates rows).
+
+Queue errors use stable codes: `404 not_found` (cross-project non-enumeration), `403 forbidden`,
+`400 invalid_request` (bad reconcile disposition), `409 invalid_lifecycle` (cancel a terminal request /
+reconcile a non-`outcome_unknown` request).
+
 Admin auth requires an `admin`-audience credential (`Authorization: Bearer agk_...`) plus an active
 role assignment granting the needed `admin:*` permission (`system_admin` deployment-wide;
 `project_admin`/`project_viewer` scoped to one project). Admin errors use
@@ -321,6 +343,8 @@ project-scoped; `0012` adds human identity — `external_identities` (unique `is
 `browser_sessions` (one-way session/CSRF verifiers), and `oidc_login_states` (one-time PKCE
 transactions); `0013` binds the OIDC login transaction to the initiating browser (one-way
 `txn_cookie_hash`); `0014` adds the catalog one-active-route partial unique index
-`uq_route_bindings_one_active_per_alias` (`model_alias_id WHERE is_active = true`).
+`uq_route_bindings_one_active_per_alias` (`model_alias_id WHERE is_active = true`); `0015` adds
+`endpoints.operational_state` (`active` default, CHECK `active|paused|draining`) for the queue operator
+control plane.
 Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

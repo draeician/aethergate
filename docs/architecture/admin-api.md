@@ -237,6 +237,57 @@ Config state changes emit immutable audit events — `price_policy.created`/`upd
 `project_id = null`) and `project_budget_policy.created`/`updated` (project-scoped) — with the actor
 principal ID and safe non-secret metadata only.
 
+## Queue / operator admin surface (AGV2-018)
+
+`/admin/v1/queue` exposes the queue/operator control plane through the same thin routers +
+centralized scheduler admin service (`src/aethergate/scheduler/admin.py`) + authorization/pagination
+foundations. Two authorization shapes apply:
+
+- **Project-scoped queue reads/cancellation** (`admin:queue:read`/`write`): `system_admin` reads all
+  and cancels any eligible request; `project_admin` reads/cancels its own project's requests;
+  `project_viewer` reads its own project only. Cross-project opaque request IDs are non-enumerating
+  (`404`). Project roles never see `project_id = NULL` requests.
+- **Deployment-only operations** require `system_admin` deployment authority **and** `admin:queue:*`
+  regardless of scopes: endpoint runtime/slot summaries, pause/drain/resume, global provider-quota
+  runtime status, and outcome_unknown reconciliation. A `project_admin` cannot gain operator authority
+  merely by holding `admin:queue:*`.
+
+### Endpoints
+
+- Queue reads: `GET /queue/requests` (paginated, filters incl. `project_id`, `principal_id`,
+  `api_credential_id`, `model_alias_id`, `endpoint_id`, `state`, `stream`, `wait_reason`, time range),
+  `GET /queue/requests/{request_id}`. Safe metadata only — never `payload_encrypted`,
+  `result_encrypted`, decrypted prompt/completion, stream-event content, `fencing_token`, or provider
+  secret material. A queued request under an operator hold surfaces a computed `effective_wait_reason`
+  (`endpoint_paused`/`endpoint_draining`) without overwriting persisted quota/budget wait metadata.
+- Queue summary: `GET /queue/summary` — side-effect-free aggregate counts by state, queued total,
+  in-flight total, `outcome_unknown` total, oldest queued timestamp, counts by effective wait reason.
+- Endpoint runtime: `GET /queue/endpoints`, `GET /queue/endpoints/{endpoint_id}` (deployment-only) —
+  `operational_state`, catalog `is_active`, `max_concurrency`, `occupied_slots` (active physical
+  reservations only), `available_slots = max(0, max_concurrency - occupied_slots)`, `draining_complete`.
+- Pause/drain/resume: `POST /queue/endpoints/{endpoint_id}/pause` / `drain` / `resume`
+  (deployment-only) — idempotent; audit actual state changes only (`endpoint_dispatch.paused` /
+  `.draining` / `.resumed`); durable across restart; no-op repeat creates no duplicate audit.
+- Cancellation: `POST /queue/requests/{request_id}/cancel` — returns a typed result distinguishing
+  `cancelled_now` / `cancellation_requested` / `already_cancelled` / `terminal` / `outcome_unknown`;
+  audit `request.cancelled` vs `request.cancellation_requested`; actor principal/project/resource ID,
+  no content.
+- outcome_unknown: `GET /queue/outcome-unknown` (deployment-only, safe metadata),
+  `POST /queue/requests/{request_id}/reconcile` (deployment-only, disposition `failed` | `cancelled`).
+  Repeat reconciliation returns a stable conflict and never double-releases or double-commits.
+- Quota runtime status: `GET /queue/quota-status` (deployment-only) — safe runtime metadata per
+  configured quota limit/window (`quota_group_id`/name, `provider_account_id`, `quota_limit_id`/name,
+  `metric`, `limit_units`, `window_seconds`, window start/end, `committed_units`, `reserved_units`,
+  `remaining`, `enabled`, group `cooldown_until`). Never fabricates `QuotaWindow` rows; a missing
+  current window reports zero computed state.
+
+### Error translation
+
+Stable codes: `404 not_found` (request/endpoint missing; cross-project non-enumeration),
+`403 forbidden`, `400 invalid_request` (invalid reconcile disposition), `409 invalid_lifecycle`
+(cancellation of a terminal request; reconciliation of a non-`outcome_unknown` request). No SQL,
+stack traces, raw provider errors, or encryption data.
+
 ## Human OIDC/session auth surface (AGV2-015)
 
 Human administrators authenticate with an OIDC Authorization Code + PKCE flow and receive a

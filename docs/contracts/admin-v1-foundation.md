@@ -141,6 +141,28 @@ the shared `Page[T]` shape and PATCH omitted-vs-null semantics. A minimal protec
 (bootstrap, whoami, credential list/create/rotate/revoke) exists since AGV2-013 to prove the identity
 model; the remaining resource CRUD reuses the same DTOs and services.
 
+Queue/operator admin DTOs (AGV2-018):
+
+- `QueueRequestRead` — safe request metadata (request/project/principal/api-credential/model-alias/
+  endpoint/quota-group attribution, `state`, `stream`, `queued_at`/`started_at`/`finished_at`,
+  `queue_wait_until`/`expires_at`, `cancellation_requested`, `wait_reason`/`wait_limit_id`/
+  `wait_limit_metric`/`next_eligible_at`, `error_code`, `reconciled_state`/`reconciled_at`/
+  `reconciled_by`, optional `worker_id`/`lease_expires_at`, plus a computed `effective_wait_reason`).
+  Never `payload_encrypted`/`result_encrypted`, decrypted content, stream-event bodies, `fencing_token`,
+  or provider secret material.
+- `QueueSummaryRead` — side-effect-free aggregate counts by state, queued/in-flight/outcome_unknown
+  totals, oldest queued timestamp, and counts by effective wait reason for the caller's scope.
+- `EndpointRuntimeRead` — `endpoint_id`/name, catalog `is_active`, `operational_state`,
+  `max_concurrency`, `occupied_slots`, `available_slots`, `draining_complete`.
+- `CancelResult` — typed outcome (`cancelled_now` | `cancellation_requested` | `already_cancelled` |
+  `terminal` | `outcome_unknown`) plus final `state`.
+- `ReconcileRequest` (`disposition: failed|cancelled`) / `ReconcileResult`.
+- `QuotaStatusRead` — safe runtime quota metadata per limit/window with computed `remaining`; never
+  fabricates window rows.
+
+These DTOs back the `/admin/v1/queue` surface introduced in AGV2-018, reusing the shared `Page[T]`
+shape and the deployment-vs-project authorization split.
+
 ## Requirements honored
 
 - Stable opaque resource IDs (typed `*Id` values, no database auto-increment or table names).

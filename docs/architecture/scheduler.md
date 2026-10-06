@@ -222,6 +222,59 @@ idempotency uniqueness. Migration `0008` adds the one-enabled-price-policy-per-r
 index, billing-unit-specific price-shape CHECK constraints, and relaxes
 `budget_reservations.price_snapshot_id` to nullable for the snapshot lifecycle.
 
+## Phase 5 — operator control plane (AGV2-018)
+
+AGV2-018 exposes the queue/operator administration surface through `/admin/v1/queue` and adds a
+durable per-endpoint **operational state** distinct from catalog `is_active`. See
+`docs/architecture/admin-api.md` for the endpoint surface; the scheduler-side semantics are below.
+
+### Endpoint operational state
+
+`Endpoint.operational_state` (`EndpointOperationalState`: `active` | `paused` | `draining`) is
+durable scheduling/operator state, added by migration `0015` with a database CHECK constraint. It is
+**not** the same as catalog `is_active` (configuration/lifecycle): catalog deactivation keeps its
+existing resource-unavailable semantics, while pause/drain is operator intent to stop *new* dispatch
+without killing in-flight work.
+
+- `active` — normal dispatch.
+- `paused` — after the pause transaction commits, no new request may acquire endpoint capacity;
+  already reserved/dispatched/streaming work is not killed; queued work remains queued; `resume`
+  re-enables future dispatch.
+- `draining` — also prevents new capacity reservations; existing in-flight work settles normally;
+  `draining_complete` is true when active physical reservations reach zero; the state remains
+  `draining` until an explicit `resume` (no background state flip).
+
+### Pause/drain admission gate
+
+The worker re-checks `operational_state` under the **same endpoint row `FOR UPDATE` lock** used for
+physical capacity admission, immediately before reserving (via `lock_endpoint`). This is the
+correctness mechanism, not a queue-scan filter: a claim already holding the endpoint lock before a
+pause commits may complete its reservation first (the pause waits on the lock), and after the pause
+commit no later claim can reserve. Filtering paused/draining endpoints out of queue scans is an
+optimization only. A paused claim yields a `"paused"` outcome (worker waits without hot-spinning); a
+draining endpoint with occupied slots yields `"full"`, and draining with zero occupied slots resolves
+the request to a failure so queued work does not strand.
+
+### Cancellation and reconciliation reuse one transition
+
+`SchedulingService.request_cancellation`, the development reconcile CLI, and the new admin service
+all route through the same module-level `cancel_request_transition` / `reconcile_transition`
+primitives, so there is a single state machine (no divergent lifecycle copies):
+
+- `queued`/`reserved` cancellation is terminal `cancelled` immediately (release endpoint/quota/budget
+  reservations, discard the pre-dispatch price snapshot);
+- `dispatched`/`streaming` sets `cancellation_requested` and never claims upstream stopped — the
+  owning worker settles conservatively;
+- already cancelled is idempotent; `succeeded`/`failed`/`expired` are a stable no-op conflict;
+- `outcome_unknown` cannot be cancelled — it requires explicit reconciliation.
+
+Reconciliation accepts only `failed` | `cancelled` (never `succeeded`), uses the authenticated
+`principal_id` as `reconciled_by`, releases the held physical reservation exactly once, and settles
+budget conservatively without fabricating usage.
+
+Schema: migration `0015` adds `endpoints.operational_state` with `active` server default and a CHECK
+`IN ('active','paused','draining')`.
+
 ## Identity revalidation before dispatch (AGV2-012)
 
 Before the worker resolves the route or reserves any capacity, it re-validates the request's

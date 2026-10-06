@@ -138,6 +138,25 @@ floating point (`float`) is rejected for money and pricing. There is no
 - `AdminRequestContext` gains `authentication_kind`, optional `browser_session_id`, and keeps
   `api_credential_id`/`audience`/`scopes` populated only for the service-credential kind.
 
+### Endpoint operational state (AGV2-018)
+
+- `EndpointOperationalState` (`active` | `paused` | `draining`) — durable per-endpoint scheduling/
+  operator state (migration `0015`, CHECK-constrained), distinct from catalog `Endpoint.is_active`.
+  `paused` and `draining` both gate *new* dispatch but never kill in-flight work; `draining` also
+  carries operator intent to empty the endpoint (`draining_complete` becomes true at zero active
+  reservations), while `paused` is a pure hold. `resume` returns either to `active`.
+- `Endpoint.operational_state` defaults to `active` and is mapped through the persistence repository
+  (`_endpoint_to_domain`, `create_endpoint`) alongside the existing `is_active`/`max_concurrency`
+  fields.
+
+### Queue/operator admin DTOs (AGV2-018)
+
+Safe queue DTOs in `src/aethergate/contracts/admin_v1.py` (`QueueRequestRead`, `QueueSummaryRead`,
+`EndpointRuntimeRead`, `CancelResult`, `ReconcileRequest`/`ReconcileResult`, `QuotaStatusRead`) carry
+only non-content scheduling metadata (request/endpoint/alias/project attribution, state, timestamps,
+wait/lease metadata, cancellation/reconciliation flags). They never expose encrypted payload/result
+bytes, decrypted prompt/completion, stream-event bodies, fencing tokens, or provider secret material.
+
 ### Accounting entities (AGV2-010)
 
 - `PricePolicy` — mutable pricing configuration associated with a `RouteBinding` (request or token
