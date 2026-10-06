@@ -241,8 +241,8 @@ without killing in-flight work.
   already reserved/dispatched/streaming work is not killed; queued work remains queued; `resume`
   re-enables future dispatch.
 - `draining` — also prevents new capacity reservations; existing in-flight work settles normally;
-  `draining_complete` is true when active physical reservations reach zero; the state remains
-  `draining` until an explicit `resume` (no background state flip).
+  `draining_complete` is true when active physical reservations reach zero; queued work stays held
+  (`endpoint_draining`) until an explicit `resume` (no background state flip).
 
 ### Pause/drain admission gate
 
@@ -252,8 +252,7 @@ correctness mechanism, not a queue-scan filter: a claim already holding the endp
 pause commits may complete its reservation first (the pause waits on the lock), and after the pause
 commit no later claim can reserve. Filtering paused/draining endpoints out of queue scans is an
 optimization only. A paused claim yields a `"paused"` outcome (worker waits without hot-spinning); a
-draining endpoint with occupied slots yields `"full"`, and draining with zero occupied slots resolves
-the request to a failure so queued work does not strand.
+draining endpoint likewise holds queued work with wait reason `endpoint_draining` until resume.
 
 ### Cancellation and reconciliation reuse one transition
 

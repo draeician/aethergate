@@ -844,22 +844,13 @@ class SchedulingService:
                 )
 
                 if endpoint.operational_state == EndpointOperationalState.DRAINING.value:
-                    # Draining admits no new reservations: requests wait until the
-                    # endpoint drains to zero occupied slots, then fail cleanly so
-                    # operators can confirm drain completion.
-                    if active > 0:
-                        await scheduler_repository.set_request_wait_metadata(
-                            session, request_id=request_id, wait_reason="endpoint_draining"
-                        )
-                        return "full"
-                    await scheduler_repository.fail_request_direct(
-                        session,
-                        request_id=request_id,
-                        state=RequestState.FAILED,
-                        error_code="endpoint_draining",
-                        finished_at=now,
+                    # Draining admits no new reservations; queued work stays held
+                    # (endpoint_draining) until an explicit resume, so operators can
+                    # confirm drain completion without stranding or failing queued work.
+                    await scheduler_repository.set_request_wait_metadata(
+                        session, request_id=request_id, wait_reason="endpoint_draining"
                     )
-                    return "processed"
+                    return "paused"
 
                 if active >= endpoint.max_concurrency:
                     await scheduler_repository.set_request_wait_metadata(

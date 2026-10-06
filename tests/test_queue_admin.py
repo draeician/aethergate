@@ -423,7 +423,7 @@ async def test_pause_prevents_new_reserve_and_survives(queue_env):
 async def test_drain_prevents_new_reserve_until_empty(queue_env):
     env = queue_env
     service = env["service"]
-    await env["enqueue"](env["proj_a"], 2)
+    ids = await env["enqueue"](env["proj_a"], 2)
 
     # Put one request in-flight (reserved).
     a = await service.claim_and_reserve("w1")
@@ -437,8 +437,8 @@ async def test_drain_prevents_new_reserve_until_empty(queue_env):
     assert view.operational_state == "draining"
     assert view.draining_complete is False
 
-    # Draining with an occupied slot admits no new reservation.
-    assert await service.claim_and_reserve("w-drain") == "full"
+    # Draining with an occupied slot admits no new reservation and holds queued work.
+    assert await service.claim_and_reserve("w-drain") == "paused"
 
     # Once the in-flight work completes, draining_complete flips.
     await service.run_complete(a)
@@ -448,6 +448,20 @@ async def test_drain_prevents_new_reserve_until_empty(queue_env):
         )
     assert view.draining_complete is True
     assert view.occupied_slots == 0
+
+    # Queued work remains held until resume.
+    async with env["factory"]() as s:
+        row = await sched_repo.get_request(s, ids[1])
+        assert row.state == RequestState.QUEUED
+
+    async with env["factory"]() as s:
+        async with s.begin():
+            await queue_service.resume_endpoint(
+                s, context=env["sa_ctx"], endpoint_id=EndpointId(ENDPOINT_ID)
+            )
+    outcome = await service.claim_and_reserve("w-resume")
+    assert not isinstance(outcome, str) and outcome is not None
+    await service.run_complete(outcome)
 
 
 async def test_pause_does_not_kill_inflight(queue_env):
