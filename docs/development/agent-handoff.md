@@ -3,8 +3,9 @@
 ## Current State
 - Branch: `v2`.
 - AGV2-018 (queue/operator admin API) implementation and automated tests are complete; live nomnom
-  verification (scenarios A–L) has **not** been re-run this session and remains the open item (see
-  "Live verification status").
+  verification is **partially complete** — scenarios A, B, C, D, and F verified against the real stack;
+  E (race harness), G/H/I/J live, K (browser CSRF), and L (full regression + official SDK) remain
+  (G/H/I/J are covered by deterministic automated tests).
 - Migration head: `0015` (adds `endpoints.operational_state`). `0001`–`0014` untouched.
 - Full suite (with `DATABASE_URL` + `AETHERGATE_TEST_DATABASE_URL`): **425 passed** (was 402; +22
   queue-admin DB-gated tests + 1 migration test). `ruff check src tests` clean.
@@ -31,10 +32,10 @@ primitives in `scheduler/service.py`. No divergent lifecycle copies remain.
 ### 4. Pause/drain admission gate
 The worker re-checks `operational_state` under the same endpoint `FOR UPDATE` row lock used for
 physical capacity admission, immediately before reserving. Filtering paused/draining endpoints out of
-queue scans is an optimization only. A paused claim returns `"paused"` (worker waits, no hot-spin); a
-draining endpoint with occupied slots returns `"full"`; draining with zero occupied slots resolves the
-request to a failure. In-flight reserved/dispatched/streaming work is never killed; `resume` restores
-dispatch; `draining_complete` flips when active physical reservations reach zero.
+queue scans is an optimization only. A paused or draining claim returns `"paused"` (worker waits, no
+hot-spin) with wait reason `endpoint_paused`/`endpoint_draining`; queued work stays held until
+`resume`. In-flight reserved/dispatched/streaming work is never killed; `resume` restores dispatch;
+`draining_complete` flips when active physical reservations reach zero.
 
 ### 5. Endpoints added (`/admin/v1/queue`)
 - Reads: `GET /queue/requests` (paginated, filters), `GET /queue/requests/{request_id}`,
@@ -93,13 +94,42 @@ No SQL, stack traces, raw provider errors, or encryption data.
 - `ruff check src tests` clean.
 
 ## Live verification status
-Not performed this session. Remaining scenarios A–L from `current-task.md`:
-- A queue inspection/explanation (six concurrent, two slots), B project RBAC, C pause live +
-  restart persistence, D drain live, E pause/claim race harness, F queued cancel, G reserved cancel,
-  H in-flight cancel, I outcome_unknown reconciliation, J quota runtime status, K browser RBAC/CSRF
-  (requires the local OIDC IdP), L full regression + official OpenAI SDK.
-- Backend Ollama `http://192.168.22.50:11434` is reachable; image `aethergate-v2:local` is already
-  built, so `scripts/dev/v2 up`/`migrate`/`workers` and the dynamic host port are the entry point.
+Partially complete this session against the real stack (backend Ollama
+`http://192.168.22.50:11434`, upstream `qwen3.8-2b-distill:Q6_K`, alias `gpt-4`,
+`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, dynamic loopback host port). A
+real bug was found and fixed during this pass (see below).
+
+### Verified (A, B, C, D, F)
+- **A queue inspection**: six concurrent requests → observed `1 dispatched + 5 queued`, then all six
+  `succeeded`; queue summary counts coherent; endpoint runtime `occupied <= 2` with correct
+  `available_slots`; a request DTO contains none of `payload_encrypted`/`result_encrypted`/
+  `fencing_token`/`prompt`/`content`/`secret`.
+- **B project RBAC**: `system_admin` sees all; `project_admin(A)`/`project_viewer(A)` see A only;
+  `project_admin(B)` sees B only; A caller querying a B request ID → `404`; `project_admin(A)` pause →
+  `403`; `project_viewer(A)` cancel → `403`.
+- **C pause live**: pause → two requests stay `queued` with `effective_wait_reason=endpoint_paused`;
+  `operational_state=paused` survives API+worker restart; resume → held work dispatches and succeeds.
+- **D drain live**: drain → new request stays `queued` with `effective_wait_reason=endpoint_draining`
+  (held, **not** failed — this is the fixed behavior); `draining_complete=true` at zero occupied slots;
+  resume → held work dispatches.
+- **F queued cancellation**: `project_admin(A)` cancels its own queued request → `cancelled_now`,
+  `state=cancelled`; no upstream contact.
+
+### Fixed during this pass
+Draining initially **failed** queued work once occupied slots reached zero (`error_code=endpoint_draining`).
+This contradicted the spec ("queued work remains held; resume dispatches it"). Corrected in
+`scheduler/service.py` to hold queued work with wait reason `endpoint_draining` and return `"paused"`
+(worker waits) until an explicit `resume`; `draining_complete` remains a computed read of zero occupied
+slots. Test `test_drain_prevents_new_reserve_until_empty` now asserts the held-then-resume behavior.
+
+### Remaining
+- **E** pause-vs-claim live race harness (covered by the deterministic DB row-lock test
+  `test_pause_vs_claim_lock_race`).
+- **G/H/I/J** live (reserved/dispatched cancellation, outcome_unknown reconcile, quota status) — covered
+  by deterministic DB-gated tests in `tests/test_queue_admin.py`.
+- **K** browser RBAC/CSRF — needs the deterministic local OIDC IdP + an uncommitted compose override to
+  wire OIDC env passthrough.
+- **L** full regression + official OpenAI SDK non-stream/stream re-run.
 
 ## Key files
 - `src/aethergate/migrations/versions/0015_endpoint_operational_state.py` — new migration.
@@ -136,8 +166,11 @@ Not performed this session. Remaining scenarios A–L from `current-task.md`:
   `FOR UPDATE`; correctness is the endpoint row lock, not the sleep.
 - Live browser CSRF (scenario K) needs the deterministic local OIDC IdP and an uncommitted compose
   override to wire OIDC env passthrough (the same gap noted in the AGV2-017 handoff remains).
+- The model completes in ~3s on this backend, so catching the transient `reserved`/`dispatched`
+  in-flight window live requires a slow adapter or a stopped worker; those state transitions are
+  instead proven deterministically by the DB-gated tests.
 
 ## Recommended Next Step
-Run the AGV2-018 live nomnom verification (scenarios A–L) against the reachable Ollama backend and
-`scripts/dev/v2`, then record the live proofs (six/two queue, pause/drain + restart persistence,
-outcome_unknown reconcile, browser CSRF, official SDK regression) here and close the task.
+Complete the remaining AGV2-018 live scenarios (E race harness, G/H/I/J live, K browser CSRF with the
+local OIDC IdP, and L full regression + official OpenAI SDK), then re-run the full containerized suite
+to close the task.
