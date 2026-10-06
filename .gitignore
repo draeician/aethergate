@@ -17,3 +17,6 @@ test.bash
 aethergate.db
 check.bash
 stream-v2.json
+
+# Local operator-visible task marker; never commit task-in-progress state.
+.aethergate-wip
