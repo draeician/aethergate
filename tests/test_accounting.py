@@ -886,6 +886,49 @@ async def test_usage_record_and_ledger_idempotent(sched_engine):
     assert await _count(factory, models.UsageRecord) == 1
 
 
+async def test_settlement_replay_does_not_double_commit_budget(sched_engine):
+    await reset_schema(sched_engine)
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context = await ensure_dev_identity(session)
+            await _seed_budget_policy(
+                session, project_id=context.project_id, name="usd-budget",
+                limit_amount=Decimal("1"), window_seconds=60,
+            )
+
+    service, factory = await _build(sched_engine, mock)
+    request_id = await _enqueue(service, context, alias="a")
+    outcome = await service.claim_and_reserve("w1")
+    assert not isinstance(outcome, str) and outcome is not None
+    await service.run_complete(outcome)
+
+    # Replay the canonical settlement for the same request (as a retry would),
+    # without a second upstream charge. The already-committed reservation is
+    # skipped, so the budget window must not double-commit.
+    async with factory() as session:
+        async with session.begin():
+            await accounting_repo.settle_budget_reservations_to_actual(
+                session,
+                request_id=request_id,
+                actual_amount=Decimal("0.05"),
+                now=datetime.now(UTC),
+            )
+
+    async with factory() as session:
+        window = (await session.execute(select(models.BudgetWindow))).scalar_one()
+        assert window.committed_amount == Decimal("0.050000000000")
+        assert window.reserved_amount == Decimal("0.000000000000")
+    assert await _count(factory, models.UsageRecord) == 1
+    assert await _count(factory, models.LedgerEntry) == 1
+
+
 async def test_pre_dispatch_cancel_releases_budget(sched_engine):
     await reset_schema(sched_engine)
     mock = AccountingMockAdapter()

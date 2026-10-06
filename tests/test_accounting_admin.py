@@ -8,6 +8,7 @@ deployment-vs-project-scoped audit reads.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -36,7 +37,7 @@ from aethergate.domain.ids import (
     ProviderId,
     RouteBindingId,
 )
-from aethergate.errors import AdminAuthorizationError
+from aethergate.errors import AdminAuthorizationError, PricePolicyConflictError
 from aethergate.identity import admin as admin_service
 from aethergate.identity import rbac
 from aethergate.main import app
@@ -511,6 +512,172 @@ async def test_price_policy_one_enabled_per_route(acct_http):
         f"/admin/v1/price-policies/{alternate_id}", json={"enabled": True}, headers=sa_hdr
     )
     assert resp.status_code == 409
+
+
+# --- concurrent price-policy race ----------------------------------------------
+
+
+async def _seed_route_for_race(session) -> str:
+    """Seed a provider/account/endpoint/alias/route with no enabled price policy."""
+    await repository.create_provider(
+        session,
+        domain.Provider(id=ProviderId("prov-race"), kind="openai", name="prov-race"),
+    )
+    await repository.create_provider_account(
+        session,
+        domain.ProviderAccount(
+            id=ProviderAccountId("acct-race"),
+            provider_id=ProviderId("prov-race"),
+            name="acct-race",
+        ),
+    )
+    await repository.create_endpoint(
+        session,
+        domain.Endpoint(
+            id=EndpointId("ep-race"),
+            provider_account_id=ProviderAccountId("acct-race"),
+            name="ep-race",
+            base_destination=f"http://{ALLOWED_HOST}",
+        ),
+    )
+    await repository.create_model_alias(
+        session, domain.ModelAlias(id=ModelAliasId("alias-race"), name="gpt-4")
+    )
+    await repository.create_route_binding(
+        session,
+        domain.RouteBinding(
+            id=RouteBindingId("rb-race"),
+            model_alias_id=ModelAliasId("alias-race"),
+            endpoint_id=EndpointId("ep-race"),
+            provider_account_id=ProviderAccountId("acct-race"),
+            upstream_model="m",
+        ),
+    )
+    return "rb-race"
+
+
+async def test_concurrent_price_policy_create_race(acct_engine, acct_factory):
+    """Two independent sessions race to create the first enabled policy.
+
+    The partial unique index is the authoritative backstop: exactly one winner,
+    exactly one typed ``PricePolicyConflictError`` loser, and no raw
+    ``IntegrityError`` escapes.
+    """
+    await reset_schema(acct_engine)
+    async with acct_factory() as session:
+        async with session.begin():
+            route_id = await _seed_route_for_race(session)
+
+    barrier = asyncio.Barrier(2)
+
+    async def attempt(name: str) -> str:
+        async with acct_factory() as session:
+            async with session.begin():
+                await barrier.wait()
+                try:
+                    await repository.create_price_policy(
+                        session,
+                        domain.PricePolicy(
+                            id=PricePolicyId(f"pp-{name}"),
+                            route_binding_id=RouteBindingId(route_id),
+                            billing_unit=BillingUnit.REQUEST,
+                            currency="USD",
+                            request_price=Decimal("0.05"),
+                            enabled=True,
+                        ),
+                    )
+                except PricePolicyConflictError:
+                    return "conflict"
+                return "winner"
+
+    results = await asyncio.gather(attempt("a"), attempt("b"))
+    assert sorted(results) == ["conflict", "winner"]
+
+    async with acct_factory() as session:
+        async with session.begin():
+            enabled = await repository.count_price_policies(
+                session, route_binding_id=RouteBindingId(route_id), enabled=True
+            )
+    assert enabled == 1
+
+    # The loser's aborted transaction did not corrupt subsequent requests: a
+    # disabled alternate can still be created.
+    async with acct_factory() as session:
+        async with session.begin():
+            await repository.create_price_policy(
+                session,
+                domain.PricePolicy(
+                    id=PricePolicyId("pp-disabled-after"),
+                    route_binding_id=RouteBindingId(route_id),
+                    billing_unit=BillingUnit.REQUEST,
+                    currency="USD",
+                    request_price=Decimal("0.06"),
+                    enabled=False,
+                ),
+            )
+
+
+async def test_concurrent_price_policy_enable_race(acct_engine, acct_factory):
+    """Two disabled policies race to enable; only one may become active."""
+    await reset_schema(acct_engine)
+    async with acct_factory() as session:
+        async with session.begin():
+            route_id = await _seed_route_for_race(session)
+            await repository.create_price_policy(
+                session,
+                domain.PricePolicy(
+                    id=PricePolicyId("pp-a"),
+                    route_binding_id=RouteBindingId(route_id),
+                    billing_unit=BillingUnit.REQUEST,
+                    currency="USD",
+                    request_price=Decimal("0.05"),
+                    enabled=False,
+                ),
+            )
+            await repository.create_price_policy(
+                session,
+                domain.PricePolicy(
+                    id=PricePolicyId("pp-b"),
+                    route_binding_id=RouteBindingId(route_id),
+                    billing_unit=BillingUnit.REQUEST,
+                    currency="USD",
+                    request_price=Decimal("0.06"),
+                    enabled=False,
+                ),
+            )
+
+    barrier = asyncio.Barrier(2)
+
+    async def enable(policy_id: str, price: str) -> str:
+        async with acct_factory() as session:
+            async with session.begin():
+                await barrier.wait()
+                try:
+                    await repository.update_price_policy(
+                        session,
+                        PricePolicyId(policy_id),
+                        billing_unit=BillingUnit.REQUEST.value,
+                        currency="USD",
+                        unit_scale=1,
+                        request_price=Decimal(price),
+                        input_price=None,
+                        output_price=None,
+                        enabled=True,
+                        name=None,
+                    )
+                except PricePolicyConflictError:
+                    return "conflict"
+                return "winner"
+
+    results = await asyncio.gather(enable("pp-a", "0.05"), enable("pp-b", "0.06"))
+    assert sorted(results) == ["conflict", "winner"]
+
+    async with acct_factory() as session:
+        async with session.begin():
+            enabled = await repository.count_price_policies(
+                session, route_binding_id=RouteBindingId(route_id), enabled=True
+            )
+    assert enabled == 1
 
 
 async def test_price_snapshot_readonly_and_immutable(acct_http):
