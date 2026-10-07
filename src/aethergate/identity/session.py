@@ -52,6 +52,11 @@ from aethergate.persistence import repository
 SESSION_COOKIE_NAME = "ag_session"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 LOGIN_TXN_COOKIE_NAME = "ag_oidc_txn"
+# JS-readable CSRF cookie for the web console. It carries the raw per-session CSRF
+# token so browser JavaScript can echo it back in ``X-CSRF-Token``; it is NOT an
+# authentication credential and is validated against the session's one-way
+# verifier exactly like the header token. Never placed in local/sessionStorage.
+CSRF_COOKIE_NAME = "ag_csrf"
 
 # Throttle for sliding the idle window / last_seen write. Avoids a hot-row write
 # on every browser request while still enforcing idle expiry on each request.
@@ -394,6 +399,7 @@ async def link_external_identity(
 
 
 __all__ = [
+    "CSRF_COOKIE_NAME",
     "CSRF_HEADER_NAME",
     "LOGIN_TXN_COOKIE_NAME",
     "SESSION_COOKIE_NAME",

@@ -67,6 +67,11 @@ def _oidc_settings(**overrides) -> Settings:
     return Settings(**base)
 
 
+def _web_settings(**overrides) -> Settings:
+    overrides.setdefault("oidc_web_callback_path", "/auth/callback")
+    return _oidc_settings(**overrides)
+
+
 # ---------------------------------------------------------------------------
 # Unit tests (no DB)
 # ---------------------------------------------------------------------------
@@ -118,6 +123,17 @@ def test_oidc_prod_requires_https_issuer():
 
 def test_oidc_dev_allows_http_issuer():
     assert _oidc_settings().oidc_issuer == ISSUER
+
+
+def test_web_console_enabled_requires_path():
+    assert _oidc_settings().web_console_enabled is False
+    assert _web_settings().web_console_enabled is True
+
+
+def test_web_callback_path_rejects_open_redirect():
+    for bad in ("auth/callback", "//evil.example", "/auth?next=x", "/auth#frag", "https://x/a"):
+        with pytest.raises(ValidationError):
+            _web_settings(oidc_web_callback_path=bad)
 
 
 def test_txn_cookie_secure_in_prod(monkeypatch):
@@ -1033,3 +1049,110 @@ async def test_unique_issuer_subject_not_email(oidc_http):
                     subject=idp.subject,
                     now=session_service.utcnow(),
                 )
+
+
+# ---------------------------------------------------------------------------
+# Web-console callback completion mode (AGV2-020)
+# ---------------------------------------------------------------------------
+
+
+def _enable_web_console(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "aethergate.api.session_auth.get_settings", lambda: _web_settings()
+    )
+
+
+async def _follow_login_web(client, idp_client) -> tuple[httpx.Response, str, str]:
+    """Drive the full OIDC login in web-console mode; return (callback, session, csrf)."""
+    login = await client.get("/admin/v1/auth/oidc/login", follow_redirects=False)
+    assert login.status_code == 302
+    txn_cookie = login.cookies.get(session_service.LOGIN_TXN_COOKIE_NAME)
+    assert txn_cookie
+    authorize = await idp_client.get(login.headers["location"], follow_redirects=False)
+    assert authorize.status_code == 302
+    query = parse_qs(urlsplit(authorize.headers["location"]).query)
+    callback = await client.get(
+        "/admin/v1/auth/oidc/callback",
+        params={"code": query["code"][0], "state": query["state"][0]},
+        cookies={session_service.LOGIN_TXN_COOKIE_NAME: txn_cookie},
+        follow_redirects=False,
+    )
+    return (
+        callback,
+        callback.cookies.get(session_service.SESSION_COOKIE_NAME),
+        callback.cookies.get(session_service.CSRF_COOKIE_NAME),
+    )
+
+
+def _cookie_flags(response: httpx.Response, name: str) -> list[str]:
+    return [
+        h.lower()
+        for h in response.headers.get_list("set-cookie")
+        if name in h.lower()
+    ]
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_web_console_callback_redirects(oidc_http, monkeypatch):
+    client, idp_client, factory, idp = oidc_http
+    _enable_web_console(monkeypatch)
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+
+    callback, session_cookie, csrf_cookie = await _follow_login_web(client, idp_client)
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/auth/callback"
+    assert "csrf" not in callback.headers["location"].lower()
+    assert "token" not in callback.headers["location"].lower()
+    assert session_cookie
+    assert csrf_cookie
+
+    session_headers = _cookie_flags(callback, "ag_session")
+    csrf_headers = _cookie_flags(callback, "ag_csrf")
+    assert session_headers and all("httponly" in h for h in session_headers)
+    assert csrf_headers and all("httponly" not in h for h in csrf_headers)
+
+    # Session resolves and CSRF cookie value validates a mutation.
+    who = await client.get("/admin/v1/auth/session", cookies={"ag_session": session_cookie})
+    assert who.status_code == 200
+    ok = await client.post(
+        "/admin/v1/projects",
+        cookies={"ag_session": session_cookie},
+        headers={"X-CSRF-Token": csrf_cookie},
+        json={"name": "web-csrf-project"},
+    )
+    assert ok.status_code == 201
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_web_console_callback_failure_redirects(oidc_http, monkeypatch):
+    client, idp_client, factory, idp = oidc_http
+    _enable_web_console(monkeypatch)
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+
+    cb = await client.get("/admin/v1/auth/oidc/callback", params={"error": "access_denied"})
+    assert cb.status_code == 302
+    assert cb.headers["location"] == "/auth/callback"
+    assert cb.cookies.get(session_service.SESSION_COOKIE_NAME) is None
+    assert cb.cookies.get(session_service.CSRF_COOKIE_NAME) is None
+
+
+@pytest.mark.skipif(TEST_DATABASE_URL is None, reason="AETHERGATE_TEST_DATABASE_URL not set")
+async def test_web_console_logout_clears_csrf_cookie(oidc_http, monkeypatch):
+    client, idp_client, factory, idp = oidc_http
+    _enable_web_console(monkeypatch)
+    await _provision_linked_user(factory, idp, Role.SYSTEM_ADMIN)
+
+    _, session_cookie, csrf_cookie = await _follow_login_web(client, idp_client)
+    logout = await client.post(
+        "/admin/v1/auth/logout",
+        cookies={"ag_session": session_cookie},
+        headers={"X-CSRF-Token": csrf_cookie},
+    )
+    assert logout.status_code == 200
+    cleared = [
+        h.lower()
+        for h in logout.headers.get_list("set-cookie")
+        if session_service.CSRF_COOKIE_NAME in h.lower()
+    ]
+    assert cleared
+    assert all("max-age=0" in h or '=""' in h for h in cleared)

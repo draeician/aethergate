@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.api.deps import get_gateway_request_id
@@ -48,6 +48,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 _COOKIE_PATH = "/admin"
 _TXN_COOKIE_PATH = "/admin/v1/auth/oidc"
+_CSRF_COOKIE_PATH = "/"
 
 LOGIN_FAILED_EXCHANGE = "token_exchange_failed"
 LOGIN_FAILED_ID_TOKEN = "invalid_id_token"
@@ -67,8 +68,32 @@ def _set_session_cookie(response: JSONResponse, raw_cookie: str) -> None:
     )
 
 
-def _clear_session_cookie(response: JSONResponse) -> None:
+def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(key=session_service.SESSION_COOKIE_NAME, path=_COOKIE_PATH)
+
+
+def _set_csrf_cookie(response: Response, raw_csrf: str) -> None:
+    """Issue the JS-readable CSRF cookie for the web console.
+
+    Unlike the session cookie it is NOT HttpOnly (browser JS must read it to echo
+    ``X-CSRF-Token``), but it is not an authentication credential: the server
+    still validates it against the session's one-way verifier. It is never stored
+    in local/sessionStorage by the frontend.
+    """
+    settings = get_settings()
+    response.set_cookie(
+        key=session_service.CSRF_COOKIE_NAME,
+        value=raw_csrf,
+        httponly=False,
+        secure=settings.app_env == "prod",
+        samesite="lax",
+        path=_CSRF_COOKIE_PATH,
+        max_age=settings.oidc_session_absolute_seconds,
+    )
+
+
+def _clear_csrf_cookie(response: Response) -> None:
+    response.delete_cookie(key=session_service.CSRF_COOKIE_NAME, path=_CSRF_COOKIE_PATH)
 
 
 def _set_txn_cookie(response: RedirectResponse, raw_txn_cookie: str) -> None:
@@ -84,22 +109,37 @@ def _set_txn_cookie(response: RedirectResponse, raw_txn_cookie: str) -> None:
     )
 
 
-def _clear_txn_cookie(response: JSONResponse) -> None:
+def _clear_txn_cookie(response: Response) -> None:
     response.delete_cookie(
         key=session_service.LOGIN_TXN_COOKIE_NAME, path=_TXN_COOKIE_PATH
     )
 
 
+def _web_callback_redirect() -> RedirectResponse:
+    """Fixed, server-configured web-console completion redirect (no user input)."""
+    path = get_settings().oidc_web_callback_path
+    assert path is not None  # guarded by web_console_enabled
+    return RedirectResponse(path, status_code=302)
+
+
 def _oidc_failure_response(
     request: Request, *, code: str, message: str, status_code: int
-) -> JSONResponse:
-    """Return a standardized OIDC failure envelope and clear the transaction cookie.
+) -> Response:
+    """Return a standardized OIDC failure and clear the transaction cookie.
 
     Used for every callback failure path (pre- and post-consume). The browser's
     binding cookie is cleared alongside the error, but a valid pending login
     transaction is never consumed or deleted merely because a callback failed its
     binding/state check.
+
+    In web-console mode the JSON error is replaced by a fixed 302 redirect to the
+    server-configured callback path; the frontend callback page then detects the
+    absent session (401) and renders a fixed failure state.
     """
+    if get_settings().web_console_enabled:
+        response: Response = _web_callback_redirect()
+        _clear_txn_cookie(response)
+        return response
     response = JSONResponse(
         status_code=status_code,
         content={
@@ -167,7 +207,7 @@ async def oidc_callback(
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
-) -> JSONResponse:
+) -> Response:
     if error is not None or not code or not state:
         return _oidc_failure_response(
             request,
@@ -286,6 +326,17 @@ async def oidc_callback(
         ),
         csrf_token=raw_csrf,
     )
+
+    if settings.web_console_enabled:
+        # Web-console completion: HttpOnly session cookie + JS-readable CSRF cookie,
+        # then a fixed 302 to the frontend callback route. The raw CSRF token is
+        # never placed in the URL/query/fragment.
+        response: Response = _web_callback_redirect()
+        _set_session_cookie(response, raw_cookie)
+        _set_csrf_cookie(response, raw_csrf)
+        _clear_txn_cookie(response)
+        return response
+
     response = JSONResponse(status_code=200, content=body.model_dump(mode="json"))
     _set_session_cookie(response, raw_cookie)
     _clear_txn_cookie(response)
@@ -334,6 +385,7 @@ async def logout(request: Request, session: SessionDep) -> JSONResponse:
 
     response = JSONResponse(content=LogoutResult(revoked=revoked).model_dump(mode="json"))
     _clear_session_cookie(response)
+    _clear_csrf_cookie(response)
     return response
 
 

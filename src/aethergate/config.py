@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     oidc_login_ttl_seconds: int = Field(
         default=600, validation_alias="AETHERGATE_OIDC_LOGIN_TTL_SECONDS"
     )
+    # Web-console callback completion mode. When set (e.g. ``/auth/callback``),
+    # a successful OIDC callback issues the HttpOnly session cookie plus a separate
+    # JS-readable CSRF cookie and 302-redirects to this fixed relative path instead
+    # of returning JSON. The path is server-configured (never user-controlled), so
+    # it cannot be used as an open redirect. Unset/empty keeps the JSON-compatible
+    # callback contract (CLI/tests).
+    oidc_web_callback_path: str | None = Field(
+        default=None, validation_alias="AETHERGATE_OIDC_WEB_CALLBACK_PATH"
+    )
 
     # OAuth device flow (public CLI client) + durable human CLI sessions.
     # The device client is public and MUST have no embedded client secret; it is
@@ -165,6 +174,11 @@ class Settings(BaseSettings):
         """True when a public device client is configured (device flow available)."""
         return bool(self.oidc_enabled and self.oidc_device_client_id)
 
+    @property
+    def web_console_enabled(self) -> bool:
+        """True when the OIDC callback completes in web-console (redirect) mode."""
+        return bool(self.oidc_enabled and self.oidc_web_callback_path)
+
     @field_validator(
         "oidc_issuer",
         "oidc_client_id",
@@ -205,6 +219,19 @@ class Settings(BaseSettings):
             raise ValueError("oidc_login_ttl_seconds must be positive")
         if self.cli_session_ttl_seconds <= 0:
             raise ValueError("cli_session_ttl_seconds must be positive")
+        if self.oidc_web_callback_path is not None:
+            path = self.oidc_web_callback_path
+            if (
+                not path.startswith("/")
+                or path.startswith("//")
+                or "?" in path
+                or "#" in path
+                or "\\" in path
+                or "://" in path
+            ):
+                raise ValueError(
+                    "oidc_web_callback_path must be a fixed relative path (e.g. /auth/callback)"
+                )
         # An HTTP issuer is allowed only in dev/test; production requires HTTPS.
         if self.app_env == "prod" and self.oidc_issuer is not None:
             if not self.oidc_issuer.startswith("https://"):
