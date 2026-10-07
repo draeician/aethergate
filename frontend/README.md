@@ -1,73 +1,46 @@
-# React + TypeScript + Vite
+# AetherGate v2 — Web Console
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Same-origin React + TypeScript operator console for the v2 `/admin/v1` API. See
+`../docs/web-console.md` for the design, data sources, and deployment path.
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev            # Vite dev server (proxies /admin, /health, /v1 to the local API)
+npm run build          # tsc -b && vite build
+npm run lint           # eslint
+npm run preview        # serve the production build
 ```
+
+The Vite dev proxy target defaults to `http://localhost:8000`; override with
+`VITE_API_PROXY_TARGET` if the API binds another port. Runtime client code uses same-origin relative
+paths — it never hard-codes the API host port.
+
+## Generated API types
+
+The frontend does not hand-maintain endpoint/types as its source of truth:
+
+```bash
+npm run generate:openapi   # deterministic FastAPI OpenAPI export -> src/generated/openapi.json
+npm run generate:client    # openapi-typescript -> src/generated/schema.d.ts (committed)
+```
+
+`src/generated/schema.d.ts` is auto-generated; do not edit it. The application wrapper
+(`src/lib/client.ts`) owns credentials, CSRF, and error handling on top of the generated types.
+
+## Tests
+
+```bash
+npm run test          # vitest unit/component tests
+npm run test:watch    # vitest in watch mode
+npm run test:e2e      # Playwright browser tests (requires a live stack)
+```
+
+The Playwright specs in `e2e/` target `WEB_BASE_URL` (default `http://127.0.0.1:8080`) and use the
+deterministic local OIDC provider — no external IdP credentials required.

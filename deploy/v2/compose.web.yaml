@@ -1,0 +1,57 @@
+# AetherGate v2 — web console + deterministic dev OIDC override.
+#
+# Committed, first-class replacement for the old uncommitted compose.oidc.yaml.
+# Bring up the full web-console stack with:
+#
+#   docker compose --project-directory deploy/v2 \
+#     -f deploy/v2/compose.yaml -f deploy/v2/compose.web.yaml up -d
+#
+# or `scripts/dev/v2 web up` (which also writes the OIDC env into deploy/v2/.env).
+#
+# The web console is served same-origin by nginx and proxies /admin, /health and
+# /v1 to the api service, so browser requests carry the HttpOnly session + CSRF
+# cookies transparently. The web service binds the loopback only.
+#
+# The deterministic IdP is the in-repo DevOidcIdp (auto-approves /authorize). Its
+# ISSUER must be a URL reachable by BOTH the gateway container and the browser;
+# in practice that is the host LAN IP (e.g. http://192.168.x.y:8090), configured
+# in deploy/v2/.env. See docs/web-console.md.
+services:
+  api:
+    environment:
+      # Web-console completion: after a successful callback the backend sets the
+      # session + CSRF cookies and 302-redirects to this fixed frontend route.
+      AETHERGATE_OIDC_WEB_CALLBACK_PATH: ${AETHERGATE_OIDC_WEB_CALLBACK_PATH:-/auth/callback}
+
+  web:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    image: aethergate-v2-web:local
+    container_name: aethergate-v2-web
+    depends_on:
+      - api
+    ports:
+      # Loopback-only dev console. Fixed for OIDC redirect_uri determinism; this
+      # is a dev-only convenience and is never exposed beyond the host.
+      - "127.0.0.1:8080:80"
+    restart: "no"
+
+  dev-oidc-idp:
+    image: aethergate-v2:local
+    container_name: aethergate-v2-oidc-idp
+    command: ["python", "-m", "aethergate.dev_oidc_idp_server"]
+    environment:
+      ISSUER: ${AETHERGATE_OIDC_ISSUER:?set AETHERGATE_OIDC_ISSUER in deploy/v2/.env}
+      CLIENT_ID: ${AETHERGATE_OIDC_CLIENT_ID:-aethergate-dev-client}
+      SUBJECT: ${AETHERGATE_OIDC_SUBJECT:-dev-user}
+      EMAIL: ${AETHERGATE_OIDC_EMAIL:-}
+      DISPLAY_NAME: ${AETHERGATE_OIDC_DISPLAY_NAME:-}
+      DEVICE_CLIENT_ID: ${AETHERGATE_OIDC_DEVICE_CLIENT_ID:-}
+      PORT: "8090"
+    ports:
+      # Published on all interfaces so the browser (host) and the api container
+      # (via the host LAN IP) can both reach the ISSUER URL.
+      - "8090:8090"
+    depends_on:
+      - postgres

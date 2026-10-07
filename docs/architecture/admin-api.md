@@ -299,7 +299,10 @@ server-managed browser session that authorizes through the same RBAC engine as s
 - `GET /admin/v1/auth/oidc/callback` — complete login (exact `state`, one-time code exchange, ID-token
   validation). On success returns session metadata plus the one-time `csrf_token` and sets the session
   cookie; on failure returns a fixed `401 oidc_authentication_failed` / `400 invalid_login_state` with
-  no session created.
+  no session created. **Web-console mode** (`AETHERGATE_OIDC_WEB_CALLBACK_PATH` set): instead of JSON,
+  a successful callback sets the `HttpOnly` session cookie plus a separate JS-readable `ag_csrf`
+  cookie and `302`-redirects to the fixed configured path (the raw CSRF token is never in the URL);
+  failures `302` to the same path and the frontend detects the absent session.
 - `GET /admin/v1/auth/session` — resolve the current browser session (`SessionRead`).
 - `POST /admin/v1/auth/logout` — revoke the session and clear the cookie (CSRF-protected; idempotent,
   `revoked: true/false`).

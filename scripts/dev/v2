@@ -15,6 +15,7 @@
 #   reconcile list | resolve <id> --disposition <state> --by <operator>
 #   down      stop the stack (keeps the postgres volume)
 #   reset     stop the stack and DELETE the postgres volume (destructive)
+#   web       web console + dev OIDC IdP (web up | url | down)
 
 set -euo pipefail
 
@@ -23,8 +24,56 @@ COMPOSE_DIR="$REPO_ROOT/deploy/v2"
 ENV_FILE="$COMPOSE_DIR/.env"
 
 COMPOSE=(docker compose --project-directory "$COMPOSE_DIR" --file "$COMPOSE_DIR/compose.yaml")
+WEB_COMPOSE=(docker compose --project-directory "$COMPOSE_DIR" --file "$COMPOSE_DIR/compose.yaml" --file "$COMPOSE_DIR/compose.web.yaml")
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# Primary non-loopback IPv4 address of the host, used as the deterministic dev
+# IdP issuer so both the gateway container and the browser can reach it.
+host_ip() {
+    python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("8.8.8.8", 80))
+    print(s.getsockname()[0])
+except OSError:
+    print("127.0.0.1")
+finally:
+    s.close()
+PY
+}
+
+# Write the OIDC web-console env into deploy/v2/.env if not already present.
+# The IdP issuer is the host LAN IP (reachable from both the container and the
+# browser); the web console is the fixed loopback port 8080.
+ensure_oidc_web() {
+    local issuer client_id redirect_uri
+    issuer="http://$(host_ip):8090"
+    client_id="${AETHERGATE_OIDC_CLIENT_ID:-aethergate-dev-client}"
+    redirect_uri="http://127.0.0.1:8080/admin/v1/auth/oidc/callback"
+
+    touch "$ENV_FILE"
+    grep -q '^AETHERGATE_OIDC_ENABLED=' "$ENV_FILE" || {
+        printf 'AETHERGATE_OIDC_ENABLED=true\n' >> "$ENV_FILE"
+    }
+    grep -q '^AETHERGATE_OIDC_ISSUER=' "$ENV_FILE" || {
+        printf 'AETHERGATE_OIDC_ISSUER=%s\n' "$issuer" >> "$ENV_FILE"
+    }
+    grep -q '^AETHERGATE_OIDC_CLIENT_ID=' "$ENV_FILE" || {
+        printf 'AETHERGATE_OIDC_CLIENT_ID=%s\n' "$client_id" >> "$ENV_FILE"
+    }
+    grep -q '^AETHERGATE_OIDC_REDIRECT_URI=' "$ENV_FILE" || {
+        printf 'AETHERGATE_OIDC_REDIRECT_URI=%s\n' "$redirect_uri" >> "$ENV_FILE"
+    }
+    grep -q '^AETHERGATE_OIDC_JIT_PROVISIONING=' "$ENV_FILE" || {
+        printf 'AETHERGATE_OIDC_JIT_PROVISIONING=false\n' >> "$ENV_FILE"
+    }
+    grep -q '^AETHERGATE_OIDC_SUBJECT=' "$ENV_FILE" || {
+        printf 'AETHERGATE_OIDC_SUBJECT=dev-user\n' >> "$ENV_FILE"
+    }
+    printf 'OIDC issuer=%s redirect_uri=%s\n' "$issuer" "$redirect_uri" >&2
+}
 
 ensure_password() {
     if [[ -f "$ENV_FILE" ]] && grep -q '^POSTGRES_PASSWORD=' "$ENV_FILE"; then
@@ -172,6 +221,24 @@ cmd_reset() {
     "${COMPOSE[@]}" down --volumes
 }
 
+cmd_web_up() {
+    ensure_password
+    ensure_queue_key
+    ensure_bootstrap_token
+    ensure_oidc_web
+    "${WEB_COMPOSE[@]}" up -d
+    cmd_web_url
+}
+
+cmd_web_url() {
+    printf 'AETHERGATE_WEB_URL=http://127.0.0.1:8080\n'
+    printf 'AETHERGATE_OIDC_ISSUER=http://%s:8090\n' "$(host_ip)"
+}
+
+cmd_web_down() {
+    "${WEB_COMPOSE[@]}" down
+}
+
 usage() {
     sed -n '2,16p' "${BASH_SOURCE[0]}"
 }
@@ -188,6 +255,12 @@ case "${1:-}" in
     reconcile) cmd_reconcile "$@" ;;
     down) cmd_down ;;
     reset) cmd_reset ;;
+    web) shift; case "${1:-}" in
+        up) cmd_web_up ;;
+        url) cmd_web_url ;;
+        down) cmd_web_down ;;
+        *) die "web subcommand: up | url | down" ;;
+    esac ;;
     help|-h|--help) usage ;;
     *) usage; die "unknown command: ${1:-<none>}" ;;
 esac

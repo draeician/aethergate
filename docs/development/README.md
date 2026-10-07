@@ -22,6 +22,9 @@ scripts/dev/v2 <command>
 | `reconcile list` | List `outcome_unknown` requests (metadata only, never content). |
 | `reconcile resolve <id> --disposition <state> --by <op>` | Explicitly reconcile an `outcome_unknown` request to `failed`/`cancelled`/`succeeded` and release its held reservation. || `down` | Stop the stack, keeping the PostgreSQL volume. |
 | `reset` | Stop the stack and **delete** the PostgreSQL volume (destructive). |
+| `web up` | Bring up the web console + deterministic dev OIDC IdP (writes OIDC env into `deploy/v2/.env`). |
+| `web url` | Print the web URL (`http://127.0.0.1:8080`) and the IdP issuer. |
+| `web down` | Stop the web console + IdP services (keeps api/worker/postgres). |
 
 ## Port and network rules
 
@@ -354,6 +357,26 @@ returns `503 device_flow_unavailable`. The deterministic local IdP (`dev_oidc_id
 implements device authorization plus explicit `approve`/`deny`/`expire` control endpoints for
 offline verification.
 
+## Web console (AGV2-020)
+
+The web console is a same-origin React + TypeScript SPA under `frontend/` (see
+`docs/web-console.md` for the full design). It authenticates through the existing OIDC Authorization
+Code + PKCE flow, stores no credential/key/token in browser storage, and consumes `/admin/v1` only.
+
+- Routes: `/login`, `/auth/callback`, `/` (dashboard), `/queue`, `/queue/:requestId`, and
+  `/outcome-unknown` (system_admin). Dashboard data comes from `/admin/v1/queue/summary`,
+  `/admin/v1/queue/endpoints`, `/admin/v1/queue/quota-status`, and
+  `/admin/v1/projects/{id}/budget-status`; un-instrumented metrics (TTFT/upstream/retry) are marked
+  unavailable, never faked.
+- Web-console OIDC completion: set `AETHERGATE_OIDC_WEB_CALLBACK_PATH=/auth/callback` (with
+  `AETHERGATE_OIDC_ENABLED=true`). A successful callback then sets the `HttpOnly` `ag_session`
+  cookie plus a JS-readable `ag_csrf` cookie and `302`-redirects to `/auth/callback`; the raw CSRF
+  token is never placed in the URL.
+- Run it with `scripts/dev/v2 web up` (committed `deploy/v2/compose.web.yaml`), which serves the
+  console on `http://127.0.0.1:8080` and the in-repo deterministic IdP
+  (`python -m aethergate.dev_oidc_idp_server`) on `http://<host-lan-ip>:8090`. The IdP `ISSUER` must
+  be reachable by both the gateway container and the browser; `scripts/dev/v2 web url` prints it.
+
 ## Tests
 ```bash
 # host (offline; DB-gated tests skip)
@@ -361,6 +384,9 @@ offline verification.
 
 # full suite including DB-gated tests, inside the container
 scripts/dev/v2 test
+
+# frontend (see docs/web-console.md)
+cd frontend && npm run build && npm run lint && npm run test
 ```
 
 DB-gated tests use `AETHERGATE_TEST_DATABASE_URL` and skip when it is unset; `scripts/dev/v2 test`

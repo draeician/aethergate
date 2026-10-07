@@ -253,6 +253,34 @@ browser sessions. No provider token or CLI session secret is ever stored in plai
   as authentication material), provider access/ID tokens, the raw CLI session token, API
   credentials, or the Authorization header. (Settled)
 
+## Identity phase 5 — web console session and CSRF cookie (AGV2-020)
+
+The web console is a same-origin React SPA that authenticates through the existing human OIDC
+Authorization Code + PKCE flow and a server-managed browser session. It stores no credential, key,
+or token in browser storage, and it never calls legacy `/admin/*` endpoints.
+
+- **No browser-stored credential.** There is no master/admin API key, CLI token, OIDC token, session
+  cookie, or CSRF token in `localStorage`, `sessionStorage`, `IndexedDB`, frontend config, or
+  JS-readable application state. Authentication is the `HttpOnly` `ag_session` cookie only. (Settled)
+- **Web-console OIDC completion mode.** When `AETHERGATE_OIDC_WEB_CALLBACK_PATH` is set, a successful
+  callback sets the session cookie and 302-redirects to a **fixed, server-configured relative path**
+  (e.g. `/auth/callback`) instead of returning JSON; the raw CSRF token is never placed in the
+  URL/query/fragment. The path is validated to be a non-empty, scheme-free, query/fragment-free
+  absolute path (no open redirect). When unset, the deterministic JSON callback contract is
+  preserved. (Settled)
+- **JS-readable CSRF cookie.** Because browser JS must echo `X-CSRF-Token`, the callback issues a
+  separate `ag_csrf` cookie (`HttpOnly=false`, `SameSite=Lax`, `Secure` in `prod`, `Path=/`), derived
+  from the same fresh per-session CSRF secret and still validated against the server-side one-way
+  verifier. It is **not** an authentication credential and is cleared on logout/session invalidation.
+  (Settled)
+- **Centralized 401 → auth-expired.** The frontend request layer treats any `401` as session expiry,
+  clears local auth state centrally, and returns the console to login; `403` (authorization, incl.
+  CSRF failure) is kept distinct. Mutations attach `X-CSRF-Token` read from the `ag_csrf` cookie and
+  never retry automatically. (Settled)
+- **Role-aware UI is never the authorization boundary.** Buttons/views may hide deployment-only
+  actions from project-scoped roles, but the backend RBAC remains authoritative; hiding a control is
+  cosmetic only. (Settled)
+
 ## Bootstrap and fail-closed startup
 
 - A bootstrap credential is one-use, explicitly configured, and disabled after setup. (Settled — AGV2-013)
