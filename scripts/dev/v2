@@ -54,17 +54,24 @@ ensure_oidc_web() {
     redirect_uri="http://127.0.0.1:8080/admin/v1/auth/oidc/callback"
 
     touch "$ENV_FILE"
+    set_env() {
+        local key="$1" value="$2"
+        if grep -q "^${key}=" "$ENV_FILE"; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+        else
+            printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+        fi
+    }
+    # issuer and redirect_uri are derived from the host IP + fixed web port, so
+    # they must be (re)written on every web bring-up — a stale container-internal
+    # value (e.g. http://api:8000) is unreachable from the browser.
     grep -q '^AETHERGATE_OIDC_ENABLED=' "$ENV_FILE" || {
         printf 'AETHERGATE_OIDC_ENABLED=true\n' >> "$ENV_FILE"
     }
-    grep -q '^AETHERGATE_OIDC_ISSUER=' "$ENV_FILE" || {
-        printf 'AETHERGATE_OIDC_ISSUER=%s\n' "$issuer" >> "$ENV_FILE"
-    }
+    set_env AETHERGATE_OIDC_ISSUER "$issuer"
+    set_env AETHERGATE_OIDC_REDIRECT_URI "$redirect_uri"
     grep -q '^AETHERGATE_OIDC_CLIENT_ID=' "$ENV_FILE" || {
         printf 'AETHERGATE_OIDC_CLIENT_ID=%s\n' "$client_id" >> "$ENV_FILE"
-    }
-    grep -q '^AETHERGATE_OIDC_REDIRECT_URI=' "$ENV_FILE" || {
-        printf 'AETHERGATE_OIDC_REDIRECT_URI=%s\n' "$redirect_uri" >> "$ENV_FILE"
     }
     grep -q '^AETHERGATE_OIDC_JIT_PROVISIONING=' "$ENV_FILE" || {
         printf 'AETHERGATE_OIDC_JIT_PROVISIONING=false\n' >> "$ENV_FILE"

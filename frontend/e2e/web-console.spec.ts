@@ -56,5 +56,25 @@ test('signed-in console renders live queue data', async ({ page }) => {
   })
   await expect(page.getByText('Queued')).toBeVisible()
   await expect(page.getByText('In Flight')).toBeVisible()
-  await expect(page.getByText('Not yet instrumented')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Not yet instrumented' })).toBeVisible()
 })
+
+test('logout revokes the server session and returns to login', async ({ page }) => {
+  await page.goto('/')
+  if (await page.getByRole('link', { name: /sign in with oidc/i }).isVisible()) {
+    await page.getByRole('link', { name: /sign in with oidc/i }).click()
+  }
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({
+    timeout: 30_000,
+  })
+
+  await page.getByRole('button', { name: 'Sign Out' }).click()
+  await expect(page.getByRole('link', { name: /sign in with oidc/i })).toBeVisible({
+    timeout: 30_000,
+  })
+
+  // A direct session probe after logout must be unauthenticated (server revoked).
+  const sessionState = await page.request.get('/admin/v1/auth/session')
+  expect(sessionState.status()).toBe(401)
+})
+
