@@ -22,6 +22,13 @@ export default defineConfig({
   use: {
     baseURL: process.env.WEB_BASE_URL ?? 'http://127.0.0.1:8080',
     trace: 'retain-on-failure',
+    launchOptions: {
+      // Chromium's bundled software rasterizer never produces frames in some
+      // GPU-composited environments, which stalls requestAnimationFrame and
+      // therefore Playwright's "stable" actionability check (clicks hang). Forcing
+      // the GPU path lets rAF fire normally.
+      args: ['--disable-software-rasterizer'],
+    },
   },
   projects: [
     {

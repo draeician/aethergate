@@ -22,6 +22,13 @@ def _clear_db_env(monkeypatch):
         "AETHERGATE_UPSTREAM_ALLOWLIST",
         "AETHERGATE_QUEUE_KEY",
         "AETHERGATE_BOOTSTRAP_TOKEN",
+        "AETHERGATE_OIDC_ENABLED",
+        "AETHERGATE_OIDC_ISSUER",
+        "AETHERGATE_OIDC_CLIENT_ID",
+        "AETHERGATE_OIDC_CLIENT_SECRET",
+        "AETHERGATE_OIDC_REDIRECT_URI",
+        "AETHERGATE_OIDC_WEB_CALLBACK_PATH",
+        "AETHERGATE_OIDC_DEVICE_CLIENT_ID",
     ):
         monkeypatch.delenv(name, raising=False)
 

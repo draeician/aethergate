@@ -130,6 +130,15 @@ def test_web_console_enabled_requires_path():
     assert _web_settings().web_console_enabled is True
 
 
+def test_web_callback_path_empty_string_is_unset():
+    # An empty compose default (``${AETHERGATE_OIDC_WEB_CALLBACK_PATH:-}``) must be
+    # treated as unset, not as an invalid path, so api-only invocations (inspect/
+    # reconcile/test/migrate) do not fail config validation.
+    settings = _oidc_settings(oidc_web_callback_path="")
+    assert settings.oidc_web_callback_path is None
+    assert settings.web_console_enabled is False
+
+
 def test_web_callback_path_rejects_open_redirect():
     for bad in ("auth/callback", "//evil.example", "/auth?next=x", "/auth#frag", "https://x/a"):
         with pytest.raises(ValidationError):
@@ -192,6 +201,62 @@ async def test_id_token_validation_success():
         )
         claims = await provider.validate_id_token(token, expected_nonce="n1")
         assert claims["sub"] == SUBJECT
+    finally:
+        await http.aclose()
+
+
+async def test_idp_subject_control_endpoint_selects_subject():
+    # The deterministic IdP exposes a dev-only /subject control endpoint so a live
+    # driver can exercise distinct OIDC identities without restarting the IdP
+    # (which would rotate its signing key). It must mint the new subject.
+    idp = DevOidcIdp(issuer=ISSUER, client_id=CLIENT_ID, subject=SUBJECT)
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp.app), base_url=ISSUER)
+    try:
+        changed = await http.post("/subject", json={"subject": "pa-a"})
+        assert changed.status_code == 200
+        assert changed.json()["subject"] == "pa-a"
+
+        state = oidc_module.generate_state()
+        nonce = oidc_module.generate_nonce()
+        verifier, challenge = oidc_module.generate_pkce_pair()
+        authorize = await http.get(
+            "/authorize",
+            params={
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "state": state,
+                "nonce": nonce,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+        assert authorize.status_code == 302
+        code = parse_qs(urlsplit(authorize.headers["location"]).query)["code"][0]
+        token = await http.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "code_verifier": verifier,
+            },
+        )
+        assert token.status_code == 200
+        id_token = token.json()["id_token"]
+        claims = jwt.decode(id_token, options={"verify_signature": False})
+        assert claims["sub"] == "pa-a"
+    finally:
+        await http.aclose()
+
+
+async def test_idp_subject_control_rejects_empty_subject():
+    idp = DevOidcIdp(issuer=ISSUER, client_id=CLIENT_ID, subject=SUBJECT)
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp.app), base_url=ISSUER)
+    try:
+        for payload in ({}, {"subject": ""}, {"subject": None}):
+            resp = await http.post("/subject", json=payload)
+            assert resp.status_code == 400
     finally:
         await http.aclose()
 

@@ -85,6 +85,8 @@ class DevOidcIdp:
         self.app.post("/device/approve")(self._device_approve)
         self.app.post("/device/deny")(self._device_deny)
         self.app.post("/device/expire")(self._device_expire)
+        # Deterministic subject selection for multi-role live browser verification.
+        self.app.post("/subject")(self._set_subject)
 
     async def _discovery(self) -> JSONResponse:
         return JSONResponse(
@@ -303,6 +305,27 @@ class DevOidcIdp:
                 record["expires_at"] = time.time() - 1
                 return JSONResponse({"ok": True, "user_code": user_code})
         return JSONResponse(status_code=404, content={"error": "not_found"})
+
+    async def _set_subject(self, request: Request) -> JSONResponse:
+        """Set the subject minted in subsequent ID tokens (verification only).
+
+        Lets the live browser driver exercise distinct OIDC identities (for
+        example ``project_admin`` vs ``project_viewer``) against a single
+        deterministic IdP process without restarting it (a restart would rotate
+        the signing key and require the gateway to clear its JWKS cache). This is
+        development/verification tooling only, mirroring the device control
+        surface; it is never part of production identity infrastructure.
+        """
+        body = await request.body()
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "invalid_request"})
+        subject = payload.get("subject")
+        if not isinstance(subject, str) or not subject:
+            return JSONResponse(status_code=400, content={"error": "invalid_request"})
+        self.subject = subject
+        return JSONResponse({"ok": True, "subject": subject})
 
     def mint_id_token(
         self, claims: dict[str, Any], *, headers: dict[str, Any] | None = None
