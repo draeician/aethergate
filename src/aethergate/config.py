@@ -185,6 +185,7 @@ class Settings(BaseSettings):
         "oidc_redirect_uri",
         "oidc_client_secret",
         "oidc_device_client_id",
+        "oidc_web_callback_path",
         mode="before",
     )
     @classmethod
