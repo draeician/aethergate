@@ -52,17 +52,19 @@ Rules:
 ### Human device login (OAuth device flow)
 
 ```
-aethergate auth login [--no-store] [--json]
+aethergate auth login [--json]
 ```
 
 The CLI asks the gateway to start a device transaction (`POST /admin/v1/auth/device/start`), prints
 the verification URL + user code to **stderr**, then polls (`POST /admin/v1/auth/device/poll`) at the
-provider-recommended interval. It never prints the raw `device_code`. On success it stores the CLI
-session token in the protected token store (unless `--no-store`) and prints the result.
+provider-recommended interval. It never prints the raw `device_code`. On success it stores the one-time
+CLI session token in the protected token store and prints a **safe** confirmation (status,
+`stored=true`, authentication kind, principal id, roles, and expiry). The raw `ags_...` bearer token is
+consumed internally and never appears on stdout or stderr in either human or `--json` mode.
 
 Poll status handling: `pending` keeps polling; `slow_down` increases the local interval by the same
-+5s/60s cap the server enforces; `success` yields the one-time raw CLI session token; a terminal
-failure raises a stable error.
++5s/60s cap the server enforces; `success` yields the one-time raw CLI session token (consumed for
+storage, not emitted); a terminal failure raises a stable error.
 
 ### Service credential (automation)
 
@@ -82,8 +84,13 @@ it is never persisted automatically.
 
 - `aethergate auth whoami [--json]` — resolve the current CLI session / service credential
   (`authentication_kind` is `cli_session` or `service_credential`).
-- `aethergate auth logout [--json]` — revoke the server-side session (`POST /admin/v1/auth/cli/logout`,
-  idempotent) and delete the local token.
+- `aethergate auth logout [--json]` — revoke the server-side human CLI session
+  (`POST /admin/v1/auth/cli/logout`, idempotent) and delete the local token. If the session is
+  already expired/revoked (a `401`), the local token is still cleared so the user is never trapped
+  with an undeletable stale token. A stored service credential is **not** sent to the session logout
+  endpoint.
+- `aethergate auth clear-token [--json]` — remove the locally stored token (any kind) without
+  contacting the server; the explicit path for clearing a stored service credential.
 
 ## Protected token storage
 
@@ -92,13 +99,20 @@ Persistent tokens are stored through a `TokenStore` abstraction backed by the OS
 
 - The human CLI session token is stored under the profile name after a successful login.
 - A service credential may be stored under the profile via `auth set-token`.
-- `auth logout` revokes the session and removes the local token; `profile delete` removes its token
-  entry.
-- If no usable keyring is available, the CLI **fails safely** with an actionable message and does
-  not silently fall back to plaintext disk; `auth login --no-store` provides an explicit ephemeral
-  in-process mode.
+- `auth logout` revokes the session and removes the local token; `auth clear-token` removes any local
+  token without contacting the server; `profile delete` removes its token entry.
+- If no usable keyring is available (no backend, or a locked/unavailable backend), the CLI **fails
+  safely** with an actionable `TokenStoreUnavailable` message and no traceback, and does **not**
+  silently fall back to plaintext disk. There is no ephemeral `--no-store` escape hatch; a
+  one-process login that vanishes on exit is not useful, and the token is never exposed to make one
+  useful.
+- When a persisted human CLI session token (`ags_...`) receives an authentication `401`, the CLI
+  clears that token from protected storage (exit code `3`, with a re-login hint). A persisted service
+  credential (`agk_...`) is **retained** on `401`; `AETHERGATE_TOKEN` overrides never mutate
+  persistent storage; `403`/`404`/`409`/`5xx`/network failures never clear a token.
 - Tests use an in-memory `MemoryTokenStore`; the keyring implementation verifies each write with a
-  read-back round trip before trusting it.
+  read-back round trip before trusting it, and keyring backend exceptions are translated to
+  `TokenStoreUnavailable` rather than leaking tracebacks.
 
 ## Output and exit codes
 
@@ -141,7 +155,7 @@ One reusable client (`aethergate.cli.client.Client`) provides:
 
 ## Command coverage
 
-Core: `profile`, `auth login`/`logout`/`whoami`/`set-token`, `completion`.
+Core: `profile`, `auth login`/`logout`/`whoami`/`set-token`/`clear-token`, `completion`.
 
 - Projects: `projects list/show/create/update`.
 - Principals: `principals list/show/create`.

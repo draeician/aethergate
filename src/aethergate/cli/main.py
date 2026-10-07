@@ -20,16 +20,18 @@ from aethergate import __version__
 from aethergate.cli import output, profiles
 from aethergate.cli.client import Client
 from aethergate.cli.errors import (
+    AuthError,
     CliError,
     UsageError,
 )
-from aethergate.cli.tokenstore import (
-    MemoryTokenStore,
-    TokenStore,
-    default_token_store,
-)
+from aethergate.cli.tokenstore import TokenStore, default_token_store
 
 _PROFILE_KEY = "aethergate_profile"
+_TOKEN_ENV = "AETHERGATE_TOKEN"
+
+# Prefixes distinguishing a human CLI session token from a service credential.
+_CLI_SESSION_PREFIX = "ags_"
+_SERVICE_CREDENTIAL_PREFIX = "agk_"
 
 
 def _json_opt(func):
@@ -51,20 +53,49 @@ def _resolve_profile(ctx: click.Context) -> profiles.Profile:
     return profiles.get(store, ctx.obj.get(_PROFILE_KEY) if ctx.obj else None)
 
 
-def _resolve_token(profile_name: str) -> str | None:
-    env_token = os.environ.get("AETHERGATE_TOKEN")
+def _resolve_token(profile_name: str) -> tuple[str | None, str]:
+    """Return ``(token, source)`` for a profile.
+
+    ``source`` is one of ``"env"`` (``AETHERGATE_TOKEN`` override), ``"store"``
+    (persisted in the protected token store), or ``"none"``. Callers use the
+    source to decide whether a 401 may clear persistent storage.
+    """
+    env_token = os.environ.get(_TOKEN_ENV)
     if env_token:
-        return env_token
-    return _build_token_store().get(profile_name)
+        return env_token, "env"
+    token = _build_token_store().get(profile_name)
+    if token:
+        return token, "store"
+    return None, "none"
+
+
+def _maybe_clear_stale_session(profile_name: str, token: str | None, source: str) -> bool:
+    """Clear a persisted human CLI session token after an authentication 401.
+
+    Only a persisted ``ags_...`` human session is cleared. Service credentials
+    (``agk_...``) are retained, and ``AETHERGATE_TOKEN`` env overrides never
+    mutate persistent storage. Returns ``True`` when a token was removed.
+    """
+    if source != "store" or not token or not token.startswith(_CLI_SESSION_PREFIX):
+        return False
+    _build_token_store().delete(profile_name)
+    return True
 
 
 @contextmanager
 def _client_ctx(ctx: click.Context) -> Iterator[tuple[profiles.Profile, Client]]:
     profile = _resolve_profile(ctx)
-    token = _resolve_token(profile.name)
+    token, source = _resolve_token(profile.name)
     client = Client(base_url=profile.base_url, token=token, verify=profile.verify)
     try:
         yield profile, client
+    except AuthError:
+        if _maybe_clear_stale_session(profile.name, token, source):
+            raise AuthError(
+                "Authentication is required or has expired. "
+                "Run `aethergate auth login` to sign in again."
+            ) from None
+        raise
     finally:
         client.close()
 
@@ -164,11 +195,9 @@ def auth() -> None:
 
 @auth.command("login")
 @_json_opt
-@click.option("--no-store", is_flag=True, help="Do not persist the token (one-off).")
 @click.pass_context
-def auth_login(ctx: click.Context, as_json: bool, no_store: bool) -> None:
+def auth_login(ctx: click.Context, as_json: bool) -> None:
     profile = _resolve_profile(ctx)
-    store: TokenStore = MemoryTokenStore() if no_store else _build_token_store()
     client = Client(base_url=profile.base_url, token=None, verify=profile.verify)
     try:
         started = client.post("/admin/v1/auth/device/start")
@@ -201,23 +230,69 @@ def auth_login(ctx: click.Context, as_json: bool, no_store: bool) -> None:
                 token = result.get("token")
                 if not token:
                     raise UsageError("device login succeeded but returned no token")
-                if not no_store:
-                    store.set(profile.name, token)
-                _emit_data(as_json, result)
+                _build_token_store().set(profile.name, token)
+                _emit_data(as_json, _safe_login_result(result))
                 return
             raise UsageError(f"unexpected device poll status {status!r}")
     finally:
         client.close()
 
 
+def _safe_login_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Strip the raw bearer token before any output is produced.
+
+    The server returns the one-time ``ags_...`` token exactly once; the CLI
+    consumes it for protected storage and must never emit it. Only safe session
+    metadata is returned for human/JSON rendering.
+    """
+    session = result.get("session") or {}
+    return {
+        "status": "success",
+        "stored": True,
+        "authentication_kind": session.get("authentication_kind"),
+        "principal_id": session.get("principal_id"),
+        "roles": session.get("roles", []),
+        "expires_in": result.get("expires_in"),
+    }
+
+
 @auth.command("logout")
 @_json_opt
 @click.pass_context
 def auth_logout(ctx: click.Context, as_json: bool) -> None:
-    with _client_ctx(ctx) as (profile, client):
-        result = client.post("/admin/v1/auth/cli/logout")
-    _build_token_store().delete(profile.name)
+    profile = _resolve_profile(ctx)
+    token, source = _resolve_token(profile.name)
+    if source == "none" or not token:
+        raise AuthError("not logged in; no session token is available")
+    if token.startswith(_SERVICE_CREDENTIAL_PREFIX):
+        raise UsageError(
+            "a service-account credential is stored, not a human CLI session. "
+            "Run `aethergate auth clear-token` to remove it."
+        )
+
+    client = Client(base_url=profile.base_url, token=token, verify=profile.verify)
+    try:
+        try:
+            result = client.post("/admin/v1/auth/cli/logout")
+        except AuthError:
+            # Already expired/revoked server-side: still clear the stale local token.
+            result = {"revoked": False}
+    finally:
+        client.close()
+
+    if source == "store":
+        _build_token_store().delete(profile.name)
     _emit_data(as_json, result)
+
+
+@auth.command("clear-token")
+@_json_opt
+@click.pass_context
+def auth_clear_token(ctx: click.Context, as_json: bool) -> None:
+    """Remove the locally stored token without contacting the server."""
+    profile = _resolve_profile(ctx)
+    _build_token_store().delete(profile.name)
+    _emit_data(as_json, {"cleared": True})
 
 
 @auth.command("whoami")

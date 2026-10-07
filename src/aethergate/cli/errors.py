@@ -63,13 +63,18 @@ class ServerError(CliError):
 
 
 class TokenStoreUnavailable(CliError):
-    """No protected OS credential store is available to persist the token."""
+    """No usable protected OS credential store is available.
+
+    Raised for read, write, and removal when the keyring backend is missing,
+    locked, or otherwise unavailable. The message never includes the token or
+    credential.
+    """
 
     def __init__(self, detail: str) -> None:
         super().__init__(
-            "No protected credential store is available to save the token "
-            f"({detail}). Use --no-store for a one-off login, or configure a "
-            "system keyring (Secret Service / KWallet).",
+            "Protected credential store unavailable: "
+            f"{detail}. Configure a system keyring (Secret Service / KWallet), "
+            "or supply AETHERGATE_TOKEN for this process.",
             EXIT_GENERIC,
         )
 

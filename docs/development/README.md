@@ -336,7 +336,7 @@ aethergate completion bash    # completion without contacting the server
 Profiles live under `~/.config/aethergate/config.toml` and contain **no tokens**. Human login uses
 the gateway-mediated OAuth device flow (`aethergate auth login`); automation uses an admin service
 credential (`aethergate auth set-token --stdin`). Persistent tokens are stored in the OS keyring
-(never plaintext profile TOML); `auth login --no-store` gives an ephemeral in-process login. The
+(never plaintext profile TOML); a missing/locked keyring fails safely with no plaintext fallback. The
 `AETHERGATE_TOKEN` env var overrides storage for the current process only (CI).
 
 Device-flow configuration reuses the browser OIDC issuer/discovery/JWKS with a public device client:
