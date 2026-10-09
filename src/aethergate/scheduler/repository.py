@@ -1113,6 +1113,35 @@ async def clear_request_wait_metadata(session: AsyncSession, request_id: str) ->
     )
 
 
+async def clear_budget_wait_metadata_for_policy(
+    session: AsyncSession, budget_policy_id: str
+) -> int:
+    """Clear wait metadata for queued requests blocked by one budget policy.
+
+    Raising a budget policy limit must make previously ``budget_window_exhausted``
+    queued requests immediately eligible for re-evaluation. Their persisted
+    ``next_eligible_at`` otherwise points at the window reset and would keep them
+    ineligible until the window rolls over, even though the new limit admits them.
+    The worker re-evaluates admission on the next poll and re-applies blocking
+    metadata if the request is still short.
+    """
+    result = await session.execute(
+        update(models.InferenceRequest)
+        .where(
+            models.InferenceRequest.state == RequestState.QUEUED,
+            models.InferenceRequest.wait_reason == "budget_window_exhausted",
+            models.InferenceRequest.wait_limit_id == budget_policy_id,
+        )
+        .values(
+            wait_reason=None,
+            wait_limit_id=None,
+            wait_limit_metric=None,
+            next_eligible_at=None,
+        )
+    )
+    return result.rowcount or 0
+
+
 # ---------------------------------------------------------------------------
 # Queue / operator control-plane reads (no content, no secrets)
 # ---------------------------------------------------------------------------

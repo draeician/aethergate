@@ -515,6 +515,12 @@ async def update_project_budget_policy(
         enabled=new_enabled,
     )
     assert updated is not None
+    if new_limit > existing.limit_amount:
+        # Raising the cap makes budget-blocked queued requests immediately
+        # eligible for re-evaluation; clear their window-reset wait metadata so
+        # the worker re-checks them on the next poll instead of waiting for the
+        # window to roll over.
+        await sched_repo.clear_budget_wait_metadata_for_policy(session, str(policy_id))
     changed = (
         new_name != existing.name
         or new_limit != existing.limit_amount

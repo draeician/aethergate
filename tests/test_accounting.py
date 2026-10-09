@@ -193,11 +193,14 @@ class AccountingMockAdapter:
         self.total_tokens = total_tokens
         self.error = error
         self.estimate_available = estimate_available
+        self.complete_calls = 0
+        self.stream_calls = 0
 
     def estimate_input_tokens(self, request: ChatRequest) -> int | None:
         return self.input_tokens if self.estimate_available else None
 
     async def complete(self, request: ChatRequest, secret: str | None) -> CompletionResult:
+        self.complete_calls += 1
         if self.error is not None:
             raise self.error
         return CompletionResult(
@@ -214,6 +217,7 @@ class AccountingMockAdapter:
     async def stream(
         self, request: ChatRequest, secret: str | None
     ) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
         yield StreamChunk(
             content="ok",
             finish_reason="stop",
@@ -505,6 +509,85 @@ async def test_request_priced_budget_reserves_and_queues_exhausted(sched_engine)
             )
         )).scalars().all()
         assert len(blocked) == 1
+
+
+async def test_budget_window_exhausted_request_unblocks_after_policy_raise(sched_engine):
+    await reset_schema(sched_engine)
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context = await ensure_dev_identity(session)
+            await _seed_budget_policy(
+                session, project_id=context.project_id, name="usd-budget",
+                limit_amount=Decimal("0.05"), window_seconds=60,
+            )
+
+    service, factory = await _build(sched_engine, mock)
+    first_id = await _enqueue(service, context, alias="a")
+    second_id = await _enqueue(service, context, alias="a")
+
+    # Exactly one request fits (limit == price): the first commits P, the second
+    # is queued with budget_window_exhausted, not a terminal rejection.
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    assert first.request_id == first_id
+    await service.run_complete(first)
+
+    assert await service.claim_and_reserve("w1") == "budget"
+
+    async with factory() as session:
+        queued = await sched_repo.get_request(session, second_id)
+        assert queued.state == RequestState.QUEUED
+        assert queued.wait_reason == "budget_window_exhausted"
+        assert queued.wait_limit_metric == "budget"
+        assert queued.error_code is None
+
+    # Only the first request has settled; the second has no usage/debit yet.
+    async with factory() as session:
+        usages = (await session.execute(select(models.UsageRecord))).scalars().all()
+        assert [u.request_id for u in usages] == [first_id]
+    assert await _count(factory, models.LedgerEntry) == 1
+
+    # Raise the same policy's limit so the queued request now fits the window,
+    # and clear the budget-window wait metadata for requests blocked by this
+    # policy — the same behavior update_project_budget_policy performs through
+    # the admin path. Without it, the request's next_eligible_at still points at
+    # the window reset and it would not be reclaimed here.
+    async with factory() as session:
+        async with session.begin():
+            policy = (await session.execute(select(models.ProjectBudgetPolicy))).scalar_one()
+            policy.limit_amount = Decimal("0.10")
+            await sched_repo.clear_budget_wait_metadata_for_policy(session, policy.id)
+
+    # The same request ID is now eligible and dispatches, not a replacement.
+    reclaimed = await service.claim_and_reserve("w1")
+    assert not isinstance(reclaimed, str) and reclaimed is not None
+    assert reclaimed.request_id == second_id
+    await service.run_complete(reclaimed)
+
+    # Exactly one additional usage record and one signed usage_debit for the
+    # second request; no duplicate settlement.
+    async with factory() as session:
+        usages = (await session.execute(select(models.UsageRecord))).scalars().all()
+        assert {u.request_id for u in usages} == {first_id, second_id}
+        ledgers = (await session.execute(select(models.LedgerEntry))).scalars().all()
+        assert len(ledgers) == 2
+        second_ledgers = [
+            led
+            for led in ledgers
+            if led.usage_record_id
+            == next(u.id for u in usages if u.request_id == second_id)
+        ]
+        assert len(second_ledgers) == 1
+        assert second_ledgers[0].entry_type == "usage_debit"
+        assert second_ledgers[0].amount == Decimal("-0.050000000000")
+        assert mock.complete_calls == 2
 
 
 async def test_two_workers_cannot_oversubscribe_budget(sched_engine):
@@ -957,7 +1040,18 @@ async def test_pre_dispatch_cancel_releases_budget(sched_engine):
     outcome = await service.claim_and_reserve("w1")
     assert not isinstance(outcome, str) and outcome is not None
 
-    # Back to reserved (pre-dispatch) then cancel.
+    # The pre-dispatch reservation acquired a snapshot and reserved the full price.
+    async with factory() as session:
+        reserved = (
+            await session.execute(select(models.BudgetReservation))
+        ).scalar_one()
+        assert reserved.state == "reserved"
+        assert reserved.price_snapshot_id is not None
+        assert reserved.reserved_amount == Decimal("0.050000000000")
+        assert reserved.committed_amount == Decimal("0.000000000000")
+
+    # Back to reserved (pre-dispatch) then cancel: the real pre-dispatch window
+    # between reservation and durable dispatch intent.
     async with factory() as session:
         async with session.begin():
             await session.execute(
@@ -971,11 +1065,20 @@ async def test_pre_dispatch_cancel_releases_budget(sched_engine):
         reservation = (
             await session.execute(select(models.BudgetReservation))
         ).scalar_one()
+        # Released: snapshot detached/discarded, amounts zeroed, no usage/debit.
         assert reservation.state == "released"
+        assert reservation.price_snapshot_id is None
         assert reservation.reserved_amount == Decimal("0.000000000000")
+        assert reservation.committed_amount == Decimal("0.000000000000")
         window = (await session.execute(select(models.BudgetWindow))).scalar_one()
         assert window.reserved_amount == Decimal("0.000000000000")
+        assert window.committed_amount == Decimal("0.000000000000")
     assert await _count(factory, models.UsageRecord) == 0
+    assert await _count(factory, models.LedgerEntry) == 0
+    # The pre-dispatch snapshot is discarded, and no upstream dispatch occurred.
+    assert await _count(factory, models.PriceSnapshot) == 0
+    assert mock.complete_calls == 0
+    assert mock.stream_calls == 0
 
 
 async def test_outcome_unknown_keeps_budget_then_reconcile_commits(sched_engine):
