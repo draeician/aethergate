@@ -4,6 +4,10 @@
 - Branch: `v2`. AGV2-020 (web-console foundation) is implemented, and AGV2-020V (close live browser
   verification gaps) is now complete: every live criterion is green, tests/docs/fixes are pushed to
   `origin/v2`, and `.aethergate-wip` has been removed.
+- AGV2-020V was **independently re-verified live on 2026-10-09** against the isolated nomnom stack
+  (backend 503, frontend 27, Playwright 11, build/lint/ruff clean, real SDK non-stream + stream,
+  live outcome_unknown reconcile, live project RBAC/revocation/CSRF, and a visible six/two browser
+  capture). No code change was required; only this handoff was corrected.
 - Migration head unchanged at `0016`; no new migration; `0001`–`0016` untouched. Legacy Python v1 app
   and the dated architecture audit are untouched.
 
@@ -100,7 +104,9 @@ to reproduce inside every E2E run.
 
 ## Verification results (AGV2-020V)
 - Backend containerized suite (`scripts/dev/v2 test`): **503 passed** (baseline 500 + 3 new in
-  `tests/test_oidc_session.py`). `ruff check .` clean.
+  `tests/test_oidc_session.py`). `ruff check src tests` clean; a full `ruff check .` also reports
+  pre-existing violations in the legacy v1 `app/` and `scripts/` files, which are out of scope for
+  this task (not introduced by AGV2-020/020V).
 - Frontend: `npm run build` clean, `npm run lint` clean, **27 unit/component tests pass**.
 - Browser E2E (`npx playwright test`, chromium): **11 passed** — 4 `web-console.spec.ts` +
   7 `operator-rbac.spec.ts`.
@@ -108,8 +114,11 @@ to reproduce inside every E2E run.
   files, no key patterns).
 - Real SDK regression (official OpenAI Python SDK against `gpt-4`, inference-auth bypass **false**):
   non-stream and stream chat completions both passed with a real inference credential.
-- Live porting is dynamic: API base URL ephemeral (last observed `http://127.0.0.1:40887/v1`), web
-  console fixed `http://127.0.0.1:8080`, IdP issuer `http://192.168.22.50:8090`.
+- Live porting is dynamic: API base URL ephemeral (re-verified `http://127.0.0.1:46291/v1`), web
+  console loopback-only (re-verified on `http://127.0.0.1:8081` because `matrix-comms-element` already
+  occupied `0.0.0.0:8080` on the host — the committed `compose.web.yaml` default remains
+  `127.0.0.1:8080` and only the gitignored `deploy/v2/.env` redirect URI and a throwaway compose
+  override were pointed at `8081` for this run), IdP issuer `http://192.168.22.50:8090`.
 
 ## Migration / no-migration decision
 - No migration. Browser-session CSRF needs no schema change (CSRF stored server-side with the session;
@@ -129,7 +138,16 @@ to reproduce inside every E2E run.
   `docker compose up -d --scale worker=N --no-deps worker` instead; bring the web stack back with
   `scripts/dev/v2 web up`.
 - The local Ollama model is fast (~1.4s for short prompts); to observe simultaneous `in-flight=2`, the
-  six/two proof uses `max_tokens=2000` (~15s per request). The cap never exceeds 2 regardless.
+  six/two proof uses `max_tokens=2000` (~24s per request when serialized). The cap never exceeds 2
+  regardless, and observing `in-flight=2` requires **two** worker replicas — a single worker processes
+  one request at a time even when `endpoint.max_concurrency=2` (the physical concurrency bound is the
+  min of `max_concurrency` and the number of workers).
+- **Host port `8080` is not always free**: the unrelated `matrix-comms-element` container binds
+  `0.0.0.0:8080`, which also claims loopback and prevents `compose.web.yaml` from binding
+  `127.0.0.1:8080`. When that happens, point the web service at another loopback port (a throwaway
+  compose override `ports: !override ["127.0.0.1:8081:80"]`) and update the gitignored
+  `deploy/v2/.env` `AETHERGATE_OIDC_REDIRECT_URI` to match, then run Playwright with
+  `WEB_BASE_URL=http://127.0.0.1:8081`.
 - `ruff format` remains out of scope (pre-existing reformat of many files); `ruff check` is the gate.
 
 ## Key files
