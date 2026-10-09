@@ -44,3 +44,29 @@ npm run test:e2e      # Playwright browser tests (requires a live stack)
 
 The Playwright specs in `e2e/` target `WEB_BASE_URL` (default `http://127.0.0.1:8080`) and use the
 deterministic local OIDC provider — no external IdP credentials required.
+
+## Management UI (AGV2-021)
+
+The console now includes identity and catalog management over `/admin/v1`, organized into feature
+modules:
+
+- `src/features/identity/` — Projects (`/projects`, `/projects/:projectId`), Principals
+  (`/principals`, `/principals/:principalId`), Credentials (`/credentials`), Roles (`/roles`).
+- `src/features/catalog/` — Providers (`/catalog/providers`), Provider Accounts
+  (`/catalog/provider-accounts`), Endpoints (`/catalog/endpoints`), Quotas (`/catalog/quotas`),
+  Model Aliases (`/catalog/models`), Route Bindings (`/catalog/routes`).
+- `src/components/ui/` — shared `Modal`, `ConfirmDialog`, `ErrorBanner`, `EmptyState`, `StatusBadge`,
+  `RevealSecret`, `Form`, `Pagination`.
+- `src/lib/client.ts` — typed management client; `src/lib/roles.ts` — `isSystemAdmin` /
+  `isProjectAdmin` guards for role-aware navigation (backend remains authoritative).
+
+Security notes:
+
+- Credential raw keys are shown once in a `RevealSecret` modal (Copy, destroyed on close); never in
+  URL/history/web storage, and no "show existing key" control.
+- Provider accounts select existing `SecretRef` metadata only (no plaintext provider-secret input).
+- Endpoints distinguish catalog `is_active` from queue runtime `operational_state`.
+
+Live E2E: `e2e/management-rbac.spec.ts` (RBAC + one-time reveal canary + credential lifecycle) and
+`e2e/catalog-inference.spec.ts` (disposable alias → real SDK inference → deactivate fails safely →
+restore succeeds).

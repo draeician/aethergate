@@ -377,6 +377,46 @@ Code + PKCE flow, stores no credential/key/token in browser storage, and consume
   (`python -m aethergate.dev_oidc_idp_server`) on `http://<host-lan-ip>:8090`. The IdP `ISSUER` must
   be reachable by both the gateway container and the browser; `scripts/dev/v2 web url` prints it.
 
+## Web console management UI (AGV2-021)
+
+The web console now exposes the identity and catalog control-plane APIs (AGV2-013/014/016) through a
+typed `/admin/v1` client. New code is organized into feature modules rather than one god file:
+
+- `frontend/src/features/identity/` — projects (`/projects`, `/projects/:projectId`), principals
+  (`/principals`, `/principals/:principalId`), credentials (`/credentials`), roles (`/roles`).
+- `frontend/src/features/catalog/` — providers (`/catalog/providers`), provider accounts
+  (`/catalog/provider-accounts`), endpoints (`/catalog/endpoints`), quotas (`/catalog/quotas`),
+  model aliases (`/catalog/models`), route bindings (`/catalog/routes`).
+- `frontend/src/components/ui/` — shared `Modal`, `ConfirmDialog`, `ErrorBanner`, `EmptyState`,
+  `StatusBadge`, `RevealSecret`, `Form`, `Pagination`.
+- `frontend/src/lib/client.ts` — all management methods (`listProjects`, `createProject`,
+  `patchProject`, principals, role assignments, credentials (create/rotate/revoke), providers,
+  provider accounts, secret refs, endpoints, quota groups/limits, model aliases, route bindings) on
+  top of the generated OpenAPI types; `frontend/src/lib/roles.ts` exposes `isSystemAdmin`,
+  `isProjectAdmin`, and the identity/catalog management guards used only for nav hiding.
+
+Role visibility vs enforcement:
+
+- `system_admin` sees identity + catalog management routes and may mutate all of them.
+- `project_admin` sees only project-scoped identity surfaces and is denied catalog/deployment
+  mutations; `project_viewer` is read-only. Hiding is cosmetic — the backend `403`/non-enumeration
+  remains the authorization boundary.
+
+Security invariants preserved:
+
+- Credential raw keys are revealed exactly once in a dedicated `RevealSecret` modal (Copy action,
+  destroyed on close); never in URL/history/web storage/logs, and no "show existing key" control.
+- Provider-account configuration selects existing `SecretRef` metadata only; no plaintext
+  provider-secret input or raw-secret display. Raw secret storage remains deferred.
+- Endpoint pages distinguish catalog `is_active` from queue runtime `operational_state`; pause/drain/
+  resume stay queue/operator actions.
+- Route-binding/account/quota mismatches and the one-active-route rule render stable structured
+  backend errors with no client-side fallback chain.
+
+The live catalog → SDK inference and credential lifecycle criteria are demonstrated end-to-end by
+`frontend/e2e/catalog-inference.spec.ts` and `frontend/e2e/management-rbac.spec.ts` (see
+`docs/web-console.md`).
+
 ## Tests
 ```bash
 # host (offline; DB-gated tests skip)

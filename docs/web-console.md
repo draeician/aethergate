@@ -49,13 +49,69 @@ escape hatch, and server-side pagination stays server-side.
 - `/queue/:requestId` — safe request metadata detail.
 - `/outcome-unknown` — `system_admin`-only outcome-unknown list with reconcile actions.
 
+### Identity management (AGV2-021)
+
+- `/projects` — server-paginated project list; `/projects/:projectId` — detail with principals and
+  role assignments.
+- `/principals` — paginated principal list (USER vs SERVICE); `/principals/:principalId` — detail.
+- `/credentials` — credential metadata list (audience `inference` vs `admin`), create/rotate/revoke.
+- `/roles` — role-assignment list with grant/revoke.
+
+### Catalog management (AGV2-021, `system_admin` only)
+
+- `/catalog/providers` — provider CRUD (kind, capabilities, active).
+- `/catalog/provider-accounts` — provider-account CRUD with SecretRef metadata selection.
+- `/catalog/endpoints` — endpoint CRUD; shows catalog `is_active` and queue runtime
+  `operational_state` side by side.
+- `/catalog/quotas` — quota-group and quota-limit CRUD (request/token metric, window, units).
+- `/catalog/models` — public model-alias CRUD.
+- `/catalog/routes` — route-binding CRUD (alias → provider account → endpoint → optional quota group).
+
 Role-aware behavior:
 
-- `system_admin`: endpoint occupied-vs-available slots, operational state, pause/drain/resume,
-  quota/cooldown, project/endpoint filters, outcome-unknown reconcile (failed/cancelled only).
-- `project_admin`: own-project queue read + cancellation of own eligible work; budget headroom; no
-  deployment pause/drain/resume/reconcile.
-- `project_viewer`: read-only.
+- `system_admin`: sees the identity and catalog management routes plus all operator controls
+  (endpoint occupied-vs-available slots, operational state, pause/drain/resume, quota/cooldown,
+  project/endpoint filters, outcome-unknown reconcile). Can create/update projects, providers,
+  provider accounts, endpoints, quota groups/limits, model aliases, route bindings, credentials, and
+  grant/revoke roles.
+- `project_admin`: sees the identity management routes scoped to its own project (projects,
+  principals, credentials, roles). Can manage permitted principals/credentials/roles in its own
+  project and cancel its own eligible queued work; cannot enumerate other projects, cannot see the
+  catalog routes, and is denied deployment/catalog mutations by the backend (`403`).
+- `project_viewer`: read-only identity surfaces; no mutation controls; backend denies mutations
+  (`403`).
+
+Hiding a nav item or a control is cosmetic only. The backend is authoritative: a project role that
+navigates directly to a catalog route or calls a catalog/queue-deployment mutation still receives
+`403`, and cross-project opaque IDs are non-enumerating (`404`).
+
+## Management UI behavior (AGV2-021)
+
+- **Feature modules**: new console code lives under `frontend/src/features/identity/` and
+  `frontend/src/features/catalog/`, with shared primitives in `frontend/src/components/ui/`
+  (`Modal`, `ConfirmDialog`, `ErrorBanner`, `EmptyState`, `StatusBadge`, `RevealSecret`, `Form`,
+  `Pagination`). The typed client in `frontend/src/lib/client.ts` is the single access point.
+- **Server-side pagination and filtering**: every list page pages server-side (page size 20 default),
+  shows the total when the contract supplies it, and keeps filter state in component state. The
+  frontend never fetches all pages to render one table.
+- **PATCH semantics**: edit forms send only changed fields (omitted fields are unchanged; explicit
+  `null` only where the contract allows clearing), so backend PATCH semantics are respected and
+  generated OpenAPI types are used end to end.
+- **Credential one-time reveal**: create/rotate return a raw key once. It is shown only inside a
+  dedicated reveal modal/panel with a Copy action and a clear "cannot be retrieved again" note; the
+  value is never placed in the URL/history, never written to `localStorage`/`sessionStorage`/
+  `IndexedDB`, never logged, and is destroyed when the reveal closes. There is no "show existing key"
+  control (the backend cannot recover it).
+- **SecretRef metadata boundary**: provider-account configuration selects from existing
+  `SecretRef` metadata (a stable opaque ID). The console never invents a plaintext provider-secret
+  input or displays raw provider secrets; raw secret storage remains deferred.
+- **Endpoint catalog-vs-runtime distinction**: the endpoint list distinguishes catalog `is_active`
+  (config unavailable) from queue runtime `operational_state` (`active`/`paused`/`draining`, a
+  temporary operator scheduling state). Pause/drain/resume remain queue/operator actions, not
+  endpoint PATCH mutations.
+- **Route-binding invariants**: account/endpoint/quota-group mismatches and the one-active-route rule
+  render as stable structured backend errors (e.g. `409 active_route_conflict`) with no client-side
+  fallback chain.
 
 ## Dashboard data sources
 
