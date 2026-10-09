@@ -43,7 +43,11 @@ def main() -> int:
         print("MISSING_ENV")
         return 2
 
-    client = OpenAI(base_url=base_url, api_key=api_key, timeout=60.0)
+    # Default 60s is fine for an immediately-dispatching request; a request that
+    # stays queued while the caller drives browser actions (budget-unblock proof)
+    # needs a larger bound, injected via env (never argv).
+    timeout = float(os.environ.get("AETHERGATE_TIMEOUT", "60"))
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
     messages = [{"role": "user", "content": "sdk inference proof"}]
 
     try:

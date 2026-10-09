@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { expect, type APIResponse, type BrowserContext, type Page } from "@playwright/test";
@@ -291,6 +291,33 @@ export interface SdkResult {
   raw: string;
 }
 
+function sdkEnv(opts: { key: string; model: string; stream?: boolean; baseUrl?: string; timeout?: number }) {
+  const baseUrl = opts.baseUrl ?? `${WEB_BASE_URL.replace(/\/$/, "")}/v1`;
+  return {
+    ...process.env,
+    AETHERGATE_BASE_URL: baseUrl,
+    AETHERGATE_API_KEY: opts.key,
+    AETHERGATE_MODEL: opts.model,
+    AETHERGATE_STREAM: opts.stream ? "1" : "0",
+    ...(opts.timeout !== undefined ? { AETHERGATE_TIMEOUT: String(opts.timeout) } : {}),
+  };
+}
+
+function parseSdkOutput(stdout: string, code: number | null): SdkResult {
+  const line = stdout.trim().split("\n").pop() ?? "";
+  if (line.startsWith("OK_STREAM")) return { status: "ok_stream", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
+  if (line.startsWith("OK")) return { status: "ok", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
+  if (line.startsWith("MISSING_ENV")) return { status: "missing_env", exitCode: 2, httpStatus: null, errorCode: null, raw: stdout };
+  if (line.startsWith("FAIL")) {
+    const statusMatch = /status=(\S+)/.exec(line);
+    const codeMatch = /code=(\S+)/.exec(line);
+    const httpStatus = statusMatch && statusMatch[1] !== "None" ? Number(statusMatch[1]) : null;
+    const errorCode = codeMatch && codeMatch[1] !== "None" ? codeMatch[1] : null;
+    return { status: "fail", exitCode: code ?? 1, httpStatus, errorCode, raw: stdout };
+  }
+  return { status: "error", exitCode: code ?? 1, httpStatus: null, errorCode: null, raw: stdout };
+}
+
 /**
  * Invoke the official OpenAI Python SDK (repo venv) against the AetherGate
  * OpenAI-compatible surface. The inference key and model are passed through the
@@ -302,17 +329,11 @@ export async function runOfficialSdk(opts: {
   model: string;
   stream?: boolean;
   baseUrl?: string;
+  timeout?: number;
 }): Promise<SdkResult> {
-  const baseUrl = opts.baseUrl ?? `${WEB_BASE_URL.replace(/\/$/, "")}/v1`;
-  const env = {
-    ...process.env,
-    AETHERGATE_BASE_URL: baseUrl,
-    AETHERGATE_API_KEY: opts.key,
-    AETHERGATE_MODEL: opts.model,
-    AETHERGATE_STREAM: opts.stream ? "1" : "0",
-  };
+  const env = sdkEnv(opts);
   const stdout = await new Promise<string>((resolve) => {
-    execFile(PYTHON, [SDK_DRIVER], { env, timeout: 120_000 }, (_error, out) => {
+    execFile(PYTHON, [SDK_DRIVER], { env, timeout: 240_000 }, (_error, out) => {
       // A non-zero exit (e.g. model_unavailable) is still a valid result; the
       // driver prints a FAIL line. Only absence of stdout indicates a spawn or
       // timeout failure, which maps to `status: "error"` below.
@@ -320,16 +341,125 @@ export async function runOfficialSdk(opts: {
     });
   });
 
-  const line = stdout.trim().split("\n").pop() ?? "";
-  if (line.startsWith("OK_STREAM")) return { status: "ok_stream", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
-  if (line.startsWith("OK")) return { status: "ok", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
-  if (line.startsWith("MISSING_ENV")) return { status: "missing_env", exitCode: 2, httpStatus: null, errorCode: null, raw: stdout };
-  if (line.startsWith("FAIL")) {
-    const statusMatch = /status=(\S+)/.exec(line);
-    const codeMatch = /code=(\S+)/.exec(line);
-    const httpStatus = statusMatch && statusMatch[1] !== "None" ? Number(statusMatch[1]) : null;
-    const errorCode = codeMatch && codeMatch[1] !== "None" ? codeMatch[1] : null;
-    return { status: "fail", exitCode: 1, httpStatus, errorCode, raw: stdout };
+  return parseSdkOutput(stdout, 0);
+}
+
+export interface PendingSdk {
+  /** Resolve once the spawned SDK driver exits, returning its parsed result. */
+  wait: () => Promise<SdkResult>;
+  child: ChildProcess;
+}
+
+/**
+ * Spawn (do not await) the official OpenAI Python SDK driver so the caller can
+ * keep the same request pending while driving browser actions, then await it.
+ * Used by the budget-unblock proof to hold one queued SDK call open while the
+ * budget policy is raised through the UI.
+ */
+export function spawnOfficialSdk(opts: {
+  key: string;
+  model: string;
+  stream?: boolean;
+  baseUrl?: string;
+  timeout?: number;
+}): PendingSdk {
+  const child = spawn(PYTHON, [SDK_DRIVER], { env: sdkEnv(opts) });
+  let stdout = "";
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  // stderr is deliberately not captured to stdout: the driver's contract is a
+  // single redacted status line on stdout.
+  const wait = () =>
+    new Promise<SdkResult>((resolve) => {
+      child.on("close", (code) => resolve(parseSdkOutput(stdout, code)));
+      child.on("error", () =>
+        resolve({ status: "error", exitCode: 1, httpStatus: null, errorCode: null, raw: stdout }),
+      );
+    });
+  return { wait, child };
+}
+
+const COMPOSE_DIR = path.join(REPO_ROOT, "deploy", "v2");
+
+function composeArgs(...extra: string[]): string[] {
+  return [
+    "compose",
+    "--project-directory",
+    COMPOSE_DIR,
+    "--file",
+    path.join(COMPOSE_DIR, "compose.yaml"),
+    ...extra,
+  ];
+}
+
+function runCommand(binary: string, args: string[]): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    execFile(binary, args, { timeout: 180_000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`${binary} ${args.join(" ")} failed: ${stderr || err.message}`));
+      else resolve(stdout);
+    });
+  });
+}
+
+function runCompose(args: string[]): Promise<string> {
+  return runCommand("docker", args);
+}
+
+async function listWorkerContainers(): Promise<string[]> {
+  const stdout = await runCommand("docker", [
+    "ps",
+    "-a",
+    "--filter",
+    "name=aethergate-v2-worker",
+    "--format",
+    "{{.Names}}",
+  ]);
+  return stdout.trim().split("\n").filter((s) => s.length > 0);
+}
+
+export interface ReleaseHarnessResult {
+  project_id: string;
+  project_name: string;
+  request_id: string;
+  reservation_id: string;
+  budget_policy_id: string;
+  price: string;
+}
+
+/**
+ * Run the live pre-dispatch release harness in a one-off API container. Workers
+ * are stopped first so no live worker races the harness for the single queued
+ * request during its reserved (pre-dispatch) window, and restarted afterwards.
+ *
+ * Worker stop/start uses ``docker stop``/``docker start`` on the discovered
+ * worker containers directly: ``docker compose start worker`` waits on the
+ * postgres ``service_healthy`` dependency, which stalls under the rootless
+ * podman shim's healthcheck handling.
+ *
+ * The harness prints a single JSON object to stdout (identifiers only — no key,
+ * secret, prompt, or completion content); the compose provider banner/warnings
+ * go to stderr and are never parsed.
+ */
+export async function runReleaseHarness(): Promise<ReleaseHarnessResult> {
+  const workers = await listWorkerContainers();
+  if (workers.length > 0) {
+    await runCommand("docker", ["stop", ...workers]);
   }
-  return { status: "error", exitCode: 1, httpStatus: null, errorCode: null, raw: stdout };
+  try {
+    const stdout = await runCompose(
+      composeArgs("run", "--rm", "--no-deps", "api", "python", "-m", "aethergate.live_accounting_release"),
+    );
+    const jsonLine = stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .reverse()
+      .find((s) => s.startsWith("{"));
+    if (!jsonLine) throw new Error("release harness produced no JSON line on stdout");
+    return JSON.parse(jsonLine) as ReleaseHarnessResult;
+  } finally {
+    if (workers.length > 0) {
+      await runCommand("docker", ["start", ...workers]);
+    }
+  }
 }

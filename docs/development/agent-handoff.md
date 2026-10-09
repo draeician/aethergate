@@ -1,15 +1,104 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. AGV2-022 (Management UI II — pricing, budgets, usage, ledger, reservations, snapshots,
-  audit) is complete: the accounting-management surface is implemented in the web console, the live
-  pricing/immutable-snapshot and budget block/unblock proofs pass against the official OpenAI Python
-  SDK, and every automated/live criterion is green. Work is committed and pushed to `origin/v2`;
-  `.aethergate-wip` was removed after final push verification.
+- Branch: `v2`. AGV2-022V (close accounting live queue-unblock and released-reservation proofs) is
+  complete: the two remaining live acceptance gaps from AGV2-022 are closed with genuine same-request
+  budget unblock and pre-dispatch released-reservation proofs, plus a narrow scheduler fix surfaced by
+  the live proof. Work is committed and pushed to `origin/v2`; `.aethergate-wip` was removed after final
+  push verification.
 - Migration head unchanged at `0016`; no new migration; `0001`–`0016` untouched. Legacy Python v1 app
   and the dated architecture audit are untouched.
-- Two narrowly-scoped backend accounting defects surfaced by the live proofs were fixed (see "Backend
-  accounting corrections" below), preserving all existing accounting invariants.
+- Two real defects were fixed: (1) raising a budget policy limit did not clear the persisted
+  `next_eligible_at` of `budget_window_exhausted` queued requests, so they never became eligible; (2)
+  the web nginx proxy used the default `proxy_read_timeout` (60s), which cut long-held synchronous
+  inference requests with a 504 before slow upstream generation completed.
+
+## AGV2-022V — Close accounting live queue-unblock and released-reservation proofs
+
+### Why this task exists
+AGV2-022's final review found two narrow **live acceptance** gaps:
+1. The budget live proof used `budget_request_too_large`, a terminal *failed* request, then submitted a
+   *new* request after raising the limit. That does not prove the **same queued**
+   `budget_window_exhausted` request becomes eligible after a policy edit.
+2. There was no live/browser proof of a **real pre-dispatch released BudgetReservation** rendered with
+   `price_snapshot_id = null`, zero reserved/committed amounts, no UsageRecord, and no `usage_debit`.
+
+These two are now closed (see below), plus the real scheduler and nginx defects the proofs exposed.
+
+### Semantics distinction (recorded truthfully)
+- `budget_request_too_large` = fail-fast for a request that cannot fit even an empty budget window
+  (terminal rejection).
+- `budget_window_exhausted` = the queued temporary-capacity condition; the same request resumes after a
+  policy edit admits it. Only this scenario is called "block/unblock".
+
+### Real scheduler defect fix (found by the live unblock proof)
+`src/aethergate/scheduler/repository.py` gains `clear_budget_wait_metadata_for_policy(session,
+budget_policy_id)`; `src/aethergate/accounting/admin.py::update_project_budget_policy` calls it when
+`new_limit > existing.limit_amount`. Before this, raising the cap left the queued request's
+`next_eligible_at` pointing at the window reset, so the worker never reclaimed it. Deterministic
+coverage: `tests/test_accounting.py::test_budget_window_exhausted_request_unblocks_after_policy_raise`
+(first request commits P; second queues `budget_window_exhausted`; limit raise + metadata clear; the
+**same** request_id dispatches and settles exactly once).
+
+### Real nginx proxy defect fix (found by the live SDK proof)
+`frontend/nginx.conf` sets `proxy_read_timeout 600s` / `proxy_send_timeout 600s` on the `/v1/` location.
+The gateway holds non-stream requests synchronously while a queued request waits for admission and the
+upstream model generates (no bytes are flushed until the terminal result). The nginx default 60s cut
+those held connections with a 504, causing the official SDK to retry (new request_id each time). The web
+image was rebuilt and the `aethergate-v2-web` container recreated to apply it.
+
+### Live proofs (browser UI + official OpenAI Python SDK, inference-auth bypass = false)
+- **Budget unblock — same request** (`accounting.spec.ts` test 7): read the route's enabled request
+  price P; create a budget with limit == P through the UI; first official SDK request commits P; spawn a
+  second official SDK call and keep it pending; poll the queue API for the `budget_window_exhausted`
+  request and capture its stable `request_id` (targeted by `waitForBudgetQueuedRequest` via
+  `wait_limit_id`, and the row filter now uses the unique `budgetName` — filtering by the price string
+  is ambiguous because committed_amount equals P on older leftover rows and the list is ordered
+  oldest-first); prove queued/`budget_window_exhausted`/`wait_limit_metric=budget`/no error/no usage;
+  raise the **same** policy limit through the UI; await the original pending SDK call and prove it
+  succeeds (no replacement request); prove exactly one new UsageRecord and one signed `usage_debit`
+  (`-P`), and the server-exact committed/headroom values.
+- **Released reservation — real lifecycle + browser** (`accounting.spec.ts` test 8, new):
+  `src/aethergate/live_accounting_release.py` is a controlled harness using the real
+  scheduler/accounting path (enqueue → `claim_and_reserve` → reserve + snapshot → direct SQL revert to
+  the reserved pre-dispatch window → `request_cancellation`), with a `NoopAdapter` that asserts
+  `complete`/`stream` are never called (no upstream dispatch). Workers are stopped/restarted around it
+  (`runReleaseHarness`/`listWorkerContainers` in `fixtures.ts`, using direct `docker stop`/`start` to
+  avoid the podman `service_healthy` wait). The harness prints identifiers only (JSON, no secret/prompt/
+  completion) and asserts the released invariants. The browser Reservations page then proves the same
+  real reservation renders: state `released`, `reserved_amount = 0`, `committed_amount = 0`, and
+  `price_snapshot_id = null` shown as "No snapshot / released before dispatch".
+
+### Verification results (AGV2-022V)
+- Backend containerized suite (`scripts/dev/v2 test`): **505 passed** (baseline 504 + 1 deterministic
+  budget-unblock test). `505 tests collected`.
+- Frontend: `npm run build` clean, `npm run lint` clean, **74 unit/component tests pass** (22 files).
+- Browser E2E — `accounting.spec.ts`: **8 passed** (was 7; the new released-reservation proof makes 8).
+- Browser E2E — full suite (`npx playwright test`, chromium, `WEB_BASE_URL=http://127.0.0.1:8081`):
+  **24 passed, 2 failed** — the 2 failures are pre-existing and unrelated to this task:
+  - `management-rbac.spec.ts` "creates a project and a provider through the UI" now fails because
+    accumulated disposable projects (31) exceed the oldest-first 20-per-page list, so the new project
+    lands on page 2 and `getByText(projectName)` on page 1 times out (same root cause as the
+    AGV2-021/AGV2-021V operator-rbac queue pagination note below).
+  - `management-rbac.spec.ts` "inference credential lifecycle" is flaky: it issues two live `gpt-4`
+    SDK calls (each routed to the slow `qwen3.8-2b-distill:Q6_K`) inside the default 60s test timeout;
+    it passed on re-run.
+- Official OpenAI Python SDK (`openai 2.54.0`): the budget-unblock proof drives a **pending** non-stream
+  call that stays held through the browser policy edit and then succeeds; the released-reservation proof
+  asserts no upstream dispatch occurred.
+- `ruff check src tests` clean; `git diff --check` clean; OpenAPI/client generation drift clean from
+  this task (no contract/route change; `frontend/src/generated/openapi.json` and `schema.d.ts` are
+  unchanged in this diff). Secret/token/content canary scan clean.
+- No migration; `0016` remains head.
+
+### Dynamic ports (this run)
+- API base URL ephemeral `http://127.0.0.1:43591/v1`; web console loopback-only on
+  `http://127.0.0.1:8081`; IdP issuer `http://192.168.22.50:8090`.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-022V`, `branch=v2`, UTC start timestamp) was created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, every commit pushed
+to `origin/v2`, and the remote branch verified.
 
 ## AGV2-022 — Accounting management UI
 
@@ -279,6 +368,21 @@ to `origin/v2`, and the remote branch verified.
   assertions to the current run's route, and disable leftover enabled budgets; the disposable
   route/endpoint are deactivated at the end of the catalog E2E. The pricing table can still accumulate
   leftover price policies across aborted runs (assertions must stay route-scoped).
+- **Project list pagination (pre-existing, open)** — `management-rbac.spec.ts` "creates a project and a
+  provider through the UI" asserts `getByText(projectName)` on page 1 after creating a project, but the
+  projects list sorts oldest-first at 20 per page and disposable projects have now accumulated past 31,
+  so the new project lands on page 2. Same root cause as the AGV2-021 operator-rbac queue pagination
+  fix; not in AGV2-022V scope, so it remains open.
+- **management-rbac SDK lifecycle test timeout (pre-existing, flaky)** — "inference credential lifecycle"
+  issues two live `gpt-4` SDK calls (each routed to slow `qwen3.8-2b-distill:Q6_K`) inside the default
+  60s test timeout, so it intermittently exceeds the budget. It lacks the `test.setTimeout` that the
+  accounting/catalog live proofs use. Not in AGV2-022V scope.
+- **nginx proxy_read_timeout (fixed in AGV2-022V)** — the web nginx must not use the 60s default for
+  `/v1/`; the gateway holds non-stream requests while queued/upstream-generating. `proxy_read_timeout
+  600s` / `proxy_send_timeout 600s` are now set; recreate the web image+container to apply.
+- **Budget list oldest-first pagination (fixed in AGV2-022V)** — the budget list is ordered oldest-first;
+  the budget-unblock proof now targets its row by the unique per-run `budgetName`, not the price string
+  (committed_amount equals P on older leftover rows).
 - Existing AGV2-020V risks still apply: dev IdP key regeneration vs API JWKS cache; the Chromium
   `--disable-software-rasterizer` rAF fix; do not scale workers via `scripts/dev/v2 workers` (use
   `docker compose up -d --scale worker=N --no-deps worker`); host port `8080` may be occupied.
@@ -289,15 +393,21 @@ to `origin/v2`, and the remote branch verified.
   `frontend/src/lib/decimal.ts`, `frontend/src/lib/client.ts`, `frontend/src/lib/roles.ts`,
   `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`.
 - E2E: `frontend/e2e/accounting.spec.ts` (accounting RBAC + live pricing/snapshot + budget
-  block/unblock proofs), `frontend/e2e/catalog-inference.spec.ts` (timeout bump),
-  `frontend/e2e/fixtures.ts` (`runOfficialSdk`, `goToLastPage`), `frontend/e2e/sdk_inference.py`.
+  block/unblock + released-reservation proofs), `frontend/e2e/catalog-inference.spec.ts` (timeout bump),
+  `frontend/e2e/fixtures.ts` (`runOfficialSdk`, `spawnOfficialSdk`, `runReleaseHarness`,
+  `listWorkerContainers`, `goToLastPage`), `frontend/e2e/sdk_inference.py`, `frontend/nginx.conf`
+  (proxy read/send timeout).
 - Backend: `src/aethergate/domain/value_objects.py` (canonical money serialization),
-  `src/aethergate/scheduler/service.py` (signed usage debits), `tests/test_contracts.py`,
-  `tests/test_accounting.py`.
+  `src/aethergate/scheduler/service.py` (signed usage debits), `src/aethergate/scheduler/repository.py`
+  (`clear_budget_wait_metadata_for_policy`), `src/aethergate/accounting/admin.py` (clears wait metadata
+  on limit raise), `src/aethergate/live_accounting_release.py` (live released-reservation harness),
+  `tests/test_contracts.py`, `tests/test_accounting.py`.
 - Docs: `docs/web-console.md`, `docs/development/README.md`, `frontend/README.md`.
 
 ## Recommended Next Step
-Begin the next management phase (reservations/usage/ledger live-history deep links and cross-linking,
-or the observability metrics follow-up), reusing the now-verified Decimal-safe, typed-client,
-role-guard, pagination, PATCH, and one-time-reveal patterns established here, starting from the green
-504/74/25 regression baseline.
+Fix the two open pre-existing Playwright flakes (the management-rbac project-list pagination assertion
+and the missing `test.setTimeout` on the management-rbac SDK lifecycle test), then begin the next
+management phase (reservations/usage/ledger live-history deep links and cross-linking, or the
+observability metrics follow-up), reusing the now-verified Decimal-safe, typed-client, role-guard,
+pagination, PATCH, one-time-reveal, and long-held-SDK-proof patterns established here, starting from the
+green 505/74/8(accounting) regression baseline.
