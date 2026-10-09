@@ -7,7 +7,7 @@ import {
   ensurePrincipal,
   ensureIdentityLink,
   ensureRoleAssignment,
-  submitInference,
+  runOfficialSdk,
 } from "./fixtures";
 
 /**
@@ -46,6 +46,7 @@ interface PrincipalRead {
 const SYSTEM_ADMIN_SUBJECT = "dev-user";
 const PROJECT_ADMIN_SUBJECT = "e2e-pa-a";
 const PROJECT_VIEWER_SUBJECT = "e2e-pv-a";
+const LIVE_ALIAS = "gpt-4";
 
 let projectA: string;
 let projectB: string;
@@ -242,52 +243,83 @@ test.describe("project_viewer read-only", () => {
 });
 
 test.describe("inference credential lifecycle", () => {
-  test("create -> use -> rotate -> old fails/new works -> revoke -> fails", async ({ browser }) => {
+  test("create/rotate/revoke through the UI with official SDK outcomes", async ({
+    page,
+    browser,
+  }) => {
+    // A disposable project + principal keep the credential list on page 1.
+    const runId = Date.now();
     const admin = await openSession(browser, SYSTEM_ADMIN_SUBJECT);
+    const lifecycleProject = await ensureProject(admin.context, `e2e-lifecycle-project-${runId}`);
+    const principalName = `e2e-lifecycle-principal-${runId}`;
+    await ensurePrincipal(admin.context, lifecycleProject, principalName);
+    await admin.context.close();
 
-    const name = `e2e-lifecycle-cred-${Date.now()}`;
-    const created = await adminJson<{ credential: { id: string }; raw_key: string }>(
-      admin.context,
-      "POST",
-      "/admin/v1/credentials",
-      { project_id: projectA, principal_id: paA, name, audience: "inference" },
+    const credentialName = `e2e-lifecycle-cred-${runId}`;
+    const consoleMessages: string[] = [];
+
+    await loginAs(page, SYSTEM_ADMIN_SUBJECT);
+    page.on("console", (msg) => consoleMessages.push(msg.text()));
+
+    // Create through the UI and capture the one-time reveal.
+    await page.goto(`/credentials?project=${lifecycleProject}`);
+    await expect(page.getByRole("heading", { name: "Credentials" })).toBeVisible();
+    await page.getByRole("button", { name: "New credential" }).click();
+    await page.getByLabel("Name").fill(credentialName);
+    await expect(page.locator("#credential-principal option", { hasText: principalName })).toHaveCount(
+      1,
+      { timeout: 15_000 },
     );
-    expect(created.status).toBe(201);
-    const credentialId = created.body.credential.id;
-    const originalKey = created.body.raw_key;
+    await page.getByLabel("Principal").selectOption({ label: principalName });
+    await page.getByRole("dialog").getByRole("button", { name: "Create" }).click();
+
+    const revealCode = page.getByRole("dialog").locator("code");
+    await expect(revealCode).toBeVisible({ timeout: 15_000 });
+    const originalKey = (await revealCode.textContent())?.trim() ?? "";
     expect(originalKey.length).toBeGreaterThan(16);
 
-    // Original key works.
-    const ok = await submitInference(originalKey, [{ role: "user", content: "lifecycle hello" }]);
-    expect(ok.status).toBe(200);
+    // One-time reveal canary: never in URL/storage/console.
+    expect(page.url()).not.toContain(originalKey);
+    const storage = await page.evaluate(() => ({
+      local: Object.values(window.localStorage),
+      session: Object.values(window.sessionStorage),
+    }));
+    expect(storage.local.join("\n")).not.toContain(originalKey);
+    expect(storage.session.join("\n")).not.toContain(originalKey);
 
-    // Rotate: old key is invalidated, new key works. Rotation mints a new
-    // credential id, so capture it for the subsequent revoke.
-    const rotated = await adminJson<{ credential: { id: string }; raw_key: string }>(
-      admin.context,
-      "POST",
-      `/admin/v1/credentials/${credentialId}/rotate`,
-    );
-    expect(rotated.status).toBe(200);
-    const newCredentialId = rotated.body.credential.id;
-    const newKey = rotated.body.raw_key;
+    // Closing the reveal destroys the in-memory value.
+    await page.getByRole("dialog").getByRole("button", { name: "Done" }).click();
+    await expect(revealCode).toHaveCount(0);
+    expect(await page.locator("body").innerText()).not.toContain(originalKey);
+    expect(consoleMessages.join("\n")).not.toContain(originalKey);
 
-    const oldAfterRotate = await submitInference(originalKey, [
-      { role: "user", content: "stale key" },
-    ]);
-    expect(oldAfterRotate.status).toBe(401);
+    // Official SDK with the new key succeeds.
+    const createdOk = await runOfficialSdk({ key: originalKey, model: LIVE_ALIAS });
+    expect(createdOk.status).toBe("ok");
 
-    const newWorks = await submitInference(newKey, [{ role: "user", content: "new key" }]);
-    expect(newWorks.status).toBe(200);
+    // Rotate through the UI.
+    await clickCredentialAction(page, credentialName, "Rotate", "Rotate credential?", "Rotate");
+    await expect(page.getByRole("dialog").locator("code")).toBeVisible({ timeout: 15_000 });
+    const rotatedKey = (await page.getByRole("dialog").locator("code").textContent())?.trim() ?? "";
+    expect(rotatedKey.length).toBeGreaterThan(16);
+    expect(rotatedKey).not.toBe(originalKey);
+    await page.getByRole("dialog").getByRole("button", { name: "Done" }).click();
 
-    // Revoke: even the rotated key fails immediately.
-    const revoked = await adminJson(admin.context, "POST", `/admin/v1/credentials/${newCredentialId}/revoke`);
-    expect(revoked.status).toBe(200);
+    // Old key fails immediately; new key succeeds.
+    const oldAfterRotate = await runOfficialSdk({ key: originalKey, model: LIVE_ALIAS });
+    expect(oldAfterRotate.status).toBe("fail");
+    expect(oldAfterRotate.httpStatus).toBe(401);
 
-    const afterRevoke = await submitInference(newKey, [{ role: "user", content: "revoked key" }]);
-    expect(afterRevoke.status).toBe(401);
+    const newWorks = await runOfficialSdk({ key: rotatedKey, model: LIVE_ALIAS });
+    expect(newWorks.status).toBe("ok");
 
-    await admin.context.close();
+    // Revoke through the UI.
+    await clickCredentialAction(page, credentialName, "Revoke", "Revoke credential?", "Revoke");
+
+    // Revoked key fails immediately.
+    const afterRevoke = await runOfficialSdk({ key: rotatedKey, model: LIVE_ALIAS });
+    expect(afterRevoke.status).toBe("fail");
+    expect(afterRevoke.httpStatus).toBe(401);
   });
 });
 
@@ -303,4 +335,22 @@ async function openSession(
   const page = await context.newPage();
   await loginAs(page, subject);
   return { context, page };
+}
+
+async function clickCredentialAction(
+  page: Page,
+  credentialName: string,
+  actionLabel: string,
+  dialogTitle: string,
+  confirmLabel: string,
+): Promise<void> {
+  const row = page
+    .locator("tbody tr")
+    .filter({ hasText: credentialName })
+    .filter({ has: page.getByRole("button", { name: actionLabel }) })
+    .first();
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.getByRole("button", { name: actionLabel }).click();
+  await expect(page.getByRole("dialog", { name: dialogTitle })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: confirmLabel }).click();
 }

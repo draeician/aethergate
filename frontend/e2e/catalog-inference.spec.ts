@@ -4,16 +4,22 @@ import {
   adminJson,
   provisionOperatorFixture,
   createInferenceCredential,
-  WEB_BASE_URL,
+  runOfficialSdk,
+  goToLastPage,
 } from "./fixtures";
 
 /**
- * Live catalog configuration -> real inference proof.
+ * Live full disposable catalog path -> official OpenAI Python SDK proof.
  *
- * Drives the web UI as system_admin to create a disposable model alias and its
- * route binding against the already-provisioned Ollama endpoint, then proves the
- * official OpenAI-compatible surface routes it (success), that deactivating the
- * route fails closed (model_unavailable), and that restoring it succeeds again.
+ * Creates a brand-new provider, provider account, endpoint, model alias, and
+ * route binding entirely through the web UI (system_admin OIDC browser session)
+ * against the allowlisted nomnom Ollama destination, then proves the official
+ * OpenAI Python SDK routes the disposable alias (non-stream and stream),
+ * fails closed with ``model_unavailable`` when the route is deactivated through
+ * the UI, and succeeds again after it is restored through the UI.
+ *
+ * The route must use only the newly-created account/endpoint — no dependency on
+ * the pre-provisioned ``ollama`` / ``ollama-account`` / ``ollama-endpoint`` path.
  */
 
 interface PageEnvelope<T> {
@@ -21,21 +27,36 @@ interface PageEnvelope<T> {
   total: number;
 }
 
-interface ModelAlias {
+interface ProviderRead {
   id: string;
   name: string;
-  is_active: boolean;
+  kind: string;
 }
-
-interface RouteBinding {
+interface ProviderAccountRead {
+  id: string;
+  name: string;
+  provider_id: string;
+}
+interface EndpointRead {
+  id: string;
+  name: string;
+  provider_account_id: string;
+}
+interface ModelAliasRead {
+  id: string;
+  name: string;
+}
+interface RouteBindingRead {
   id: string;
   model_alias_id: string;
+  provider_account_id: string;
   endpoint_id: string;
   is_active: boolean;
 }
 
 const SYSTEM_ADMIN_SUBJECT = "dev-user";
 const UPSTREAM_MODEL = "qwen3.8-2b-distill:Q6_K";
+const OLLAMA_DESTINATION = "http://192.168.22.50:11434";
 
 let projectA: string;
 let paA: string;
@@ -48,90 +69,154 @@ test.beforeAll(async ({ browser }) => {
   await session.context.close();
 });
 
-test("disposable alias -> inference -> deactivate fails -> restore succeeds", async ({
+test("full disposable catalog path -> official SDK -> deactivate -> restore", async ({
   page,
   context,
   browser,
 }) => {
-  const aliasName = `e2e-disp-alias-${Date.now()}`;
+  const runId = Date.now();
+  const providerName = `e2e-disp-provider-${runId}`;
+  const accountName = `e2e-disp-account-${runId}`;
+  const endpointName = `e2e-disp-endpoint-${runId}`;
+  const aliasName = `e2e-disp-alias-${runId}`;
 
   await loginAs(page, SYSTEM_ADMIN_SUBJECT);
 
-  // Create the model alias through the UI.
+  // 1. Provider (kind compatible with the existing ollama adapter).
+  await page.getByRole("link", { name: "Providers" }).click();
+  await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+  await page.getByRole("button", { name: "New provider" }).click();
+  await page.getByLabel("Kind").fill("ollama");
+  await page.getByLabel("Name").fill(providerName);
+  await page.getByRole("checkbox", { name: "text" }).check();
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
+
+  // 2. Provider account (no secret ref: Ollama needs no provider secret).
+  await page.getByRole("link", { name: "Provider Accounts" }).click();
+  await expect(page.getByRole("heading", { name: "Provider Accounts" })).toBeVisible();
+  await page.getByRole("button", { name: "New account" }).click();
+  await expect(page.locator("#account-provider option", { hasText: providerName })).toHaveCount(1, {
+    timeout: 15_000,
+  });
+  await page.getByLabel("Provider", { exact: true }).selectOption({ label: `${providerName} (ollama)` });
+  await page.getByLabel("Name", { exact: true }).fill(accountName);
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
+
+  // 3. Endpoint (new account -> real allowlisted Ollama destination).
+  await page.getByRole("link", { name: "Endpoints" }).click();
+  await expect(page.getByRole("heading", { name: "Endpoints" })).toBeVisible();
+  await page.getByRole("button", { name: "New endpoint" }).click();
+  await expect(page.locator("#endpoint-account option", { hasText: accountName })).toHaveCount(1, {
+    timeout: 15_000,
+  });
+  await page.getByLabel("Provider account").selectOption({ label: accountName });
+  await page.getByLabel("Name").fill(endpointName);
+  await page.getByLabel("Base destination").fill(OLLAMA_DESTINATION);
+  await page.getByLabel("Max concurrency").fill("1");
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
+
+  // 4. Model alias (client-visible OpenAI model name).
   await page.getByRole("link", { name: "Model Aliases" }).click();
   await expect(page.getByRole("heading", { name: "Model Aliases" })).toBeVisible();
   await page.getByRole("button", { name: "New alias" }).click();
   await page.getByLabel("Alias name").fill(aliasName);
   await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.getByText(aliasName)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
 
-  // Create a route binding for the alias against the provisioned Ollama endpoint.
+  // 5. Route binding (only the newly-created alias/account/endpoint).
   await page.getByRole("link", { name: "Route Bindings" }).click();
   await expect(page.getByRole("heading", { name: "Route Bindings" })).toBeVisible();
   await page.getByRole("button", { name: "New route" }).click();
-  await page.getByLabel("Model alias").selectOption({ label: aliasName });
-  await page.getByLabel("Provider account").selectOption({ label: "ollama-account" });
-  await page.getByLabel("Endpoint").selectOption({ label: "ollama-endpoint" });
-  await page.getByLabel("Upstream model").fill(UPSTREAM_MODEL);
-  await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.getByRole("heading", { name: "New route binding" })).toHaveCount(0, {
+  await expect(page.locator("#route-alias option", { hasText: aliasName })).toHaveCount(1, {
     timeout: 15_000,
   });
+  await page.getByLabel("Model alias").selectOption({ label: aliasName });
+  await page.getByLabel("Provider account").selectOption({ label: accountName });
+  await page.getByLabel("Endpoint").selectOption({ label: endpointName });
+  await page.getByLabel("Upstream model").fill(UPSTREAM_MODEL);
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
 
-  // Resolve the created alias + route IDs for the deactivate/restore steps.
-  const aliases = await adminJson<PageEnvelope<ModelAlias>>(
+  // Resolve created IDs + the pre-existing ollama IDs (postcondition inspection).
+  const [providerId, accountId, endpointId, aliasId] = await resolveIds(
     context,
-    "GET",
-    "/admin/v1/model-aliases?limit=200",
+    providerName,
+    accountName,
+    endpointName,
+    aliasName,
   );
-  const alias = aliases.body.items.find((a) => a.name === aliasName);
-  expect(alias).toBeTruthy();
+  expect(providerId).toBeTruthy();
+  expect(accountId).toBeTruthy();
+  expect(endpointId).toBeTruthy();
+  expect(aliasId).toBeTruthy();
 
-  const routes = await adminJson<PageEnvelope<RouteBinding>>(
+  const routes = await adminJson<PageEnvelope<RouteBindingRead>>(
     context,
     "GET",
     "/admin/v1/route-bindings?limit=200",
   );
-  const route = routes.body.items.find((r) => r.model_alias_id === alias!.id);
+  const route = routes.body.items.find((r) => r.model_alias_id === aliasId);
   expect(route).toBeTruthy();
 
-  // An inference credential for the disposable flow.
+  // Prove no dependency on the pre-existing provider/account/endpoint.
+  const oldAccountId = (await findByName<ProviderAccountRead>(context, "/admin/v1/provider-accounts", "ollama-account"))?.id;
+  const oldEndpointId = (await findByName<EndpointRead>(context, "/admin/v1/endpoints", "ollama-endpoint"))?.id;
+  expect(route!.provider_account_id).toBe(accountId);
+  expect(route!.endpoint_id).toBe(endpointId);
+  expect(route!.provider_account_id).not.toBe(oldAccountId);
+  expect(route!.endpoint_id).not.toBe(oldEndpointId);
+
+  // A valid inference credential (fixture; the lifecycle-through-UI proof lives
+  // in management-rbac.spec.ts).
   const admin = await openSession(browser, SYSTEM_ADMIN_SUBJECT);
   const key = await createInferenceCredential(
     admin.context,
     projectA,
     paA,
-    `e2e-disp-cred-${Date.now()}`,
+    `e2e-disp-sdk-cred-${runId}`,
   );
 
-  // Prove the new alias routes to real inference.
-  const ok = await submit(aliasName, key);
-  expect(ok.status).toBe(200);
+  // 6. Official OpenAI Python SDK: non-stream + stream against the alias.
+  const nonStream = await runOfficialSdk({ key, model: aliasName });
+  expect(nonStream.status).toBe("ok");
+  const stream = await runOfficialSdk({ key, model: aliasName, stream: true });
+  expect(stream.status).toBe("ok_stream");
 
-  // Deactivate the route; inference must fail closed (model_unavailable).
-  const deactivate = await adminJson(
-    admin.context,
-    "PATCH",
-    `/admin/v1/route-bindings/${route!.id}`,
-    { is_active: false },
-  );
-  expect(deactivate.status).toBe(200);
+  // 7. Deactivate the route through the UI; the SDK must fail closed.
+  await page.getByRole("link", { name: "Route Bindings" }).click();
+  await expect(page.getByRole("heading", { name: "Route Bindings" })).toBeVisible();
+  await goToLastPage(page);
+  await setRouteActive(page, route!.endpoint_id, false);
 
-  const afterDeactivate = await submit(aliasName, key);
-  expect(afterDeactivate.status).toBe(400);
-  expect((await afterDeactivate.json()).error.code).toBe("model_unavailable");
+  const afterDeactivate = await runOfficialSdk({ key, model: aliasName });
+  expect(afterDeactivate.status).toBe("fail");
+  expect(afterDeactivate.errorCode).toBe("model_unavailable");
 
-  // Restore the route; inference succeeds again.
-  const restore = await adminJson(
-    admin.context,
-    "PATCH",
-    `/admin/v1/route-bindings/${route!.id}`,
-    { is_active: true },
-  );
-  expect(restore.status).toBe(200);
+  // 8. Restore the route through the UI; the SDK succeeds again.
+  await goToLastPage(page);
+  await setRouteActive(page, route!.endpoint_id, true);
 
-  const afterRestore = await submit(aliasName, key);
-  expect(afterRestore.status).toBe(200);
+  const afterRestore = await runOfficialSdk({ key, model: aliasName });
+  expect(afterRestore.status).toBe("ok");
+
+  // 9. Leave the disposable resources inactive (no DELETE surface exists): the
+  // route binding is deactivated, then the endpoint's catalog-active flag.
+  await goToLastPage(page);
+  await setRouteActive(page, route!.endpoint_id, false);
+
+  await page.getByRole("link", { name: "Endpoints" }).click();
+  await expect(page.getByRole("heading", { name: "Endpoints" })).toBeVisible();
+  await goToLastPage(page);
+  const endpointRow = page.locator("tbody tr").filter({ hasText: endpointName }).first();
+  await expect(endpointRow).toBeVisible({ timeout: 15_000 });
+  await endpointRow.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByLabel("Catalog active").uncheck();
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
 
   await admin.context.close();
 });
@@ -150,16 +235,40 @@ async function openSession(
   return { context, page };
 }
 
-async function submit(model: string, key: string): Promise<Response> {
-  return fetch(`${WEB_BASE_URL.replace(/\/$/, "")}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: "catalog inference proof" }],
-    }),
-  });
+async function findByName<T extends { id: string; name: string }>(
+  context: BrowserContext,
+  path: string,
+  name: string,
+): Promise<T | undefined> {
+  const res = await adminJson<PageEnvelope<T>>(context, "GET", `${path}?limit=200`);
+  return res.body.items.find((x) => x.name === name);
+}
+
+async function resolveIds(
+  context: BrowserContext,
+  providerName: string,
+  accountName: string,
+  endpointName: string,
+  aliasName: string,
+): Promise<[string | undefined, string | undefined, string | undefined, string | undefined]> {
+  const provider = await findByName<ProviderRead>(context, "/admin/v1/providers", providerName);
+  const account = await findByName<ProviderAccountRead>(context, "/admin/v1/provider-accounts", accountName);
+  const endpoint = await findByName<EndpointRead>(context, "/admin/v1/endpoints", endpointName);
+  const alias = await findByName<ModelAliasRead>(context, "/admin/v1/model-aliases", aliasName);
+  return [provider?.id, account?.id, endpoint?.id, alias?.id];
+}
+
+async function setRouteActive(page: Page, endpointId: string, active: boolean): Promise<void> {
+  const row = page.locator("tbody tr").filter({ hasText: endpointId }).first();
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  const toggle = page.getByLabel("Active");
+  if (active) {
+    await toggle.check();
+  } else {
+    await toggle.uncheck();
+  }
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
 }

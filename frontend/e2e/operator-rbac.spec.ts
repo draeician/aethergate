@@ -28,14 +28,6 @@ interface PageEnvelope<T> {
   total: number;
 }
 
-interface Endpoint {
-  endpoint_id: string;
-  name: string;
-  operational_state: string;
-  max_concurrency: number;
-  occupied_slots: number;
-}
-
 interface QueueRequest {
   request_id: string;
   project_id: string | null;
@@ -68,12 +60,10 @@ test.beforeAll(async ({ browser }) => {
   await ensureRoleAssignment(session.context, pvA, "project_viewer", projectA);
   await ensureRoleAssignment(session.context, paB, "project_admin", projectB);
 
-  const endpoints = await adminJson<PageEnvelope<Endpoint>>(
-    session.context,
-    "GET",
-    "/admin/v1/queue/endpoints",
-  );
-  endpointId = endpoints.body.items[0].endpoint_id;
+  // The operator controls target the endpoint that actually serves the live
+  // "gpt-4" alias (resolved through the route binding), not an arbitrary first
+  // endpoint — the disposable catalog E2E leaves additional endpoints in place.
+  endpointId = await resolveRouteEndpointId(session.context, "gpt-4");
   await resume(session.context);
   await drainQueue(session.context);
   await session.context.close();
@@ -88,8 +78,11 @@ test.describe("system_admin operator controls", () => {
     await loginAs(page, SYSTEM_ADMIN_SUBJECT);
     page.on("dialog", (dialog) => void dialog.accept());
 
-    const pause = page.getByRole("button", { name: "Pause" });
-    const resume = page.getByRole("button", { name: "Resume" });
+    // Multiple endpoints may be registered (e.g. the disposable catalog E2E
+    // endpoint); pause/resume the first available endpoint rather than
+    // assuming a single "Pause" button exists.
+    const pause = page.getByRole("button", { name: "Pause" }).first();
+    const resume = page.getByRole("button", { name: "Resume" }).first();
 
     await expect(pause).toBeVisible({ timeout: 15_000 });
     await pause.click();
@@ -358,6 +351,28 @@ async function principalId(
   const found = body.items.find((p) => p.name === name);
   if (!found) throw new Error(`principal ${name} not found`);
   return found.id;
+}
+
+async function resolveRouteEndpointId(
+  context: BrowserContext,
+  aliasName: string,
+): Promise<string> {
+  const aliases = await adminJson<PageEnvelope<{ id: string; name: string }>>(
+    context,
+    "GET",
+    "/admin/v1/model-aliases?limit=200",
+  );
+  const alias = aliases.body.items.find((a) => a.name === aliasName);
+  if (!alias) throw new Error(`model alias ${aliasName} not found`);
+
+  const routes = await adminJson<
+    PageEnvelope<{ id: string; model_alias_id: string; endpoint_id: string; is_active: boolean }>
+  >(context, "GET", "/admin/v1/route-bindings?limit=200");
+  const route =
+    routes.body.items.find((r) => r.model_alias_id === alias.id && r.is_active) ??
+    routes.body.items.find((r) => r.model_alias_id === alias.id);
+  if (!route) throw new Error(`no route binding for alias ${aliasName}`);
+  return route.endpoint_id;
 }
 
 async function findRoleAssignment(
