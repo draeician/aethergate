@@ -1,10 +1,10 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-022V
+AGV2-022C
 
 ## Title
-Close accounting live queue-unblock and released-reservation UI proofs
+Close accounting regression gate and budget-policy disable wake-up
 
 ## WIP Marker — FIRST LOCAL ACTION
 
@@ -13,7 +13,7 @@ Immediately after entering the repository, before pull/read/implementation work,
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-022V
+- task ID: AGV2-022C
 - branch: v2
 - UTC start timestamp
 
@@ -31,27 +31,28 @@ Remove it only after:
 
 ## Why This Task Exists
 
-AGV2-022 is substantially implemented and pushed:
-- accounting management UI;
-- Decimal-safe browser handling;
-- pricing/snapshot UI;
-- budgets/status;
-- reservations/usage/ledger/audit;
-- signed usage_debit backend correction;
-- 504 backend tests;
-- 74 frontend tests;
-- 25 Playwright tests;
-- green SDK/build/lint/OpenAPI/secret checks.
+AGV2-022V successfully closed its two accounting live-proof gaps and surfaced/fixed two real defects:
+- queued budget-window work now wakes when a budget limit is raised;
+- nginx no longer cuts long-held synchronous inference at 60 seconds.
 
-Final review found two narrow **live acceptance** gaps:
+The task-specific accounting browser suite is green, but the required full Playwright regression is not:
+- 24 passed;
+- 2 failed.
 
-1. The budget live proof uses `budget_request_too_large`, which is a terminal failed request, then
-   submits a new request after increasing the budget. That does not prove the **same queued
-   `budget_window_exhausted` request becomes eligible** after a policy edit.
-2. There is no live/browser proof of a **real pre-dispatch released BudgetReservation** rendered with
-   `price_snapshot_id = null`, zero reserved/committed amounts, no UsageRecord, and no usage_debit.
+Both failures are understood and narrow:
+1. management project-create assertion assumes the newly-created project is on page 1, but the list is
+   oldest-first and test data has accumulated beyond one page.
+2. the management credential lifecycle runs multiple real slow-model SDK calls inside Playwright's
+   default 60-second timeout.
 
-Close these only. Do not rebuild AGV2-022 and do not start observability/protocol work yet.
+Final review also found one adjacent scheduler correctness hole:
+- disabling an enabled ProjectBudgetPolicy changes admission immediately;
+- the evaluator correctly ignores disabled policies;
+- but queued requests blocked by that policy still retain future `next_eligible_at` metadata and are
+  not re-evaluated until the old window reset.
+- The AGV2-022V fix currently wakes requests only when `limit_amount` increases.
+
+Close these three items only. Do not start observability or protocol expansion yet.
 
 ## Recovery
 
@@ -64,136 +65,114 @@ If context is compacted/restarted/uncertain:
 6. inspect git status/history;
 7. continue from repository state.
 
-## 1. Real queued budget-window exhaustion -> same request unblocks
+## 1. Wake budget-blocked queued requests when a policy is disabled
 
-Use the existing request-priced route and a disposable project/budget so a single request can fit an
-empty budget window, but the current window has insufficient remaining headroom.
+In `accounting/admin.py::update_project_budget_policy`, wake requests blocked by a policy when the
+mutation makes that policy less restrictive.
 
-Preferred deterministic setup:
+Required wake conditions:
+- `new_limit > existing.limit_amount`; OR
+- `existing.enabled is True` and `new_enabled is False`.
 
-1. Use an exact request price `P`.
-2. Create a budget limit that permits exactly one request (or otherwise less than two requests but >= P).
-3. Run one official SDK request to consume/commit `P`.
-4. Start a **second official OpenAI Python SDK request** and keep that same call pending while the
-   scheduler queues it.
-5. Poll the queue/operator API and capture that request's stable `request_id`.
-6. Prove:
-   - state remains queued;
-   - `effective_wait_reason` / persisted wait_reason is `budget_window_exhausted`;
-   - wait_limit_metric = budget;
-   - it is not failed with `budget_request_too_large`;
-   - no second usage/ledger settlement exists yet.
-7. Through the browser UI, increase the same budget policy limit (or disable the policy) enough to
-   admit the queued request.
-8. Prove the **same captured request_id** transitions out of queued and succeeds.
-9. Await the original second SDK call and prove it succeeds; do not submit a replacement request as
-   the unblock proof.
-10. Prove exactly one new UsageRecord and one signed negative `usage_debit` were created for that
-    request; no duplicate settlement.
-11. UI budget status/headroom reflects the server-returned exact values after completion.
+Use the existing scoped repository primitive:
+`clear_budget_wait_metadata_for_policy`.
 
-SDK constraints:
-- use official `openai` Python SDK;
-- inference auth bypass false;
-- key through env/stdin/in-memory plumbing, never argv;
-- no raw key in logs/output.
+Do not clear wait metadata for:
+- unchanged policy;
+- name-only edit;
+- limit decrease;
+- disabled -> enabled;
+unless another established semantic explicitly requires it.
 
-If the existing synchronous `runOfficialSdk` helper cannot remain pending while browser actions run,
-add a narrow async child-process helper using `spawn`/equivalent. Do not weaken the SDK proof to a
-new replacement request.
+The clear primitive must remain scoped to:
+- state = queued;
+- wait_reason = budget_window_exhausted;
+- wait_limit_id = this policy.
 
-## 2. Real pre-dispatch release lifecycle
+Worker re-evaluation remains authoritative; if another budget policy still blocks, the worker will
+reapply correct wait metadata.
 
-Create a real request that reaches **reserved/pre-dispatch** accounting state, then cancel/reclaim it
-before durable upstream dispatch.
+## 2. Deterministic disable-unblock regression
 
-This must use the real scheduler/accounting lifecycle, not manual insertion of a BudgetReservation row.
+Add a deterministic accounting/scheduler test:
 
-A controlled harness is acceptable if it uses the real database/service transition path and a
-provider adapter that proves no upstream dispatch occurred.
+1. request price = P;
+2. enabled budget limit allows first request but not second;
+3. first request succeeds and commits P;
+4. second request becomes queued with `budget_window_exhausted`;
+5. disable the same policy through the real accounting admin/service update path if practical;
+6. prove its wait metadata is cleared;
+7. prove the SAME request_id becomes eligible and succeeds;
+8. exactly one new UsageRecord and one signed negative usage_debit;
+9. no duplicate settlement.
 
-Required preconditions before cancellation:
-- request has a monetary BudgetReservation;
-- request has acquired the associated pre-dispatch price snapshot/reference according to the real
-  scheduler path;
-- request has not made the upstream inference call.
+Prefer exercising `update_project_budget_policy` itself so the regression covers the actual product
+mutation path rather than directly calling the repository wake helper.
 
-Then cancel/reclaim through the established scheduler/admin transition.
+Preserve all authorization and audit semantics.
 
-Prove in PostgreSQL/admin API:
-- request terminal state is cancelled/reclaimed as appropriate;
-- BudgetReservation state = released;
-- reserved_amount = 0 exactly;
-- committed_amount = 0 exactly;
-- price_snapshot_id = null;
-- the pre-dispatch PriceSnapshot is discarded;
-- no UsageRecord for that request;
-- no `usage_debit` LedgerEntry for that request;
-- budget-window reserved amount is released;
-- no upstream dispatch occurred.
+## 3. Fix management project-list pagination E2E
 
-Do not manually seed the released reservation.
+In `frontend/e2e/management-rbac.spec.ts`:
+- after creating a uniquely named project through the UI, do not assume it is on page 1;
+- use the existing robust `goToLastPage` helper or an equally stable UI pagination approach;
+- assert the newly-created project through the browser UI;
+- do not fetch all projects and substitute a direct API assertion for the UI proof.
 
-## 3. Browser UI proof for released reservation
+The test must remain robust as disposable project count grows well beyond 20.
 
-Using a real authorized OIDC browser session, navigate to the accounting Reservations page and locate
-the real released reservation created in criterion 2.
+If provider list accumulation can create the same failure mode, make that assertion pagination-safe too
+rather than waiting for the next run to fail.
 
-The UI must visibly and correctly render:
-- Released state;
-- exact reserved amount 0;
-- exact committed amount 0;
-- null snapshot as a safe explanatory value such as "No snapshot / released before dispatch";
-- request/policy identifiers safely.
+## 4. Fix management credential lifecycle timeout
 
-Then use Usage and Ledger pages/API filters to prove there is no measured usage / usage_debit for that
-request.
+The credential lifecycle test uses multiple official SDK calls against slow Ollama generation.
 
-Do not treat null `price_snapshot_id` as an error.
+Add an explicit test timeout consistent with other live SDK proofs, e.g.:
+`test.setTimeout(240_000)`
+or the scoped equivalent.
 
-## 4. Deterministic automated coverage
+Do not:
+- remove SDK calls;
+- replace them with raw fetch;
+- weaken assertions;
+- increase global timeout for every cheap browser test unless necessary.
 
-Add or strengthen tests so the two semantics cannot regress:
+Keep official OpenAI Python SDK, bypass=false, old/new/revoked key assertions unchanged.
 
-### Budget unblock
-A deterministic scheduler/integration test must prove:
-- first request consumes budget;
-- second request gets `budget_window_exhausted`;
-- budget policy mutation changes admission;
-- the **same request ID** is later reserved/dispatched/succeeded;
-- exactly-once usage/ledger/budget settlement.
+## 5. Full Playwright suite must be green
 
-### Released reservation
-Existing scheduler/accounting tests already cover much of the release lifecycle.
-Strengthen as needed to explicitly assert:
-- released BudgetReservation has `price_snapshot_id is None`;
-- reserved=0;
-- committed=0;
-- pre-dispatch snapshot removed;
-- no UsageRecord;
-- no usage_debit;
-- no upstream adapter call.
+This is the gating criterion that AGV2-022V did not satisfy.
 
-Add a frontend test if the null-snapshot explanatory rendering is not already covered.
+Run the complete browser suite, not just accounting.spec.ts.
 
-## 5. Handoff truthfulness
+Expected after fixes:
+- zero failed;
+- zero unexpected flaky failures.
 
-Correct the AGV2-022 wording:
+Record the exact count.
 
-- `budget_request_too_large` proves fail-fast behavior for a request that cannot fit even an empty
-  budget window.
-- `budget_window_exhausted` is the queued temporary-capacity condition.
-- Only call the scenario "block/unblock" after the same queued request resumes following the UI policy
-  edit.
+Do not call the task complete if any Playwright test fails, even if it is described as pre-existing or
+unrelated.
 
-Record both semantics separately.
+A retry-only pass is not enough for a deterministic pagination defect; fix the test.
 
-## 6. Regression
+## 6. Re-verify AGV2-022V accounting proofs
 
 Re-run:
-- full backend containerized suite; baseline **504**;
+- same-request `budget_window_exhausted` unblock live browser/SDK proof;
+- released pre-dispatch reservation browser proof.
+
+These must remain green after the scheduler wake semantics change.
+
+No need to rebuild or expand the accounting UI.
+
+## 7. Regression
+
+Run:
+- full backend containerized suite; baseline **505**;
 - frontend unit/component suite; baseline **74**;
-- Playwright; baseline **25**;
+- FULL Playwright suite;
 - npm build;
 - npm lint;
 - OpenAPI/client drift;
@@ -206,59 +185,51 @@ No migration expected.
 
 Do not modify migrations 0001-0016.
 
-## 7. No new product scope
+## 8. Handoff correction
 
-Do not implement:
-- new accounting UI features beyond what is needed for the two proofs;
-- manual ledger adjustments;
-- prepaid/wallet semantics;
-- invoices/payments;
-- observability metrics;
-- Responses API;
-- embeddings;
-- v1 migration.
+Update docs/development/agent-handoff.md.
 
-If either proof exposes a real defect, fix it narrowly and add regression coverage.
+Do not leave AGV2-022V described as fully complete while recording a failed required regression gate.
 
-## Documentation / handoff
-
-Update docs/development/agent-handoff.md with:
-
-- exact `budget_request_too_large` vs `budget_window_exhausted` distinction;
-- first request budget consumption;
-- captured second request_id;
-- queued `budget_window_exhausted` evidence;
-- browser budget policy edit;
-- same request_id success after edit;
-- official SDK pending-call success;
-- exactly-once usage/negative ledger settlement;
-- real pre-dispatch release creation method;
-- proof no upstream dispatch happened;
-- released reservation state/amounts/null snapshot;
-- pre-dispatch snapshot discard;
-- no usage/debit;
-- browser Reservations UI proof;
-- final backend/frontend/Playwright counts;
-- build/lint/OpenAPI drift;
+After this task passes, record:
+- AGV2-022/022V/022C accounting phase closed;
+- budget limit raise wake semantics;
+- budget policy disable wake semantics;
+- deterministic same-request proofs;
+- project pagination E2E fix;
+- lifecycle timeout fix;
+- full Playwright exact green count;
+- backend/frontend counts;
+- accounting live proofs still green;
+- build/lint/OpenAPI/SDK results;
 - migration head 0016/no migration;
-- dynamic API/web/IdP ports;
 - WIP marker lifecycle;
 - exactly one recommended next step.
 
-Never include raw credentials/session/CSRF/OIDC/provider secrets, prompt/completion content, or large
-logs.
+## 9. No new product scope
+
+Do not implement:
+- observability metrics;
+- Responses API;
+- embeddings;
+- accounting feature expansion;
+- v1 migration;
+- broad frontend redesign.
 
 ## Commit and Push
 
-If only tests/docs change:
-`test(accounting): close live reservation and budget unblock proofs`
+Suggested commit:
+`fix(web): close accounting regression gate`
 
-If a real defect is found:
-use a narrow conventional fix commit plus tests/docs.
+A separate narrow backend commit for disable wake semantics is acceptable.
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to commit/push.
 
-The task is complete only when every criterion above is green, origin/v2 contains the final
-tests/fixes/docs/handoff, and local `.aethergate-wip` has been removed after final push verification.
+The task is complete only when:
+- backend/frontend regressions are green;
+- the FULL Playwright suite is green with zero failures;
+- accounting same-request and released-reservation live proofs remain green;
+- origin/v2 contains the final work and handoff;
+- local `.aethergate-wip` is removed only after final remote verification.
