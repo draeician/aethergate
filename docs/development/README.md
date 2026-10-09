@@ -417,6 +417,33 @@ The live catalog → SDK inference and credential lifecycle criteria are demonst
 `frontend/e2e/catalog-inference.spec.ts` and `frontend/e2e/management-rbac.spec.ts` (see
 `docs/web-console.md`).
 
+## Web console accounting UI (AGV2-022)
+
+The web console now exposes the accounting control-plane APIs (AGV2-017) through the same typed
+`/admin/v1` client:
+
+- `frontend/src/features/accounting/` — pricing (`/accounting/pricing`), snapshots
+  (`/accounting/snapshots`), budgets (`/accounting/budgets`), reservations (`/accounting/reservations`),
+  usage (`/accounting/usage`), ledger (`/accounting/ledger`), audit (`/audit`).
+- `frontend/src/lib/decimal.ts` — Decimal-safe validation/formatting (no `Number()`/`parseFloat()`);
+  monetary fields stay strings end-to-end.
+- `frontend/src/lib/client.ts` — accounting methods (`listPricePolicies`, `createPricePolicy`,
+  `updatePricePolicy`, snapshots, budgets, budget status, reservations, usage, ledger, audit) on top of
+  the generated OpenAPI types.
+
+Role visibility: `system_admin` sees all accounting + audit; `project_admin` sees own-project
+budgets/reservations/usage/ledger/audit (not deployment pricing/snapshots); `project_viewer` is
+read-only. Hiding is cosmetic — the backend remains authoritative.
+
+Accounting invariants preserved: `PricePolicy` is mutable config; `PriceSnapshot`, `UsageRecord`,
+`LedgerEntry`, and `BudgetReservation` are immutable/read-only history. Budgets are optional policy
+controls (not prepaid balances); `currency`/`window_seconds` are immutable after create. Ledger amounts
+are signed (`usage_debit` negative); a released pre-dispatch reservation renders
+`price_snapshot_id = null` safely; there are no manual adjustment writes.
+
+The live pricing/immutable-snapshot and budget block/unblock criteria are demonstrated end-to-end by
+`frontend/e2e/accounting.spec.ts` (official OpenAI Python SDK, inference-auth bypass = false).
+
 ## Tests
 ```bash
 # host (offline; DB-gated tests skip)

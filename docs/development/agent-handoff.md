@@ -1,16 +1,95 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. AGV2-021V (close management-UI live lifecycle verification gaps) is complete: all
-  three gaps are closed, every automated/live criterion is green, and the work is pushed to
-  `origin/v2`. `.aethergate-wip` was removed after final push verification.
+- Branch: `v2`. AGV2-022 (Management UI II — pricing, budgets, usage, ledger, reservations, snapshots,
+  audit) is complete: the accounting-management surface is implemented in the web console, the live
+  pricing/immutable-snapshot and budget block/unblock proofs pass against the official OpenAI Python
+  SDK, and every automated/live criterion is green. Work is committed and pushed to `origin/v2`;
+  `.aethergate-wip` was removed after final push verification.
 - Migration head unchanged at `0016`; no new migration; `0001`–`0016` untouched. Legacy Python v1 app
   and the dated architecture audit are untouched.
-- AGV2-021 (Management UI I) is implemented and pushed; AGV2-021V is a narrow follow-up that closes
-  three live-proof gaps and corrects prior overstatement, without rebuilding AGV2-021 and without
-  starting the accounting UI.
+- Two narrowly-scoped backend accounting defects surfaced by the live proofs were fixed (see "Backend
+  accounting corrections" below), preserving all existing accounting invariants.
+
+## AGV2-022 — Accounting management UI
+
+### Implementation commits (origin/v2)
+- `feat(web): add accounting management UI` — accounting feature module
+  (`frontend/src/features/accounting/`), Decimal-safe helpers (`frontend/src/lib/decimal.ts`), typed
+  accounting client methods + `roles.ts` guards, role-aware routing/navigation, accounting
+  unit/component tests, and the live browser E2E (`frontend/e2e/accounting.spec.ts`).
+- `fix(accounting): serialize money canonically and sign usage ledger debits` — canonical fixed-point
+  money JSON serialization and signed `usage_debit` ledger entries, with regression tests.
+
+### Routed pages / features
+- Accounting configuration: `/accounting/pricing`, `/accounting/snapshots`, `/accounting/budgets`.
+- Accounting history/observability: `/accounting/reservations`, `/accounting/usage`,
+  `/accounting/ledger`, `/audit`.
+- Pages: `PricingPage`, `PriceSnapshotsPage`, `BudgetsPage`, `BudgetReservationsPage`, `UsagePage`,
+  `LedgerPage`, `AuditPage` (all under `frontend/src/features/accounting/`).
+- Typed client methods in `frontend/src/lib/client.ts`; role guards in `frontend/src/lib/roles.ts`.
+
+### Decimal-safe browser handling
+- Money is fixed-point Decimal and stays a string end-to-end. `frontend/src/lib/decimal.ts` provides
+  `isValidDecimalString`, `isPositiveDecimalString`, and `formatMoney` without `Number()`/`parseFloat()`.
+- Form state for money/prices is string; validation rejects lossy/float syntax; exact strings are sent
+  to the backend; rendered read models are verbatim. Canary tests use `0.000000000123` and
+  `123456789.123456789012`.
+
+### Backend accounting corrections
+- **Canonical money serialization** (`src/aethergate/domain/value_objects.py`): `Money`,
+  `NonNegativeMoney`, and `PositiveMoney` now serialize to JSON as canonical fixed-point strings via
+  `PlainSerializer(_serialize_money, return_type=str, when_used="json")` (`format(value.normalize(),
+  "f")`). This removes Pydantic's auto `pattern` from money fields in
+  `frontend/src/generated/openapi.json`; `schema.d.ts` is unchanged. Regression test:
+  `tests/test_contracts.py::test_money_serializes_as_canonical_fixed_point`.
+- **Signed usage ledger debits** (`src/aethergate/scheduler/service.py`): the `usage_debit`
+  `LedgerEntry` is now written with a negative amount (`amount=-amount`) to match the documented
+  "signed" ledger convention (`docs/architecture/accounting.md`). Regression assertion added to
+  `tests/test_accounting.py::test_request_priced_budget_reserves_and_queues_exhausted`.
+
+### Live proofs (browser UI + official OpenAI Python SDK, inference-auth bypass = false)
+- **Pricing + immutable snapshots** (`accounting.spec.ts`): create a request-priced `PricePolicy`
+  through the UI with the exact Decimal `0.000000000123`; official SDK request succeeds; the resulting
+  `PriceSnapshot` captures the old price; edit the policy to `0.000000000456`; a second SDK request
+  captures the new price; the old snapshot is verified immutable and unchanged.
+- **Budget block/unblock** (`accounting.spec.ts`): create a project budget through the UI with a limit
+  below the request price; an official SDK request is blocked (`budget_request_too_large`); the budget
+  status stays zero-committed; raise the limit through the UI; the same request succeeds; committed
+  spend, usage, and the (negative) `usage_debit` ledger entry reflect the exact price.
+- **RBAC + audit scope** (`accounting.spec.ts` tests 1–5): system_admin sees the full surface;
+  project_admin cannot access deployment pricing/snapshot surfaces and cannot enumerate project B;
+  project_viewer is read-only; a project role sees only own-project audit events.
+
+### Verification results (AGV2-022)
+- Backend containerized suite (`scripts/dev/v2 test`): **504 passed** (baseline 503 + 1 money
+  serialization test).
+- Frontend: `npm run build` clean, `npm run lint` clean, **74 unit/component tests pass** (22 files;
+  baseline 54 + 20 accounting tests).
+- Browser E2E (`npx playwright test`, chromium, `WEB_BASE_URL=http://127.0.0.1:8081`): **25 passed**
+  (baseline 18 + 7 accounting): 4 `web-console`, 7 `operator-rbac`, 7 `management-rbac`, 1
+  `catalog-inference`, 7 `accounting`.
+- Official OpenAI Python SDK (`openai 2.54.0`): non-stream + stream succeed; the accounting live proofs
+  exercise non-stream success plus `budget_request_too_large` fail-closed and recovery after a limit
+  raise.
+- `ruff check src tests` clean; `git diff --check` clean; OpenAPI/client generation drift clean
+  (`openapi.json` only lost the auto `pattern` fields from the money serialization change; `schema.d.ts`
+  unchanged).
+- Secret/token/content canary scan clean (no `.env`/`.pem`/`.key`/credential files, no key patterns in
+  the new/modified files).
+- No migration; `0016` remains head.
+
+### Dynamic ports (this run)
+- API base URL ephemeral `http://127.0.0.1:39569/v1`; web console loopback-only on
+  `http://127.0.0.1:8081`; IdP issuer `http://192.168.22.50:8090`.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-022`, `branch=v2`, UTC start timestamp) was created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, every commit pushed
+to `origin/v2`, and the remote branch verified.
 
 ## AGV2-021V — Management lifecycle verification gaps
+(unchanged; see the prior handoff section below for the full record)
 
 ### Why this task exists
 AGV2-021's final review found three narrow acceptance gaps in the **live proof** (not the core UI):
@@ -176,6 +255,18 @@ to `origin/v2`, and the remote branch verified.
   concrete CommonJS entries, or `react-router` fails to resolve them under Rollup
   (`Rollup failed to resolve import "cookie"`). The aliases are committed; rebuild with
   `docker build --no-cache -t aethergate-v2-web:local frontend/`.
+- **Live SDK inference speed**: the nomnom Ollama `qwen3.8-2b-distill:Q6_K` non-stream generation is
+  slow enough (tens of seconds per call under load) that the live-proof specs need a generous
+  `test.setTimeout(240_000)` (`accounting.spec.ts` tests 6/7 and `catalog-inference.spec.ts`). If Ollama
+  is reloading the model (cold start) the first SDK call is noticeably slower.
+- **Docker healthcheck under this environment**: `docker compose up` waits on service healthchecks
+  that the host's systemd-less Docker cannot run (`dial unix /run/user/1000/systemd/private: connect:
+  connection refused`), so containers may show `(starting)` while fully functional. Bring the stack up
+  with manual `docker start`/compose `up -d --no-deps` rather than `scripts/dev/v2 up`.
+- **API recreation and OIDC web callback**: recreating the API with only `compose.yaml` drops
+  `AETHERGATE_OIDC_WEB_CALLBACK_PATH=/auth/callback` (it lives in `compose.web.yaml`), which breaks
+  browser OIDC login. Recreate the API with both `-f compose.yaml -f compose.web.yaml`, then restart
+  the `web` container so nginx re-resolves the `api` DNS name.
 - **Operator-rbac single-endpoint assumption** (fixed in AGV2-021V): the spec paused
   `queue/endpoints` `items[0]` and clicked a unique `Pause` button, which broke once the catalog E2E
   left a second endpoint. It now resolves the `gpt-4` route's endpoint and scopes buttons with
@@ -184,26 +275,29 @@ to `origin/v2`, and the remote branch verified.
   paginates at 20, so the pre-existing "project_admin cancels" test depended on the new request
   landing on page 1. The test now filters by queue state before/after cancel.
 - Live E2E runs accumulate disposable test data (providers/accounts/endpoints/aliases/credentials/
-  queue requests). The specs are idempotent, use unique names, and the queue-drain helper clears
-  in-flight work; the disposable route/endpoint are deactivated at the end of the catalog E2E. The
-  queue table can still grow over time; the state-filter fix keeps operator assertions robust to that.
+  queue requests/price policies/budgets). The specs are idempotent, use unique names, scope
+  assertions to the current run's route, and disable leftover enabled budgets; the disposable
+  route/endpoint are deactivated at the end of the catalog E2E. The pricing table can still accumulate
+  leftover price policies across aborted runs (assertions must stay route-scoped).
 - Existing AGV2-020V risks still apply: dev IdP key regeneration vs API JWKS cache; the Chromium
   `--disable-software-rasterizer` rAF fix; do not scale workers via `scripts/dev/v2 workers` (use
   `docker compose up -d --scale worker=N --no-deps worker`); host port `8080` may be occupied.
 - `ruff format` remains out of scope (pre-existing reformat); `ruff check` is the gate.
 
 ## Key files
-- Frontend: `frontend/src/features/identity/*`, `frontend/src/features/catalog/*`,
-  `frontend/src/components/ui/*`, `frontend/src/lib/client.ts`, `frontend/src/lib/roles.ts`,
-  `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`, `frontend/vite.config.ts`,
-  `frontend/src/generated/openapi.test.ts`, `frontend/src/test/helpers.tsx`.
-- E2E: `frontend/e2e/catalog-inference.spec.ts` (full UI-created disposable path → official SDK),
-  `frontend/e2e/management-rbac.spec.ts` (UI credential lifecycle), `frontend/e2e/operator-rbac.spec.ts`
-  (route-resolved endpoint + `.first()` scoping), `frontend/e2e/fixtures.ts` (`runOfficialSdk`,
-  `goToLastPage`), `frontend/e2e/sdk_inference.py` (official OpenAI SDK driver).
+- Frontend accounting: `frontend/src/features/accounting/*` (7 pages + 3 test files),
+  `frontend/src/lib/decimal.ts`, `frontend/src/lib/client.ts`, `frontend/src/lib/roles.ts`,
+  `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`.
+- E2E: `frontend/e2e/accounting.spec.ts` (accounting RBAC + live pricing/snapshot + budget
+  block/unblock proofs), `frontend/e2e/catalog-inference.spec.ts` (timeout bump),
+  `frontend/e2e/fixtures.ts` (`runOfficialSdk`, `goToLastPage`), `frontend/e2e/sdk_inference.py`.
+- Backend: `src/aethergate/domain/value_objects.py` (canonical money serialization),
+  `src/aethergate/scheduler/service.py` (signed usage debits), `tests/test_contracts.py`,
+  `tests/test_accounting.py`.
 - Docs: `docs/web-console.md`, `docs/development/README.md`, `frontend/README.md`.
 
 ## Recommended Next Step
-Begin the accounting/budget/usage/ledger management UI (the next management phase after this task),
-reusing the now-verified typed client, role-guard, pagination, PATCH, and one-time-reveal patterns
-established here, starting from the green 503/54/18 regression baseline.
+Begin the next management phase (reservations/usage/ledger live-history deep links and cross-linking,
+or the observability metrics follow-up), reusing the now-verified Decimal-safe, typed-client,
+role-guard, pagination, PATCH, and one-time-reveal patterns established here, starting from the green
+504/74/25 regression baseline.

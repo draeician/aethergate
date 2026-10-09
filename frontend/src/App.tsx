@@ -20,6 +20,13 @@ import EndpointsPage from "./features/catalog/EndpointsPage";
 import QuotasPage from "./features/catalog/QuotasPage";
 import ModelsPage from "./features/catalog/ModelsPage";
 import RoutesPage from "./features/catalog/RoutesPage";
+import PricingPage from "./features/accounting/PricingPage";
+import PriceSnapshotsPage from "./features/accounting/PriceSnapshotsPage";
+import BudgetsPage from "./features/accounting/BudgetsPage";
+import BudgetReservationsPage from "./features/accounting/BudgetReservationsPage";
+import UsagePage from "./features/accounting/UsagePage";
+import LedgerPage from "./features/accounting/LedgerPage";
+import AuditPage from "./features/accounting/AuditPage";
 
 function RequireAuth() {
   const { status } = useAuth();
@@ -66,6 +73,13 @@ function AppRoutes() {
           <Route path="/catalog/quotas" element={<QuotasPage />} />
           <Route path="/catalog/models" element={<ModelsPage />} />
           <Route path="/catalog/routes" element={<RoutesPage />} />
+          <Route path="/accounting/pricing" element={<PricingPage />} />
+          <Route path="/accounting/snapshots" element={<PriceSnapshotsPage />} />
+          <Route path="/accounting/budgets" element={<BudgetsPage />} />
+          <Route path="/accounting/reservations" element={<BudgetReservationsPage />} />
+          <Route path="/accounting/usage" element={<UsagePage />} />
+          <Route path="/accounting/ledger" element={<LedgerPage />} />
+          <Route path="/audit" element={<AuditPage />} />
         </Route>
       </Route>
 

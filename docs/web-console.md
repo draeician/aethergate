@@ -67,7 +67,35 @@ escape hatch, and server-side pagination stays server-side.
 - `/catalog/models` — public model-alias CRUD.
 - `/catalog/routes` — route-binding CRUD (alias → provider account → endpoint → optional quota group).
 
-Role-aware behavior:
+### Accounting management (AGV2-022)
+
+- `/accounting/pricing` — route `PricePolicy` CRUD (request/token/image/minute billing; currency,
+  `unit_scale`, request/input/output price, enabled, name) with route/enabled/billing-unit filters.
+- `/accounting/snapshots` — immutable `PriceSnapshot` list/detail (route/account/alias, source policy,
+  exact prices, `captured_at`); read-only.
+- `/accounting/budgets` — project `ProjectBudgetPolicy` create/edit (project, name, currency,
+  `limit_amount`, `window_seconds`, enabled) with live budget status/headroom; currency and
+  `window_seconds` are immutable after creation.
+- `/accounting/reservations` — read-only `BudgetReservation` history; a released pre-dispatch
+  reservation renders `price_snapshot_id = null` as "No snapshot / released before dispatch".
+- `/accounting/usage` — immutable `UsageRecord` history (attribution, exact amount, units,
+  `recorded_at`); read-only, no content/secret material.
+- `/accounting/ledger` — append-only `LedgerEntry` history (signed exact amount, entry type,
+  usage-record link); read-only, no manual adjustment writes.
+- `/audit` — read-only `AuditEvent` list/detail, scoped by role.
+
+Accounting role-aware behavior:
+
+- `system_admin`: all accounting + audit pages.
+- `project_admin`: own-project budgets/reservations/usage/ledger/audit; cannot access deployment
+  pricing/snapshot surfaces.
+- `project_viewer`: own-project read-only budgets/status/reservations/usage/ledger/audit.
+
+Money is fixed-point Decimal and stays a string end-to-end (`frontend/src/lib/decimal.ts` validates and
+formats without `Number()`/`parseFloat()`). The web console never computes an authoritative balance the
+backend did not provide.
+
+Identity/catalog role-aware behavior:
 
 - `system_admin`: sees the identity and catalog management routes plus all operator controls
   (endpoint occupied-vs-available slots, operational state, pause/drain/resume, quota/cooldown,
@@ -112,6 +140,28 @@ navigates directly to a catalog route or calls a catalog/queue-deployment mutati
 - **Route-binding invariants**: account/endpoint/quota-group mismatches and the one-active-route rule
   render as stable structured backend errors (e.g. `409 active_route_conflict`) with no client-side
   fallback chain.
+
+## Accounting management behavior (AGV2-022)
+
+- **Decimal-safe representation**: monetary fields stay strings end-to-end; the console never converts
+  an accounting Decimal to an IEEE-754 `Number` for editing, arithmetic, or formatting. Syntax is
+  validated with `frontend/src/lib/decimal.ts` (no `Number()`/`parseFloat()`), and exact strings are
+  sent back to the backend.
+- **Pricing vs immutable snapshots**: `PricePolicy` is mutable configuration; `PriceSnapshot` captures
+  immutable dispatch-time pricing. Editing a policy never rewrites a captured snapshot.
+- **Budget policy vs headroom**: a project budget is an optional policy control, not a prepaid balance.
+  The console displays the server-returned `limit_amount`/`committed_amount`/`reserved_amount`/`headroom`
+  and never recomputes an authoritative headroom client-side. `currency` and `window_seconds` are
+  immutable after create; the edit form renders them read-only and points to creating a replacement
+  policy.
+- **Immutable history**: `BudgetReservation`, `UsageRecord`, and `LedgerEntry` are read-only. A released
+  pre-dispatch reservation shows `price_snapshot_id = null` as "No snapshot / released before dispatch".
+  The ledger shows signed exact amounts (`usage_debit` is negative); there are no manual adjustment
+  writes.
+- **One-enabled-price-policy invariant**: a second enabled `PricePolicy` on the same route renders a
+  stable `409 price_policy_conflict`; the console never auto-disables the previous policy.
+- **Audit scope**: deployment-scoped (`project_id = null`) events are hidden from project roles;
+  `system_admin` sees both deployment and project events.
 
 ## Dashboard data sources
 

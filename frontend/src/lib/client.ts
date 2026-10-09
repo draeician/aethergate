@@ -69,6 +69,20 @@ export type RouteBindingRead = Schemas["RouteBindingRead"];
 export type RouteBindingCreate = Schemas["RouteBindingCreate"];
 export type RouteBindingUpdate = Schemas["RouteBindingUpdate"];
 export type Capability = Schemas["Capability"];
+export type BillingUnit = Schemas["BillingUnit"];
+export type BudgetReservationState = Schemas["BudgetReservationState"];
+export type LedgerEntryType = Schemas["LedgerEntryType"];
+export type PricePolicyRead = Schemas["PricePolicyRead"];
+export type PricePolicyCreate = Schemas["PricePolicyCreate"];
+export type PricePolicyUpdate = Schemas["PricePolicyUpdate"];
+export type PriceSnapshotRead = Schemas["PriceSnapshotRead"];
+export type ProjectBudgetPolicyRead = Schemas["ProjectBudgetPolicyRead"];
+export type ProjectBudgetPolicyCreate = Schemas["ProjectBudgetPolicyCreate"];
+export type ProjectBudgetPolicyUpdate = Schemas["ProjectBudgetPolicyUpdate"];
+export type BudgetReservationRead = Schemas["BudgetReservationRead"];
+export type UsageRecordRead = Schemas["UsageRecordRead"];
+export type LedgerEntryRead = Schemas["LedgerEntryRead"];
+export type AuditEventRead = Schemas["AuditEventRead"];
 
 export interface Page<T> {
   items: T[];
@@ -549,6 +563,106 @@ export const api = {
       method: "PATCH",
       body,
     });
+  },
+
+  // -- accounting: price policies (deployment-scoped) -------------------------
+
+  listPricePolicies(query: Query = {}): Promise<Page<PricePolicyRead>> {
+    return apiRequest<Page<PricePolicyRead>>("/admin/v1/price-policies", { query });
+  },
+
+  createPricePolicy(body: PricePolicyCreate): Promise<PricePolicyRead> {
+    return apiRequest<PricePolicyRead>("/admin/v1/price-policies", { method: "POST", body });
+  },
+
+  getPricePolicy(policyId: string): Promise<PricePolicyRead> {
+    return apiRequest<PricePolicyRead>(`/admin/v1/price-policies/${policyId}`);
+  },
+
+  updatePricePolicy(policyId: string, body: PricePolicyUpdate): Promise<PricePolicyRead> {
+    return apiRequest<PricePolicyRead>(`/admin/v1/price-policies/${policyId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- accounting: price snapshots (deployment-scoped, immutable) --------------
+
+  listPriceSnapshots(query: Query = {}): Promise<Page<PriceSnapshotRead>> {
+    return apiRequest<Page<PriceSnapshotRead>>("/admin/v1/price-snapshots", { query });
+  },
+
+  getPriceSnapshot(snapshotId: string): Promise<PriceSnapshotRead> {
+    return apiRequest<PriceSnapshotRead>(`/admin/v1/price-snapshots/${snapshotId}`);
+  },
+
+  // -- accounting: project budget policies (project-scoped) --------------------
+
+  listProjectBudgetPolicies(query: Query = {}): Promise<Page<ProjectBudgetPolicyRead>> {
+    return apiRequest<Page<ProjectBudgetPolicyRead>>("/admin/v1/project-budget-policies", {
+      query,
+    });
+  },
+
+  createProjectBudgetPolicy(body: ProjectBudgetPolicyCreate): Promise<ProjectBudgetPolicyRead> {
+    return apiRequest<ProjectBudgetPolicyRead>("/admin/v1/project-budget-policies", {
+      method: "POST",
+      body,
+    });
+  },
+
+  getProjectBudgetPolicy(policyId: string): Promise<ProjectBudgetPolicyRead> {
+    return apiRequest<ProjectBudgetPolicyRead>(`/admin/v1/project-budget-policies/${policyId}`);
+  },
+
+  updateProjectBudgetPolicy(
+    policyId: string,
+    body: ProjectBudgetPolicyUpdate,
+  ): Promise<ProjectBudgetPolicyRead> {
+    return apiRequest<ProjectBudgetPolicyRead>(`/admin/v1/project-budget-policies/${policyId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- accounting: budget reservations (project-scoped, read-only) -------------
+
+  listBudgetReservations(query: Query = {}): Promise<Page<BudgetReservationRead>> {
+    return apiRequest<Page<BudgetReservationRead>>("/admin/v1/budget-reservations", { query });
+  },
+
+  getBudgetReservation(reservationId: string): Promise<BudgetReservationRead> {
+    return apiRequest<BudgetReservationRead>(`/admin/v1/budget-reservations/${reservationId}`);
+  },
+
+  // -- accounting: usage records (project-scoped, immutable) -------------------
+
+  listUsageRecords(query: Query = {}): Promise<Page<UsageRecordRead>> {
+    return apiRequest<Page<UsageRecordRead>>("/admin/v1/usage-records", { query });
+  },
+
+  getUsageRecord(recordId: string): Promise<UsageRecordRead> {
+    return apiRequest<UsageRecordRead>(`/admin/v1/usage-records/${recordId}`);
+  },
+
+  // -- accounting: ledger entries (project-scoped, immutable) ------------------
+
+  listLedgerEntries(query: Query = {}): Promise<Page<LedgerEntryRead>> {
+    return apiRequest<Page<LedgerEntryRead>>("/admin/v1/ledger-entries", { query });
+  },
+
+  getLedgerEntry(entryId: string): Promise<LedgerEntryRead> {
+    return apiRequest<LedgerEntryRead>(`/admin/v1/ledger-entries/${entryId}`);
+  },
+
+  // -- accounting: audit events (special scoping) ------------------------------
+
+  listAuditEvents(query: Query = {}): Promise<Page<AuditEventRead>> {
+    return apiRequest<Page<AuditEventRead>>("/admin/v1/audit-events", { query });
+  },
+
+  getAuditEvent(eventId: string): Promise<AuditEventRead> {
+    return apiRequest<AuditEventRead>(`/admin/v1/audit-events/${eventId}`);
   },
 };
 

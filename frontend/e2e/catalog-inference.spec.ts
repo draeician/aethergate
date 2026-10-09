@@ -74,6 +74,10 @@ test("full disposable catalog path -> official SDK -> deactivate -> restore", as
   context,
   browser,
 }) => {
+  // Multiple live SDK generations (non-stream + stream + fail + restore) exceed
+  // the default 60s when Ollama is slow; allow the same generous bound as the
+  // accounting live-proof spec.
+  test.setTimeout(240_000);
   const runId = Date.now();
   const providerName = `e2e-disp-provider-${runId}`;
   const accountName = `e2e-disp-account-${runId}`;

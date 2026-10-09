@@ -27,3 +27,13 @@ export function canManageCatalog(roles: Role[]): boolean {
 export function canCancel(roles: Role[]): boolean {
   return roles.includes("system_admin") || roles.includes("project_admin");
 }
+
+/** Deployment-scoped pricing/snapshot controls are system_admin only. */
+export function canManagePricing(roles: Role[]): boolean {
+  return roles.includes("system_admin");
+}
+
+/** Budget policy mutation is open to system_admin and project_admin. */
+export function canManageBudgets(roles: Role[]): boolean {
+  return roles.includes("system_admin") || roles.includes("project_admin");
+}

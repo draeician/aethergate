@@ -14,9 +14,16 @@ import {
   Gauge,
   Box,
   Route,
+  CircleDollarSign,
+  Camera,
+  Wallet,
+  Clock,
+  BarChart3,
+  BookOpen,
+  ScrollText,
 } from "lucide-react";
 import { useAuth } from "../context/auth-context";
-import { isSystemAdmin } from "../lib/roles";
+import { isSystemAdmin, isProjectAdmin } from "../lib/roles";
 
 interface NavItem {
   to: string;
@@ -28,6 +35,8 @@ interface NavItem {
 export default function Sidebar() {
   const { logout, roles } = useAuth();
   const systemAdmin = isSystemAdmin(roles);
+  const projectAdmin = isProjectAdmin(roles);
+  const showAccounting = systemAdmin || projectAdmin || roles.includes("project_viewer");
 
   const identity: NavItem[] = [
     { to: "/projects", label: "Projects", icon: Folder },
@@ -46,6 +55,21 @@ export default function Sidebar() {
         { to: "/catalog/routes", label: "Route Bindings", icon: Route },
       ]
     : [];
+
+  const accountingConfig: NavItem[] = systemAdmin
+    ? [
+        { to: "/accounting/pricing", label: "Pricing", icon: CircleDollarSign },
+        { to: "/accounting/snapshots", label: "Snapshots", icon: Camera },
+      ]
+    : [];
+
+  const accounting: NavItem[] = [
+    { to: "/accounting/budgets", label: "Budgets", icon: Wallet },
+    { to: "/accounting/reservations", label: "Reservations", icon: Clock },
+    { to: "/accounting/usage", label: "Usage", icon: BarChart3 },
+    { to: "/accounting/ledger", label: "Ledger", icon: BookOpen },
+    { to: "/audit", label: "Audit", icon: ScrollText },
+  ];
 
   const operational: NavItem[] = [
     { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
@@ -95,6 +119,24 @@ export default function Sidebar() {
           <div className="space-y-1">
             <p className="px-3 text-[10px] uppercase tracking-wider text-[var(--ag-text-muted)]">Catalog</p>
             {catalog.map(({ to, label, icon: Icon }) => (
+              <NavLink key={to} to={to} className={linkClass}>
+                <Icon size={18} />
+                {label}
+              </NavLink>
+            ))}
+          </div>
+        ) : null}
+
+        {showAccounting ? (
+          <div className="space-y-1">
+            <p className="px-3 text-[10px] uppercase tracking-wider text-[var(--ag-text-muted)]">Accounting</p>
+            {accountingConfig.map(({ to, label, icon: Icon }) => (
+              <NavLink key={to} to={to} className={linkClass}>
+                <Icon size={18} />
+                {label}
+              </NavLink>
+            ))}
+            {accounting.map(({ to, label, icon: Icon }) => (
               <NavLink key={to} to={to} className={linkClass}>
                 <Icon size={18} />
                 {label}

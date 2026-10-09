@@ -70,3 +70,29 @@ Security notes:
 Live E2E: `e2e/management-rbac.spec.ts` (RBAC + one-time reveal canary + credential lifecycle) and
 `e2e/catalog-inference.spec.ts` (disposable alias → real SDK inference → deactivate fails safely →
 restore succeeds).
+
+## Accounting management (AGV2-022)
+
+The console now includes the accounting-management surface over `/admin/v1`:
+
+- `src/features/accounting/` — Pricing (`/accounting/pricing`), Price Snapshots
+  (`/accounting/snapshots`), Budgets (`/accounting/budgets`), Reservations
+  (`/accounting/reservations`), Usage (`/accounting/usage`), Ledger (`/accounting/ledger`), Audit
+  (`/audit`).
+- `src/lib/decimal.ts` — Decimal-safe validation/formatting that never uses `Number()`/`parseFloat()`;
+  monetary fields stay strings end-to-end.
+- `src/lib/client.ts` — typed accounting methods; `src/lib/roles.ts` — accounting role guards
+  (`system_admin` sees all; `project_admin` own-project; `project_viewer` read-only).
+
+Accounting invariants:
+
+- `PricePolicy` is mutable config; `PriceSnapshot`, `UsageRecord`, `LedgerEntry`, and
+  `BudgetReservation` are immutable/read-only history.
+- Budgets are optional policy controls (not prepaid balances); `currency`/`window_seconds` are
+  immutable after create, and the console uses the server-returned headroom.
+- A released pre-dispatch reservation renders `price_snapshot_id = null` safely.
+- Ledger amounts are signed (`usage_debit` negative); there are no manual adjustment writes.
+
+Live E2E: `e2e/accounting.spec.ts` (accounting RBAC + exact-Decimal price policy + immutable snapshot
+proof + budget block/unblock proof via the official OpenAI SDK).
+

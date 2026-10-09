@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { ArrowLeft, Save, UserRound, KeyRound } from "lucide-react";
+import { ArrowLeft, Save, UserRound, KeyRound, Wallet } from "lucide-react";
 import {
   api,
   apiErrorMessage,
@@ -101,6 +101,12 @@ export default function ProjectDetailPage() {
           className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded-lg border border-[var(--ag-border)] text-[var(--ag-text-muted)] hover:text-[var(--ag-text)] hover:bg-[var(--ag-surface-2)] transition-colors"
         >
           <KeyRound size={16} /> Credentials
+        </Link>
+        <Link
+          to={`/accounting/budgets?project=${project.id}`}
+          className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded-lg border border-[var(--ag-border)] text-[var(--ag-text-muted)] hover:text-[var(--ag-text)] hover:bg-[var(--ag-surface-2)] transition-colors"
+        >
+          <Wallet size={16} /> Budgets
         </Link>
       </div>
 
