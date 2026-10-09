@@ -1,10 +1,10 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-021
+AGV2-021V
 
 ## Title
-Management UI I — identity, credentials, projects, and catalog administration
+Close management-UI live lifecycle verification gaps
 
 ## WIP Marker — FIRST LOCAL ACTION
 
@@ -13,51 +13,46 @@ Immediately after entering the repository, before pull/read/implementation work,
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-021
+- task ID: AGV2-021V
 - branch: v2
 - UTC start timestamp
 
-The marker is gitignored.
+It is gitignored.
 Never stage, commit, or push it.
-Keep it present for the entire incomplete task.
+Keep it present while the task is incomplete.
 If context is compacted/restarted and the task is incomplete, recreate it if missing.
 If blocked/incomplete, leave it present.
 
 Remove it only after:
 1. every criterion below is green;
 2. handoff is committed;
-3. all task commits are pushed to origin/v2;
+3. every task commit is pushed to origin/v2;
 4. origin/v2 is verified to contain the finished work.
 
 ## Why This Task Exists
 
-AGV2-020/020V established a verified v2 web-console foundation:
-- OIDC browser session + CSRF;
-- generated OpenAPI types;
-- centralized auth-expiry/error handling;
-- live operator dashboard;
-- queue/operator workflows;
-- real browser RBAC/E2E.
+AGV2-021 is implemented and pushed with:
+- identity/project/principal/role/credential management UI;
+- provider/provider-account/SecretRef/endpoint/quota/model-alias/route management UI;
+- one-time credential reveal;
+- browser RBAC coverage;
+- 503 backend tests;
+- 54 frontend unit/component tests;
+- 18 Playwright tests;
+- green build/lint/OpenAPI drift/regressions.
 
-The next product gap is management UI for the already-built admin APIs.
+Final review found three narrow acceptance gaps in the **live proof**, not in the core UI implementation:
 
-This task adds the first management slice:
-- projects;
-- principals;
-- role assignments;
-- service/admin/inference credentials;
-- providers;
-- provider accounts;
-- secret-reference metadata;
-- endpoints;
-- quota groups/limits;
-- model aliases;
-- route bindings.
+1. The catalog -> inference browser E2E creates the model alias and route binding through the UI, but
+   reuses the pre-provisioned Ollama provider/provider-account/endpoint. AGV2-021 required the
+   disposable catalog path to be configured through the web UI wherever those resources are exposed.
+2. The credential lifecycle proof creates/rotates/revokes through direct admin API calls, not through
+   the browser UI as required.
+3. `catalog-inference.spec.ts` uses `fetch` against the OpenAI-compatible route. The handoff calls
+   that an "official OpenAI Python SDK" proof, but the disposable UI-created alias itself was not
+   exercised with the official Python SDK.
 
-Do not reimplement backend authorization or business rules in React. The web console is a typed client
-over /admin/v1 and the backend remains authoritative.
-
-Accounting/budget/usage/ledger management UI is the next task after this one.
+Close these only. Do not rebuild AGV2-021 and do not start accounting UI yet.
 
 ## Recovery
 
@@ -70,554 +65,226 @@ If context is compacted/restarted/uncertain:
 6. inspect git status/history;
 7. continue from repository state.
 
-current-task.md is authoritative.
+## 1. Full disposable catalog path through the browser UI
 
-## Before You Start
+Using a real system_admin OIDC browser session on nomnom, create a disposable inference route through
+the actual web pages:
 
-1. Work on branch v2 and pull latest origin/v2.
-2. Read:
-   - AGENTS.md
-   - project_spec.md
-   - docs/development/current-task.md
-   - docs/development/agent-handoff.md
-   - docs/architecture/security.md
-   - docs/architecture/admin-api.md
-   - docs/architecture/provider-model.md
-   - docs/contracts/domain-model.md
-   - frontend/src/lib/client.ts
-   - frontend/src/context/*
-   - frontend/src/components/*
-   - frontend/src/pages/*
-   - generated OpenAPI schema/client workflow
-   - identity/catalog admin routers/services/contracts/tests
-3. Preserve all AGV2-014/014V identity/RBAC/non-enumeration invariants.
-4. Preserve all AGV2-016/016V catalog/routing/egress invariants.
-5. Preserve AGV2-020 browser session/CSRF/security model.
-6. Do not store long-lived credentials or raw service/inference keys in browser storage.
-7. Do not modify/delete legacy Python v1 app/.
-8. Do not commit unrelated local/untracked files.
-
-## 1. Feature-module organization
-
-Reorganize new console code into clear feature modules rather than growing one god file.
-
-Recommended:
-- frontend/src/features/identity/
-- frontend/src/features/catalog/
-- shared table/form/dialog components where genuinely reusable.
-
-Do not perform a cosmetic rewrite of unrelated operator pages.
-
-The generated OpenAPI schema remains the contract source of truth.
-
-## 2. Navigation / routing
-
-Add authenticated routes and role-aware navigation for:
-
-### Identity
-- /projects
-- /projects/:projectId
-- /principals
-- /principals/:principalId
-- /credentials
-- /roles
-
-### Catalog
-- /catalog/providers
-- /catalog/provider-accounts
-- /catalog/endpoints
-- /catalog/quotas
-- /catalog/models
-- /catalog/routes
-
-Equivalent nested route structure is acceptable if coherent.
-
-Rules:
-- system_admin sees all deployment-management routes;
-- project_admin/project_viewer see only project-scoped identity/resource routes actually authorized by
-  the backend;
-- project roles do not see deployment catalog controls;
-- hiding navigation is usability only, never the authorization boundary.
-
-Old v1 routes must remain gone.
-
-## 3. Projects UI
-
-Implement server-paginated project management.
-
-At minimum:
-- list;
-- show/detail;
-- create where authorized;
-- update name/active state where backend supports it;
-- clear active/inactive status;
-- safe error rendering.
-
-System-admin deployment scope follows backend rules.
-
-For project-scoped callers:
-- only show project data returned by the authorized backend;
-- never infer or enumerate other project IDs client-side.
-
-## 4. Principals UI
-
-Implement:
-- paginated list;
-- filter by project/kind/active where backend supports it;
-- detail;
-- create USER/SERVICE principal where authorized;
-- update supported mutable fields;
-- activate/deactivate where supported.
+1. Provider;
+2. ProviderAccount;
+3. Endpoint;
+4. PublicModelAlias;
+5. RouteBinding;
+6. QuotaGroup/QuotaLimit only if needed for the route.
 
 Requirements:
-- distinguish USER vs SERVICE visibly;
-- deactivation warning explains that active sessions/credentials become ineffective through backend
-  authorization;
-- no role assignment is implied by principal creation;
-- no email/username claim is treated as the authorization key.
 
-## 5. Role-assignment UI
+### Provider
+Create a new provider through `/catalog/providers`.
 
-Implement:
-- list active/revoked assignments;
-- filter by project/principal/role where supported;
-- grant role;
-- revoke role.
+Use a provider kind/capability combination compatible with the existing adapter path. Do not invent a
+new backend provider implementation just for this proof.
 
-Enforce UX consistent with backend:
-- project_admin can grant only project roles within its own authorized project;
-- project_admin cannot grant system_admin;
-- project_viewer cannot mutate;
-- system_admin can perform deployment-authorized grants.
+### ProviderAccount
+Create a new provider account through `/catalog/provider-accounts`.
 
-Never rely on the UI to prevent escalation: backend 403/validation remains authoritative.
+Secret handling:
+- if the local Ollama path needs no provider secret, leave SecretRef unset;
+- if a SecretRef is required by the existing adapter contract, create/select only SecretRef metadata
+  through the UI and reuse an already-valid external/dev secret backend binding;
+- never place a raw provider secret into browser form fields, PostgreSQL metadata, logs, or Git.
 
-Require an explicit confirmation before revocation.
+### Endpoint
+Create a new endpoint through `/catalog/endpoints`:
+- provider account = the newly created account;
+- base destination = the real allowed nomnom Ollama destination;
+- max_concurrency >= 1;
+- active.
 
-No "edit role in place" if backend semantics are grant/revoke.
+The backend egress policy must remain authoritative.
 
-## 6. Credential UI
+### Model alias
+Create a disposable client-visible alias through `/catalog/models`.
 
-Use the generic v2 credential API, not legacy "API key" endpoints.
+### Route binding
+Create a route binding through `/catalog/routes` using only the newly-created disposable provider
+account + endpoint + alias.
 
-Implement:
-- list metadata;
-- filters by project/principal/audience/active;
+No hidden fallback to the pre-existing route is allowed.
+
+Use unique names per run.
+
+If there is no DELETE surface, leave disposable resources disabled/inactive at the end rather than
+mutating database rows directly.
+
+## 2. Official Python SDK against the UI-created disposable alias
+
+After the complete disposable catalog path above exists:
+
+- mint/use a valid inference credential without exposing it in process argv;
+- call the **official OpenAI Python SDK** against the AetherGate `/v1` surface;
+- model = the newly-created disposable alias;
+- inference-auth bypass = false;
+- non-stream succeeds;
+- stream succeeds.
+
+The proof must use the official `openai` Python package, not raw `fetch`, `curl`, or `httpx`.
+
+Safe invocation:
+- pass the inference key through environment/stdin/in-memory test plumbing, never shell argv;
+- never print the raw key.
+
+Then through the browser UI:
+- deactivate the disposable RouteBinding (or another appropriate disposable catalog resource);
+- official SDK against the alias fails safely with `model_unavailable` / established error;
+- no hidden fallback occurs;
+- restore/activate;
+- official SDK succeeds again.
+
+Record the exact official SDK version in the handoff.
+
+## 3. Credential lifecycle entirely through browser UI
+
+Using a real system_admin browser session and a disposable project/principal:
+
+### Create
+Through `/credentials`:
+- select project;
+- click New credential;
+- select principal;
+- audience = inference;
 - create;
-- rotate;
-- revoke;
-- show safe metadata.
-
-Distinguish:
-- inference audience;
-- admin audience.
-
-### One-time raw key handling
-
-Create/rotate may return a raw key once.
-
-Required:
-- display only in a dedicated one-time reveal modal/panel;
-- explain that it cannot be retrieved again;
-- provide explicit Copy button;
-- never place raw key in URL;
-- never write raw key to localStorage/sessionStorage/IndexedDB;
-- never include raw key in application logs, analytics, error reports, or persisted React state beyond
-  the transient component lifetime needed for the reveal;
-- closing/navigating away destroys the in-memory reveal value;
-- do not add "show existing key" behavior because backend cannot recover it.
-
-Add canary browser tests proving the raw key does not survive reload/navigation/storage inspection.
-
-Revocation:
-- explicit confirmation;
-- idempotent backend semantics preserved.
-
-Rotation:
-- only active/lifecycle-valid credentials;
-- display the replacement key once;
-- old credential behavior follows backend truth.
-
-## 7. Secret-reference metadata UI
-
-The current backend exposes SecretRef metadata, not raw secret values.
-
-Implement:
-- list;
-- create metadata/ref name if supported;
-- select SecretRef when configuring ProviderAccount.
-
-Do NOT:
-- invent a plaintext provider-secret input that writes raw values into PostgreSQL;
-- display raw provider secrets;
-- expose internal secret backend material.
-
-Clearly label this as secret-reference metadata.
-
-Production secret backend selection remains deferred.
-
-## 8. Providers UI
-
-Implement deployment-scoped Provider CRUD:
-- list;
-- detail;
-- create;
-- update supported fields;
-- activate/deactivate where supported.
-
-Show:
-- kind;
-- name;
-- capabilities;
-- active state.
-
-System_admin only.
-
-Project roles:
-- route hidden;
-- direct route/API access still handled by backend 403.
-
-## 9. Provider accounts UI
-
-Implement:
-- list/detail;
-- create/update;
-- provider relationship;
-- secret reference;
-- active state;
-- safe non-secret account metadata.
-
-Never show raw secret/provider API key.
-
-Relationship selectors use existing paginated endpoints and stable opaque IDs.
-
-## 10. Endpoint UI
-
-Implement catalog Endpoint management separately from runtime operator state.
-
-Show both:
-- catalog `is_active`;
-- queue runtime `operational_state` where system_admin can access it.
-
-Make the distinction explicit:
-- inactive = catalog/config unavailable;
-- paused/draining = temporary operator scheduling state.
-
-Implement:
-- list/detail;
-- create/update supported catalog fields;
-- provider-account relationship;
-- max_concurrency;
-- base URL;
-- active state.
-
-Destination validation:
-- frontend may pre-check obvious invalid input for UX;
-- backend egress DestinationPolicy is authoritative;
-- render stable destination-denied errors cleanly;
-- never add a bypass.
-
-Pause/drain/resume remain the existing queue/operator actions, not Endpoint PATCH hacks.
-
-## 11. Quota groups / limits UI
-
-Implement:
-- QuotaGroup list/detail/create/update;
-- QuotaLimit list/detail/create/update where supported;
-- request/token metric distinction;
-- limit_units;
-- window_seconds;
-- enabled;
-- provider-account relationship;
-- current runtime status link/display if available from queue quota-status.
-
-Requirements:
-- no generic heuristic token estimator in UI;
-- do not imply a token quota will admit requests when backend estimator is fail-closed;
-- display runtime cooldown/current committed/reserved values when available, but configuration CRUD and
-  runtime status remain conceptually separate.
-
-## 12. Model aliases UI
-
-Implement PublicModelAlias management:
-- list/detail;
-- create/update;
-- active state;
-- public alias name;
-- supported safe metadata.
-
-Do not expose hidden fallback behavior because v2 has none.
-
-Make it clear the alias is the client-visible OpenAI model name.
-
-## 13. Route bindings UI
-
-Implement:
-- list/detail;
-- create/update;
-- activate/deactivate;
-- provider account;
-- endpoint;
-- model alias;
-- quota group optional relationship;
-- upstream_model;
-- default_output_tokens;
-- safe routing metadata.
-
-Required invariants are backend-authoritative and errors must render cleanly:
-- endpoint.provider_account_id == route.provider_account_id;
-- quota_group provider account == route account;
-- at most one active route per alias;
-- activation conflict => stable 409;
-- invalid egress relationships never saved.
-
-No UI fallback chain editor in this phase; current backend has one active route per alias.
-
-## 14. Forms / PATCH semantics
-
-Respect backend PATCH semantics:
-- omitted field means unchanged;
-- explicit null only where contract allows clearing;
-- do not send every field blindly on edit;
-- use generated OpenAPI types.
-
-Prevent accidental type corruption:
-- integers remain integers;
-- Decimal/money values are not part of this task;
-- booleans are explicit;
-- stable opaque IDs remain strings.
-
-Render structured AetherGate validation/conflict messages without stack traces.
-
-## 15. Pagination / filtering
-
-All list pages:
-- use server-side pagination;
-- default reasonable page size;
-- Next/Prev or equivalent;
-- display total where contract supplies it;
-- preserve filter state in component state or URL query params if clean.
-
-Do not fetch all pages client-side just to render one table.
-
-## 16. Shared UX requirements
-
-Add reusable:
-- loading state;
-- empty state;
-- structured error banner;
-- confirmation dialog;
-- one-time secret reveal component;
-- resource-status badge;
-- simple form field/error components.
-
-Accessibility:
-- labels for form controls;
-- keyboard-accessible dialogs/buttons;
-- no color-only state indication.
-
-No design-system rewrite required.
-
-## 17. Browser RBAC / security tests
-
-Extend Playwright using the deterministic OIDC subject-control fixture.
-
-Live browser roles:
-- system_admin;
-- project_admin(A);
-- project_viewer(A).
+- capture the one-time raw key only from the RevealSecret UI in test memory.
 
 Prove:
+- no raw key in URL/history;
+- no localStorage/sessionStorage;
+- no console log;
+- closing reveal removes it from DOM;
+- reload does not recover it.
 
-### system_admin
-- can create/update project;
-- can create/update provider/catalog resources;
-- can create an admin/inference credential where authorized;
-- sees one-time raw key only at create/rotate;
-- can revoke credential;
-- can grant/revoke role.
+### Use
+Use the official OpenAI Python SDK with the newly created key:
+- bypass false;
+- known live alias;
+- request succeeds.
 
-### project_admin(A)
-- can manage permitted principals/credentials/roles in A;
-- cannot enumerate B;
-- cannot access deployment catalog routes;
-- direct catalog API/mutation => 403.
+### Rotate
+Through the browser UI:
+- click Rotate on that credential;
+- confirm;
+- capture the new one-time key from RevealSecret;
+- old key fails immediately;
+- new key succeeds via official SDK.
 
-### project_viewer(A)
-- read-only project identity surfaces;
-- no mutation controls;
-- direct mutation => 403.
+### Revoke
+Through the browser UI:
+- click Revoke on the rotated/new credential;
+- confirm;
+- new key fails immediately.
 
-### raw key leak canary
-After credential create/rotate:
-- raw canary key visible only in the reveal;
-- not present in URL/history;
-- not in localStorage/sessionStorage;
-- not present after reload;
-- not present in non-secret list/detail API responses;
-- not logged by browser console in test.
+Do not substitute direct `adminJson` create/rotate/revoke calls for the lifecycle actions being proven.
 
-## 18. Live catalog configuration -> real inference
+Direct API calls may still be used to provision unrelated fixtures or inspect postconditions.
 
-Using the browser as system_admin:
+## 4. Automated browser coverage
 
-1. create/configure the catalog resources necessary for a disposable alias entirely through the web UI
-   where this task exposes them;
-2. provider;
-3. provider account;
-4. endpoint;
-5. model alias;
-6. route binding;
-7. any needed quota relationship;
-8. run official OpenAI Python SDK against the new alias with inference auth bypass false;
-9. prove inference succeeds;
-10. deactivate an appropriate catalog resource in the UI and prove inference fails safely with no
-    fallback;
-11. restore it and prove inference succeeds again.
+Update/add Playwright coverage so the repository proves these paths.
 
-If an existing secret reference must be reused because raw provider-secret provisioning is outside
-the current API, do so and document that boundary truthfully. Do not invent secret storage.
+Preferred:
+- expand `catalog-inference.spec.ts` to create provider/account/endpoint/alias/route through UI;
+- expand management credential lifecycle test to perform create/rotate/revoke through UI.
 
-## 19. Live credential lifecycle
+For official Python SDK calls inside/alongside Playwright:
+- use a safe helper/driver that invokes the existing virtualenv Python/OpenAI SDK;
+- pass raw keys through environment or stdin, never argv;
+- redact output;
+- helper must fail with a clear assertion when SDK request fails.
 
-Through browser UI:
-- create inference credential for a disposable principal/project;
-- copy one-time value once;
-- use it with official SDK;
-- rotate;
-- old key fails;
-- new key succeeds;
-- revoke;
-- revoked key fails immediately.
+If spawning Python directly from Playwright is brittle in the container, keep the browser actions in
+Playwright and add a deterministic live verification driver/script that consumes only temporary
+environment values. Do not commit secrets.
 
-Never log/commit the raw keys.
+## 5. Handoff truthfulness
 
-For admin credential lifecycle:
-- create/rotate/revoke only if the existing backend authorization and live setup makes it clean;
-- at minimum verify audience separation remains enforced.
+Correct any wording that overstates prior evidence.
 
-## 20. OpenAPI generation drift
+Specifically distinguish:
+- raw OpenAI-compatible HTTP/fetch proof;
+- official OpenAI Python SDK proof.
 
-Run:
-- backend OpenAPI generation;
-- frontend client/type generation.
+The final handoff may call the disposable path an official SDK proof only after criterion 2 is green.
 
-Add/check a deterministic drift command so generated schema/types match the current backend.
+## 6. Regression
 
-Do not manually patch generated files.
-
-If backend contracts need no change, generated output should remain stable except for intentional
-existing endpoint coverage.
-
-## 21. Automated tests
-
-Add frontend unit/component tests for at least:
-1. project pagination;
-2. principal list/form;
-3. role grant/revoke controls;
-4. project_viewer read-only behavior;
-5. credential one-time reveal lifecycle;
-6. raw key not persisted to storage;
-7. provider form;
-8. provider-account secret-ref selector;
-9. endpoint form and operational-state distinction;
-10. destination-denied error rendering;
-11. quota group/limit forms;
-12. model alias form;
-13. route-binding form;
-14. active-route 409 rendering;
-15. PATCH sends only changed/explicitly-cleared fields;
-16. structured 400/403/404/409 handling;
-17. generated-client drift check.
-
-Extend Playwright for the live RBAC/lifecycle scenarios above.
-
-## 22. Regression
-
-Run:
+Re-run:
 - full backend containerized suite; baseline **503**;
-- frontend unit/component suite; baseline **27**;
-- Playwright; baseline **11**;
+- frontend unit/component suite; baseline **54**;
+- Playwright; baseline **18**;
 - npm build;
 - npm lint;
-- OpenAPI/client generation drift check;
+- OpenAPI/client drift check;
 - ruff check src tests;
 - git diff --check;
 - secret/token/content canary scan;
-- official OpenAI Python SDK non-stream + stream with inference bypass false.
+- official OpenAI Python SDK non-stream + stream with inference-auth bypass false.
 
 No migration expected.
 
-Do not modify migrations 0001-0016 unless a genuine backend defect requires a narrowly justified
-linear 0017.
+Do not modify migrations 0001-0016.
 
-## 23. Documentation
-
-Update:
-- docs/web-console.md;
-- docs/development/README.md;
-- frontend/README.md;
-- docs/development/agent-handoff.md;
-- architecture/admin/security/catalog docs only where behavior needs clarification.
-
-Document:
-- management routes;
-- role visibility vs backend enforcement;
-- credential one-time reveal security;
-- SecretRef metadata boundary;
-- endpoint catalog-vs-runtime state distinction;
-- pagination/filter behavior;
-- OpenAPI generation workflow;
-- browser test workflow.
-
-Do not modify the dated architecture audit.
-
-## Still Deferred
+## 7. No new product scope
 
 Do not implement:
-- accounting/budget/usage/ledger management UI;
-- production secret backend;
-- raw provider-secret storage UI;
+- accounting/budget/usage/ledger UI;
+- new provider adapters;
+- raw provider-secret storage;
 - bulk import/diff/apply;
-- observability metric instrumentation;
+- observability metrics;
 - Responses API;
 - embeddings;
-- v1 migration;
-- broad visual redesign.
+- v1 migration.
 
-## Handoff
+If the live verification exposes an actual management UI bug, fix it narrowly and add deterministic
+coverage.
 
-Include:
-- implementation commit(s);
-- routed pages/features;
-- RBAC behavior;
-- one-time credential reveal behavior;
-- SecretRef boundary;
-- catalog form/invariant handling;
-- live catalog -> SDK inference proof;
-- live credential create/rotate/revoke proof;
-- backend test count;
-- frontend unit test count;
-- Playwright count;
+## Documentation / handoff
+
+Update docs/development/agent-handoff.md with:
+
+- disposable provider name/id proof created through UI;
+- disposable provider-account proof created through UI;
+- disposable endpoint proof created through UI;
+- disposable alias/route proof created through UI;
+- official OpenAI Python SDK version;
+- official SDK non-stream + stream against the disposable alias;
+- route/resource deactivation -> fail closed -> restore proof;
+- credential create through UI;
+- credential rotate through UI;
+- credential revoke through UI;
+- old/new/revoked key SDK outcomes;
+- one-time reveal leak canary;
+- final backend/frontend/Playwright counts;
 - build/lint/OpenAPI drift results;
-- migration/no-migration decision;
+- migration head 0016 / no migration;
 - dynamic API/web/IdP ports;
-- issues/risks;
 - WIP marker lifecycle;
-- exactly one recommended next step.
+- exactly one recommended next step: accounting/budget/usage/ledger management UI.
 
-Never include raw API/admin/inference/provider/session/CSRF/OIDC/device secrets, prompt/completion
-content, or large logs.
+Never include raw inference/admin/provider/session/CSRF/OIDC/device secrets, prompt/completion content,
+or large logs.
 
 ## Commit and Push
 
-Suggested primary commit:
-`feat(web): add identity and catalog management UI`
+If only tests/docs change:
+`test(web): close management lifecycle verification gaps`
+
+If a real product bug is found:
+use a narrow conventional fix commit plus test/docs follow-up.
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to commit/push.
 
-The task is complete only when every stated automated/live criterion is green, origin/v2 contains the
-finished implementation/tests/docs/handoff, and local `.aethergate-wip` has been removed after final
-push verification.
+The task is complete only when every criterion above is green, origin/v2 contains the final
+tests/fixes/docs/handoff, and local `.aethergate-wip` has been removed after final push verification.
