@@ -156,10 +156,16 @@ test.describe("project RBAC in the browser", () => {
     await page.goto("/queue");
     await expect(page.getByRole("heading", { name: "Queue" })).toBeVisible();
 
+    // The queue sorts oldest-first and paginates at 20; filter to the queued
+    // state so the freshly submitted request is visible regardless of how much
+    // historical traffic has accumulated.
+    await page.getByRole("combobox").selectOption("queued");
     const row = page.locator("tbody tr").filter({ hasText: "queued" }).first();
     await expect(row).toBeVisible();
     page.on("dialog", (dialog) => void dialog.accept());
     await row.getByRole("button", { name: "Cancel" }).click();
+    // The cancelled request leaves the "queued" filter; switch to "cancelled".
+    await page.getByRole("combobox").selectOption("cancelled");
     await expect(page.locator("tbody").getByText("cancelled").first()).toBeVisible({
       timeout: 10_000,
     });
