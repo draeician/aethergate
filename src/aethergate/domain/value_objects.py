@@ -10,7 +10,7 @@ import re
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
 
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, PlainSerializer
 
 # Fixed-point money quantization. 12 decimal places is enough for very small
 # per-token prices (e.g. a price of 2.50 per 1,000,000 tokens is 0.0000025 per
@@ -61,14 +61,39 @@ def quantize_money(value: Decimal) -> Decimal:
     return value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
+def _serialize_money(value: Decimal) -> str:
+    """Serialize money as a canonical fixed-point string.
+
+    ``str(Decimal)`` emits scientific notation for small magnitudes (e.g.
+    ``2.00E-10``), which is an exact Decimal but not a fixed-point
+    representation. The wire contract documents money as fixed-point
+    ``Numeric(24,12)``; serialize it as a plain fixed-point string (trailing
+    zeros stripped) so clients see ``0.0000000002`` rather than ``2.00E-10``.
+    No float is ever involved.
+    """
+    return format(value.normalize(), "f")
+
+
 # A monetary amount (fixed-point). Never float.
-Money = Annotated[Decimal, BeforeValidator(_to_decimal)]
+Money = Annotated[
+    Decimal,
+    BeforeValidator(_to_decimal),
+    PlainSerializer(_serialize_money, return_type=str, when_used="json"),
+]
 
 # A non-negative monetary amount, e.g. a price or a budget allowance.
-NonNegativeMoney = Annotated[Decimal, BeforeValidator(_to_non_negative_decimal)]
+NonNegativeMoney = Annotated[
+    Decimal,
+    BeforeValidator(_to_non_negative_decimal),
+    PlainSerializer(_serialize_money, return_type=str, when_used="json"),
+]
 
 # A strictly positive monetary amount (e.g. a budget limit).
-PositiveMoney = Annotated[Decimal, BeforeValidator(_to_positive_decimal)]
+PositiveMoney = Annotated[
+    Decimal,
+    BeforeValidator(_to_positive_decimal),
+    PlainSerializer(_serialize_money, return_type=str, when_used="json"),
+]
 
 # An explicit, normalized uppercase ISO-style three-letter currency code.
 Currency = Annotated[str, BeforeValidator(_to_currency)]

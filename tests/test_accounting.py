@@ -492,6 +492,12 @@ async def test_request_priced_budget_reserves_and_queues_exhausted(sched_engine)
     assert await _count(factory, models.UsageRecord) == 2
     assert await _count(factory, models.LedgerEntry) == 2
 
+    # Usage ledger debits are signed (negative) flows: measured usage is positive.
+    async with factory() as session:
+        ledgers = (await session.execute(select(models.LedgerEntry))).scalars().all()
+        assert all(led.entry_type == "usage_debit" for led in ledgers)
+        assert all(led.amount == Decimal("-0.05") for led in ledgers)
+
     async with factory() as session:
         blocked = (await session.execute(
             select(models.InferenceRequest).where(

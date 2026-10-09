@@ -1418,7 +1418,7 @@ class SchedulingService:
                 project_id=request.project_id,
                 usage_record_id=usage_record.id,
                 entry_type="usage_debit",
-                amount=amount,
+                amount=-amount,
                 currency=snapshot.currency,
                 created_at=now,
                 idempotency_key=f"usage:{usage_record.id}",

@@ -298,7 +298,6 @@
             "type": "string"
           },
           "committed_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Committed Amount",
             "type": "string"
           },
@@ -322,7 +321,6 @@
             "type": "string"
           },
           "reserved_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Reserved Amount",
             "type": "string"
           },
@@ -371,7 +369,6 @@
             "type": "string"
           },
           "committed_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Committed Amount",
             "type": "string"
           },
@@ -385,12 +382,10 @@
             "type": "boolean"
           },
           "headroom": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Headroom",
             "type": "string"
           },
           "limit_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Limit Amount",
             "type": "string"
           },
@@ -399,7 +394,6 @@
             "type": "string"
           },
           "reserved_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Reserved Amount",
             "type": "string"
           },
@@ -1306,7 +1300,6 @@
         "additionalProperties": false,
         "properties": {
           "amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Amount",
             "type": "string"
           },
@@ -2370,7 +2363,6 @@
           "input_price": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -2393,7 +2385,6 @@
           "output_price": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -2405,7 +2396,6 @@
           "request_price": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -2564,7 +2554,6 @@
           "input_price": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -2580,7 +2569,6 @@
           "output_price": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -2596,7 +2584,6 @@
           "request_price": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -2792,7 +2779,6 @@
             "type": "string"
           },
           "limit_amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Limit Amount",
             "type": "string"
           },
@@ -4396,7 +4382,6 @@
         "additionalProperties": false,
         "properties": {
           "amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Amount",
             "type": "string"
           },

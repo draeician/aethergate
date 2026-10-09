@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from aethergate.contracts.admin_v1 import (
     ProjectCreate,
@@ -112,3 +112,24 @@ def test_route_binding_default_output_tokens_ge_1():
         default_output_tokens=64,
     )
     assert ok.default_output_tokens == 64
+
+
+def test_money_serializes_as_canonical_fixed_point():
+    from decimal import Decimal
+
+    from aethergate.domain.value_objects import Money, NonNegativeMoney, PositiveMoney
+
+    class MoneyDoc(BaseModel):
+        limit: PositiveMoney
+        committed: NonNegativeMoney
+        headroom: Money
+
+    doc = MoneyDoc(limit="0.000000000200", committed="0", headroom="0.000000000700")
+    data = doc.model_dump(mode="json")
+    assert data == {"limit": "0.0000000002", "committed": "0", "headroom": "0.0000000007"}
+    # Python-mode dumps keep the exact Decimal (no float, no precision loss).
+    assert doc.model_dump() == {
+        "limit": Decimal("0.000000000200"),
+        "committed": Decimal("0"),
+        "headroom": Decimal("0.000000000700"),
+    }
