@@ -29,6 +29,46 @@ export type BudgetStatusRead = Schemas["BudgetStatusRead"];
 export type CancelResult = Schemas["CancelResult"];
 export type ReconcileResult = Schemas["ReconcileResult"];
 export type LogoutResult = Schemas["LogoutResult"];
+export type ProjectCreate = Schemas["ProjectCreate"];
+export type ProjectUpdate = Schemas["ProjectUpdate"];
+export type PrincipalRead = Schemas["PrincipalRead"];
+export type PrincipalCreate = Schemas["PrincipalCreate"];
+export type PrincipalUpdate = Schemas["PrincipalUpdate"];
+export type PrincipalKind = Schemas["PrincipalKind"];
+export type RoleAssignmentRead = Schemas["RoleAssignmentRead"];
+export type RoleAssignmentCreate = Schemas["RoleAssignmentCreate"];
+export type ResourceScopeType = Schemas["ResourceScopeType"];
+export type ApiCredentialRead = Schemas["ApiCredentialRead"];
+export type ApiCredentialCreate = Schemas["ApiCredentialCreate"];
+export type ApiCredentialCreateResult = Schemas["ApiCredentialCreateResult"];
+export type ApiCredentialRevokeResult = Schemas["ApiCredentialRevokeResult"];
+export type CredentialAudience = Schemas["CredentialAudience"];
+export type CredentialScope = Schemas["CredentialScope"];
+export type ProviderRead = Schemas["ProviderRead"];
+export type ProviderCreate = Schemas["ProviderCreate"];
+export type ProviderUpdate = Schemas["ProviderUpdate"];
+export type SecretRefRead = Schemas["SecretRefRead"];
+export type SecretRefCreate = Schemas["SecretRefCreate"];
+export type ProviderAccountRead = Schemas["ProviderAccountRead"];
+export type ProviderAccountCreate = Schemas["ProviderAccountCreate"];
+export type ProviderAccountUpdate = Schemas["ProviderAccountUpdate"];
+export type EndpointRead = Schemas["EndpointRead"];
+export type EndpointCreate = Schemas["EndpointCreate"];
+export type EndpointUpdate = Schemas["EndpointUpdate"];
+export type QuotaGroupRead = Schemas["QuotaGroupRead"];
+export type QuotaGroupCreate = Schemas["QuotaGroupCreate"];
+export type QuotaGroupUpdate = Schemas["QuotaGroupUpdate"];
+export type QuotaLimitRead = Schemas["QuotaLimitRead"];
+export type QuotaLimitCreate = Schemas["QuotaLimitCreate"];
+export type QuotaLimitUpdate = Schemas["QuotaLimitUpdate"];
+export type QuotaMetric = Schemas["QuotaMetric"];
+export type ModelAliasRead = Schemas["ModelAliasRead"];
+export type ModelAliasCreate = Schemas["ModelAliasCreate"];
+export type ModelAliasUpdate = Schemas["ModelAliasUpdate"];
+export type RouteBindingRead = Schemas["RouteBindingRead"];
+export type RouteBindingCreate = Schemas["RouteBindingCreate"];
+export type RouteBindingUpdate = Schemas["RouteBindingUpdate"];
+export type Capability = Schemas["Capability"];
 
 export interface Page<T> {
   items: T[];
@@ -64,6 +104,13 @@ export class ApiError extends Error {
     this.code = code;
     this.requestId = requestId;
   }
+}
+
+/** Convert any thrown value into a safe, user-presentable message. */
+export function apiErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 /** Read the CSRF token from its dedicated cookie (never from web storage). */
@@ -200,8 +247,8 @@ export const api = {
     return apiRequest<Page<EndpointRuntimeRead>>("/admin/v1/queue/endpoints");
   },
 
-  listProjects(): Promise<Page<ProjectRead>> {
-    return apiRequest<Page<ProjectRead>>("/admin/v1/projects");
+  listProjects(query: Query = {}): Promise<Page<ProjectRead>> {
+    return apiRequest<Page<ProjectRead>>("/admin/v1/projects", { query });
   },
 
   queueQuotaStatus(): Promise<Page<QuotaStatusRead>> {
@@ -253,6 +300,255 @@ export const api = {
 
   budgetStatus(projectId: string): Promise<BudgetStatusRead[]> {
     return apiRequest<BudgetStatusRead[]>(`/admin/v1/projects/${projectId}/budget-status`);
+  },
+
+  // -- identity: projects -----------------------------------------------------
+
+  createProject(body: ProjectCreate): Promise<ProjectRead> {
+    return apiRequest<ProjectRead>("/admin/v1/projects", { method: "POST", body });
+  },
+
+  getProject(projectId: string): Promise<ProjectRead> {
+    return apiRequest<ProjectRead>(`/admin/v1/projects/${projectId}`);
+  },
+
+  updateProject(projectId: string, body: ProjectUpdate): Promise<ProjectRead> {
+    return apiRequest<ProjectRead>(`/admin/v1/projects/${projectId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- identity: principals ---------------------------------------------------
+
+  listPrincipals(projectId: string, query: Query = {}): Promise<Page<PrincipalRead>> {
+    return apiRequest<Page<PrincipalRead>>(`/admin/v1/projects/${projectId}/principals`, {
+      query,
+    });
+  },
+
+  createPrincipal(projectId: string, body: PrincipalCreate): Promise<PrincipalRead> {
+    return apiRequest<PrincipalRead>(`/admin/v1/projects/${projectId}/principals`, {
+      method: "POST",
+      body,
+    });
+  },
+
+  getPrincipal(principalId: string): Promise<PrincipalRead> {
+    return apiRequest<PrincipalRead>(`/admin/v1/principals/${principalId}`);
+  },
+
+  updatePrincipal(principalId: string, body: PrincipalUpdate): Promise<PrincipalRead> {
+    return apiRequest<PrincipalRead>(`/admin/v1/principals/${principalId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- identity: role assignments ---------------------------------------------
+
+  listRoleAssignments(query: Query = {}): Promise<Page<RoleAssignmentRead>> {
+    return apiRequest<Page<RoleAssignmentRead>>("/admin/v1/role-assignments", { query });
+  },
+
+  createRoleAssignment(body: RoleAssignmentCreate): Promise<RoleAssignmentRead> {
+    return apiRequest<RoleAssignmentRead>("/admin/v1/role-assignments", {
+      method: "POST",
+      body,
+    });
+  },
+
+  revokeRoleAssignment(assignmentId: string): Promise<RoleAssignmentRead> {
+    return apiRequest<RoleAssignmentRead>(`/admin/v1/role-assignments/${assignmentId}/revoke`, {
+      method: "POST",
+    });
+  },
+
+  // -- identity: credentials --------------------------------------------------
+
+  listCredentials(projectId: string, query: Query = {}): Promise<Page<ApiCredentialRead>> {
+    return apiRequest<Page<ApiCredentialRead>>(`/admin/v1/projects/${projectId}/credentials`, {
+      query,
+    });
+  },
+
+  createCredential(body: ApiCredentialCreate): Promise<ApiCredentialCreateResult> {
+    return apiRequest<ApiCredentialCreateResult>("/admin/v1/credentials", {
+      method: "POST",
+      body,
+    });
+  },
+
+  rotateCredential(credentialId: string): Promise<ApiCredentialCreateResult> {
+    return apiRequest<ApiCredentialCreateResult>(`/admin/v1/credentials/${credentialId}/rotate`, {
+      method: "POST",
+    });
+  },
+
+  revokeCredential(credentialId: string): Promise<ApiCredentialRevokeResult> {
+    return apiRequest<ApiCredentialRevokeResult>(`/admin/v1/credentials/${credentialId}/revoke`, {
+      method: "POST",
+    });
+  },
+
+  // -- catalog: providers -----------------------------------------------------
+
+  listProviders(query: Query = {}): Promise<Page<ProviderRead>> {
+    return apiRequest<Page<ProviderRead>>("/admin/v1/providers", { query });
+  },
+
+  createProvider(body: ProviderCreate): Promise<ProviderRead> {
+    return apiRequest<ProviderRead>("/admin/v1/providers", { method: "POST", body });
+  },
+
+  getProvider(providerId: string): Promise<ProviderRead> {
+    return apiRequest<ProviderRead>(`/admin/v1/providers/${providerId}`);
+  },
+
+  updateProvider(providerId: string, body: ProviderUpdate): Promise<ProviderRead> {
+    return apiRequest<ProviderRead>(`/admin/v1/providers/${providerId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- catalog: secret refs (metadata only) -----------------------------------
+
+  listSecretRefs(query: Query = {}): Promise<Page<SecretRefRead>> {
+    return apiRequest<Page<SecretRefRead>>("/admin/v1/secret-refs", { query });
+  },
+
+  createSecretRef(body: SecretRefCreate): Promise<SecretRefRead> {
+    return apiRequest<SecretRefRead>("/admin/v1/secret-refs", { method: "POST", body });
+  },
+
+  // -- catalog: provider accounts ---------------------------------------------
+
+  listProviderAccounts(query: Query = {}): Promise<Page<ProviderAccountRead>> {
+    return apiRequest<Page<ProviderAccountRead>>("/admin/v1/provider-accounts", { query });
+  },
+
+  createProviderAccount(body: ProviderAccountCreate): Promise<ProviderAccountRead> {
+    return apiRequest<ProviderAccountRead>("/admin/v1/provider-accounts", {
+      method: "POST",
+      body,
+    });
+  },
+
+  getProviderAccount(accountId: string): Promise<ProviderAccountRead> {
+    return apiRequest<ProviderAccountRead>(`/admin/v1/provider-accounts/${accountId}`);
+  },
+
+  updateProviderAccount(accountId: string, body: ProviderAccountUpdate): Promise<ProviderAccountRead> {
+    return apiRequest<ProviderAccountRead>(`/admin/v1/provider-accounts/${accountId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- catalog: endpoints -----------------------------------------------------
+
+  listEndpoints(query: Query = {}): Promise<Page<EndpointRead>> {
+    return apiRequest<Page<EndpointRead>>("/admin/v1/endpoints", { query });
+  },
+
+  createEndpoint(body: EndpointCreate): Promise<EndpointRead> {
+    return apiRequest<EndpointRead>("/admin/v1/endpoints", { method: "POST", body });
+  },
+
+  getEndpoint(endpointId: string): Promise<EndpointRead> {
+    return apiRequest<EndpointRead>(`/admin/v1/endpoints/${endpointId}`);
+  },
+
+  updateEndpoint(endpointId: string, body: EndpointUpdate): Promise<EndpointRead> {
+    return apiRequest<EndpointRead>(`/admin/v1/endpoints/${endpointId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- catalog: quota groups --------------------------------------------------
+
+  listQuotaGroups(query: Query = {}): Promise<Page<QuotaGroupRead>> {
+    return apiRequest<Page<QuotaGroupRead>>("/admin/v1/quota-groups", { query });
+  },
+
+  createQuotaGroup(body: QuotaGroupCreate): Promise<QuotaGroupRead> {
+    return apiRequest<QuotaGroupRead>("/admin/v1/quota-groups", { method: "POST", body });
+  },
+
+  getQuotaGroup(groupId: string): Promise<QuotaGroupRead> {
+    return apiRequest<QuotaGroupRead>(`/admin/v1/quota-groups/${groupId}`);
+  },
+
+  updateQuotaGroup(groupId: string, body: QuotaGroupUpdate): Promise<QuotaGroupRead> {
+    return apiRequest<QuotaGroupRead>(`/admin/v1/quota-groups/${groupId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- catalog: quota limits --------------------------------------------------
+
+  listQuotaLimits(query: Query = {}): Promise<Page<QuotaLimitRead>> {
+    return apiRequest<Page<QuotaLimitRead>>("/admin/v1/quota-limits", { query });
+  },
+
+  createQuotaLimit(body: QuotaLimitCreate): Promise<QuotaLimitRead> {
+    return apiRequest<QuotaLimitRead>("/admin/v1/quota-limits", { method: "POST", body });
+  },
+
+  getQuotaLimit(limitId: string): Promise<QuotaLimitRead> {
+    return apiRequest<QuotaLimitRead>(`/admin/v1/quota-limits/${limitId}`);
+  },
+
+  updateQuotaLimit(limitId: string, body: QuotaLimitUpdate): Promise<QuotaLimitRead> {
+    return apiRequest<QuotaLimitRead>(`/admin/v1/quota-limits/${limitId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- catalog: model aliases -------------------------------------------------
+
+  listModelAliases(query: Query = {}): Promise<Page<ModelAliasRead>> {
+    return apiRequest<Page<ModelAliasRead>>("/admin/v1/model-aliases", { query });
+  },
+
+  createModelAlias(body: ModelAliasCreate): Promise<ModelAliasRead> {
+    return apiRequest<ModelAliasRead>("/admin/v1/model-aliases", { method: "POST", body });
+  },
+
+  getModelAlias(aliasId: string): Promise<ModelAliasRead> {
+    return apiRequest<ModelAliasRead>(`/admin/v1/model-aliases/${aliasId}`);
+  },
+
+  updateModelAlias(aliasId: string, body: ModelAliasUpdate): Promise<ModelAliasRead> {
+    return apiRequest<ModelAliasRead>(`/admin/v1/model-aliases/${aliasId}`, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  // -- catalog: route bindings ------------------------------------------------
+
+  listRouteBindings(query: Query = {}): Promise<Page<RouteBindingRead>> {
+    return apiRequest<Page<RouteBindingRead>>("/admin/v1/route-bindings", { query });
+  },
+
+  createRouteBinding(body: RouteBindingCreate): Promise<RouteBindingRead> {
+    return apiRequest<RouteBindingRead>("/admin/v1/route-bindings", { method: "POST", body });
+  },
+
+  getRouteBinding(bindingId: string): Promise<RouteBindingRead> {
+    return apiRequest<RouteBindingRead>(`/admin/v1/route-bindings/${bindingId}`);
+  },
+
+  updateRouteBinding(bindingId: string, body: RouteBindingUpdate): Promise<RouteBindingRead> {
+    return apiRequest<RouteBindingRead>(`/admin/v1/route-bindings/${bindingId}`, {
+      method: "PATCH",
+      body,
+    });
   },
 };
 

@@ -137,3 +137,29 @@ describe("apiRequest", () => {
     expect((init.headers as Record<string, string>)["X-CSRF-Token"]).toBe("token123");
   });
 });
+
+describe("management client methods", () => {
+  it("sends PATCH with exactly the provided body for updateProject", async () => {
+    document.cookie = "ag_csrf=token123";
+    fetchMock.mockResolvedValueOnce(stubResponse(200, { id: "p1", name: "x", is_active: true }));
+    await api.updateProject("p1", { name: "x" });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/admin/v1/projects/p1");
+    expect(init.method).toBe("PATCH");
+    expect((init.headers as Record<string, string>)["X-CSRF-Token"]).toBe("token123");
+    expect(JSON.parse(init.body as string)).toEqual({ name: "x" });
+  });
+
+  it.each([
+    [400, "validation_error", "name is required"],
+    [404, "not_found", "resource missing"],
+  ])("parses structured %s error envelopes", async (status, code, message) => {
+    fetchMock.mockResolvedValueOnce(
+      stubResponse(status, { error: { code, message, request_id: "r" } }),
+    );
+    const err = await api.getProject("missing").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(status);
+    expect(err.code).toBe(code);
+  });
+});

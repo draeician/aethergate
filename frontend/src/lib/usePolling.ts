@@ -17,16 +17,16 @@ export function usePolling<T>(
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshToken, setRefreshToken] = useState(0);
-  const inFlight = useRef(false);
   const fnRef = useRef(fn);
   fnRef.current = fn;
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
 
     const run = async () => {
-      if (inFlight.current || cancelled) return;
-      inFlight.current = true;
+      if (inFlight || cancelled) return;
+      inFlight = true;
       try {
         const result = await fnRef.current();
         if (!cancelled) {
@@ -39,7 +39,7 @@ export function usePolling<T>(
           setError(err instanceof Error ? err.message : String(err));
         }
       } finally {
-        inFlight.current = false;
+        inFlight = false;
       }
     };
 
