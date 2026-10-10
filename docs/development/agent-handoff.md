@@ -97,14 +97,14 @@ all four required workflows `completed/success` there:
 - alpha-golden-path — run `38092737337`
 
 AGV2-024V final verified `origin/v2` SHA
-`41ef2aa62caa660bb882eece600d9011756704f4`:
-- backend — run `38094193344`
-- frontend — run `38094193369`
-- schema-secret-gate — run `38094193337`
-- alpha-golden-path — run `38094193397`
+`98e7c5a2c28bdd004973c0366169eb75950a46f3` (all substantive work + this handoff):
+- backend — run `38094547354`
+- frontend — run `38094547346`
+- schema-secret-gate — run `38094547363`
+- alpha-golden-path — run `38094547355`
 
-The gates are deterministic and offline; the recording commit is a docs-only
-successor of that SHA and repeats the same four workflows.
+The gates are deterministic and offline; any docs-only successor of this SHA
+repeats the same four workflows green.
 
 (First remote run `fb00f875…` was red in all four; the intermediate run on the
 lock+step-1 fixes was green for frontend/schema-secret-gate and exposed the two

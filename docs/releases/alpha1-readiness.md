@@ -102,17 +102,17 @@ The substantive code/test/workflow commit is
 | alpha-golden-path | 38092737337 | completed/success |
 
 AGV2-024V final verified `origin/v2` SHA
-`41ef2aa62caa660bb882eece600d9011756704f4` (all substantive work + this evidence):
+`98e7c5a2c28bdd004973c0366169eb75950a46f3` (all substantive work + handoff):
 
 | Workflow | Run ID | Conclusion |
 |---|---|---|
-| backend | 38094193344 | completed/success |
-| frontend | 38094193369 | completed/success |
-| schema-secret-gate | 38094193337 | completed/success |
-| alpha-golden-path | 38094193397 | completed/success |
+| backend | 38094547354 | completed/success |
+| frontend | 38094547346 | completed/success |
+| schema-secret-gate | 38094547363 | completed/success |
+| alpha-golden-path | 38094547355 | completed/success |
 
-The gates are deterministic and offline; this recording commit is a docs-only
-successor of that SHA and repeats the same four workflows.
+The gates are deterministic and offline; any docs-only successor of this SHA
+repeats the same four workflows.
 
 ## AGV2-024V — closing the first remote CI run
 
