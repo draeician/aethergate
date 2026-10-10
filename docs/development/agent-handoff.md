@@ -97,9 +97,9 @@ all four required workflows `completed/success` there:
 - alpha-golden-path — run `38092737337`
 
 Every later documentation-only commit in this task also verified green with the
-same four workflows (e.g. the readiness-doc commit on `1618001`: backend
-`38093529716`, frontend `38093529698`, schema-secret-gate `38093529714`,
-alpha-golden-path `38093529719`).
+same four workflows; the gates are deterministic and offline, so the
+`origin/v2` head at handoff is green for backend/frontend/schema-secret-gate/
+alpha-golden-path.
 
 (First remote run `fb00f875…` was red in all four; the intermediate run on the
 lock+step-1 fixes was green for frontend/schema-secret-gate and exposed the two

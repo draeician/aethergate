@@ -101,11 +101,10 @@ The substantive code/test/workflow commit is
 | schema-secret-gate | 38092737259 | completed/success |
 | alpha-golden-path | 38092737337 | completed/success |
 
-Every subsequent documentation-only commit in this task was also verified green
-with the same four workflows (e.g. the readiness-doc commit on `1618001`:
-backend 38093529716, frontend 38093529698, schema-secret-gate 38093529714,
-alpha-golden-path 38093529719). The gates are deterministic and offline, so the
-result is stable across these docs-only commits.
+Every later commit (all documentation-only) was verified green with the same
+four workflows; the gates are deterministic and offline, so the result is stable.
+The `origin/v2` head at handoff is green for backend/frontend/schema-secret-gate/
+alpha-golden-path.
 
 ## AGV2-024V — closing the first remote CI run
 
