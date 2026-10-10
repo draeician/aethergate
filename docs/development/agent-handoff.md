@@ -1,16 +1,138 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-023 (operational observability — queue wait, streaming TTFT, retry rate,
-  passive upstream health)** is complete and pushed to `origin/v2`; `.aethergate-wip` was removed only
-  after the final remote verification.
-- **Migration head is now `0017`** (`0016` -> `0017`); `0001`–`0016` untouched. Legacy Python v1
+- Branch: `v2`. **AGV2-024 (Alpha 1 hardening — CI, fresh install, upgrade/restore, structured logs,
+  operator runbook)** is complete. `.aethergate-wip` is removed only after the final remote
+  verification.
+- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched. Legacy Python v1
   `app/` and the dated architecture audit are untouched.
-- New read-model module `src/aethergate/observability/` (`service.py`, `repository.py`) and thin admin
-  router `src/aethergate/api/observability_admin.py` over `/admin/v1/observability`.
-- The dashboard's three "Not yet instrumented" placeholders are replaced with real queue-wait,
-  streaming-TTFT, and retry metrics, plus system-admin passive upstream-health cards and a 15m/1h/24h
-  window selector; no-sample states render "No samples" (never a fake `0ms`/`100%`).
+- Repository is at **Alpha 1** (internal/self-hosted): see `docs/releases/alpha1-readiness.md` and
+  `docs/operations/alpha-runbook.md`. No SemVer bump was invented (package stays `0.1.0`).
+- New: `.github/workflows/` CI (backend/frontend/alpha-golden-path/schema-secret-gate), deterministic
+  offline fake Ollama (`src/aethergate/testing/`), config preflight
+  (`python -m aethergate.config_check`), schema-head readiness (`src/aethergate/schema_check.py`),
+  structured logging + redaction (`src/aethergate/logging_config.py`), operator tooling
+  (`scripts/ops/v2` backup/restore/migrate/diagnostics), safe diagnostics
+  (`python -m aethergate.diagnostics`), and CI/golden-path tooling (`scripts/ci/`).
+
+## AGV2-024 — Alpha 1 hardening
+
+### CI (`.github/workflows/`)
+- `backend.yml` — ubuntu-24.04 + Python 3.12 + PostgreSQL 16 service; `ruff check src tests`,
+  `git diff --check`, `pytest`, empty -> head migration, `0016 -> 0017` migration, `config_check`,
+  deterministic `scripts/gen_openapi.py`. Least-privilege `contents: read`; concurrency-cancel.
+- `frontend.yml` — Node 22 `npm ci`, `npm run test`, `npm run lint`, `npm run build`,
+  `npx tsc -b --noEmit`, OpenAPI/generated-client drift (fails on drift, never auto-commits).
+- `alpha-golden-path.yml` — fully offline: builds images, starts postgres+api+worker+web with the
+  deterministic DevOidcIdp and the fake Ollama override, migrates, runs `scripts/ci/golden_path.py`
+  (bootstrap, OIDC login, catalog route, inference credential, official SDK non-stream + stream,
+  dashboard load, backup, database drop/recreate, restore, post-restore state + SDK). No Internet /
+  model download / provider credentials.
+- `schema-secret-gate.yml` — `git diff --check`, `scripts/ci/secret_scan.sh`, workflow YAML lint
+  (yamllint), OpenAPI/client drift. All workflows pin action major versions and use least privilege.
+- CI is fully deterministic/offline (fake Ollama only); the live nomnom pre-release acceptance
+  (`scripts/ci/nomnom_acceptance.sh`) uses the real internal Ollama and is not run per-PR.
+- Remote GitHub Actions runs could not be observed from this environment; CI workflow configuration
+  is validated locally (YAML parses; jobs enumerated; `scripts/ci/secret_scan.sh` and the golden-path
+  phases are exercised on the real stack). No claim is made that a remote run passed.
+
+### Deterministic fake Ollama (`src/aethergate/testing/fake_ollama.py`)
+Test/CI-only local HTTP server speaking the minimum Ollama `/api/chat` + `/api/generate` surface used
+by the pinned LiteLLM ollama adapter, so the **real** scheduler + adapter transport run offline with
+no model download and no provider credentials. Supports deterministic non-stream, deterministic
+multi-chunk streaming (`/api/generate` ndjson, which LiteLLM's ollama completion path uses),
+`prompt_eval_count`/`eval_count` usage, deterministic upstream request id, configurable delay, and
+configurable 404/429/other failures. It introduces no new production provider kind (emulates
+`ollama`), is never referenced by production compose, and never persists/logs request content.
+`tests/test_fake_ollama.py` proves the real adapter path, failure statuses, and delay against it.
+
+### CI-safe deterministic OIDC
+The existing `DevOidcIdp` is reused with a fixed CI issuer (`OIDC_ISSUER`, e.g.
+`http://127.0.0.1:8090` on the runner / `http://<host-lan-ip>:18090` on nomnom), no LAN-IP discovery
+requirement in CI, and a deterministic subject. The production HTTPS-issuer rule is unchanged
+(`AETHERGATE_OIDC_ISSUER` must be `https://` in prod; a test asserts this is not weakened).
+
+### Fresh-install path, config preflight, schema readiness
+- `docs/operations/alpha-runbook.md` documents the clean install: prerequisites, secret generation,
+  build, PostgreSQL start, empty -> `0017` migrate, API+worker start, `/health/live` + `/health/ready`,
+  one-use bootstrap, bootstrap-token removal/recreation, OIDC config, catalog/provider setup,
+  inference credential, official SDK non-stream + stream, TLS/reverse-proxy expectations.
+- `python -m aethergate.config_check` validates DB config, queue key (valid Fernet), rejects prod
+  inference-auth bypass, checks OIDC prod issuer rules, validates the bootstrap-token shape, reports
+  the upstream allowlist, and warns on intentionally disabled optional features. Exit 0 valid /
+  nonzero invalid; never prints secrets (`tests/test_config_check.py`).
+- Readiness (`/health/ready`) now returns `503 schema_not_current` when the applied Alembic revision
+  does not equal the code's expected head (`src/aethergate/schema_check.py`); the schema is still
+  applied explicitly (never auto-run by workers). Readiness does not depend on upstream providers.
+
+### Operator backup/restore + diagnostics
+- `scripts/ops/v2 backup --output <p>` — PostgreSQL custom-format complete backup, explicit path,
+  refuses overwrite without `--force`, 0600 permissions, never echoes the DB password.
+- `scripts/ops/v2 restore --input <p> --force` — quiesces (stops) the API + worker first, replaces the
+  database, reports the applied revision, and restarts api+worker; container-name overrides support
+  disposable stacks. Documents that the queue key / external secret material must be backed up
+  separately.
+- `scripts/ops/v2 diagnostics --output <p>` / `python -m aethergate.diagnostics` — redacted safe
+  bundle (version, migration state, DB-reachable boolean, sanitized feature flags, queue counts,
+  observability summary, redacted logs); no credentials/content/DB URLs. `tests/test_diagnostics.py`
+  proves canary absence.
+
+### Structured logging + redaction + correlation
+`src/aethergate/logging_config.py`: JSON logs in prod/alpha, human-readable dev logs; a central
+`RedactionFilter` backstop scrubs credential prefixes (`agk_`/`ags_`/`agb_`), Bearer tokens, session/
+CSRF cookies, OIDC fields, DB URLs/passwords, and PEM keys. An HTTP access middleware logs only the
+matched route **template**, method, status, duration, and the gateway request id (never query strings,
+headers, cookies, bodies, or content). Worker logs `worker.dispatch` and `request.settled` with safe
+attempt/endpoint IDs. The gateway request id (response + logs) is distinct from the upstream request
+id. `tests/test_logging_safety.py` canary-proves every secret and content class is absent and that the
+response request id correlates with its access-log record.
+
+### Populated 0016 -> 0017 upgrade proof
+`tests/test_migrations.py::test_populated_0016_to_0017_preserves_rows` inserts representative
+identity/provider/account/endpoint/alias/route/request/attempt rows at `0016`, upgrades to head, and
+asserts: rows preserved, `upstream_error=false`, `upstream_status_code=null`, `first_token_at=null`
+(no fake backfill), and head `0017`.
+
+### Backup/restore + restart acceptance (clean disposable stack, real Ollama)
+Ran via `scripts/ci/nomnom_acceptance.sh` on a **fresh disposable** compose project
+(`ag-alpha-acceptance`, separate volume; not the accumulated dev DB):
+- empty -> `0017`; bootstrap (one-use); deterministic OIDC browser login (httpx);
+  catalog/provider/account/endpoint/alias/route to the real internal Ollama; inference credential;
+- official OpenAI Python SDK 2.54.0 non-stream + stream `ok`/`ok_stream`, bypass `false`;
+- request-priced policy -> completed inference producing `UsageRecord` + signed `LedgerEntry`;
+- `scripts/ops/v2`-equivalent backup, database drop/recreate, restore; post-restore verification
+  proved identities/roles/catalog/credential and **exact pre-backup counts**
+  (`usage_records == ledger_entries`, no duplicate settlement), migration head `0017`, and
+  post-restore SDK non-stream + stream success;
+- API restart (readiness recovered), worker restart, full-stack restart (persistent volume) — SDK
+  inference succeeded afterwards.
+- The disposable stack was torn down (containers + volume) after the run; the long-lived dev stack and
+  its database are untouched.
+
+### Regression evidence (AGV2-024)
+- Backend containerized suite (`scripts/dev/v2 test`): green, exit 0; **561 collected** (baseline 527
+  + config_check/diagnostics/fake-ollama/logging-safety tests + populated 0016->0017).
+- Frontend unit/component (`npm run test`): **87 passed** (baseline 87), 22 files.
+- Full Playwright (`WEB_BASE_URL=http://127.0.0.1:8081`): **32 passed** (baseline 32); the new
+  `e2e/alpha-golden.spec.ts` is CI-only and skips without `GOLDEN_INFERENCE_KEY` (3 skipped).
+- `npm run build` clean; `npm run lint` clean; `npx tsc -b --noEmit` clean.
+- OpenAPI/client drift clean (`scripts/gen_openapi.py` + `npm run generate:client` produced no diff).
+- `ruff check src tests` clean; `git diff --check` clean; `scripts/ci/secret_scan.sh` clean.
+- Official OpenAI Python SDK 2.54.0, inference-auth bypass `false` throughout.
+- Migration head `0017`; `0001`–`0017` untouched.
+
+### Real defect / flake root-caused
+The full Playwright suite intermittently failed the first OIDC-dependent test after the API/worker
+were recreated (`Sign-in failed` / landing on the login page). Root-caused to the documented
+post-recreate cold start: the API caches OIDC discovery for 300s and does not cache failures, and a
+recreated/reused `web` nginx or a stale JWKS/discovery momentary failure self-heals. Warming the
+IdP discovery/JWKS and re-running the suite produced two consecutive clean full runs (**32 passed**).
+No product defect; recorded so future runs restart `web` (nginx DNS) and warm IdP discovery first.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-024`, `branch=v2`, UTC start timestamp) was created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, every commit pushed
+to `origin/v2`, and the remote branch verified. It was never staged, committed, or pushed (gitignored).
 
 ## AGV2-023 — Operational observability (queue wait, streaming TTFT, retry, upstream health)
 
@@ -698,9 +820,10 @@ to `origin/v2`, and the remote branch verified.
   `frontend/README.md`.
 
 ## Recommended Next Step
-Structured-log exporter / retention (the deferred observability follow-up explicitly out of scope for
-AGV2-023 — Prometheus/OpenTelemetry exporter, external metrics TSDB, active upstream probes,
-alerting/paging, and a logging-stack rewrite remain separate). Reuse the now-verified observability
-read-model module, the bounded SQL percentile pattern, the typed `/admin/v1/observability` surface,
-and the generated-client + role-guard + live-SDK-proof patterns, starting from the green regression
-baseline: backend **527**, frontend **87**, full Playwright **32**, migration head **0017**.
+Alpha 2 feature work: the next milestone is the **Responses API** (or embeddings), built on the now
+Alpha-1-hardened foundation (deterministic offline CI + golden path, config preflight, schema-head
+readiness, structured logging/redaction, backup/restore, and the operator runbook). Reuse the
+now-verified scheduler read model, typed `/admin/v1` + generated-client patterns, the fake-Ollama
+offline fixture, and the official-SDK + backup/restore acceptance harnesses, starting from the green
+regression baseline: backend **561**, frontend **87**, full Playwright **32**, migration head
+**0017**. Do not start Responses/embeddings/v1-migration in AGV2-024 (explicitly deferred).
