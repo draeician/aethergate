@@ -398,11 +398,14 @@ async function resume(context: BrowserContext): Promise<void> {
 }
 
 async function waitForQueuedRequest(context: BrowserContext, projectId: string): Promise<void> {
+  // The queue list sorts oldest-first and paginates, so historical traffic can
+  // push the freshly submitted request off a naive first page. Filter to the
+  // queued state (only this run's request queues while the endpoint is paused).
   for (let i = 0; i < 20; i += 1) {
     const list = await adminJson<PageEnvelope<QueueRequest>>(
       context,
       "GET",
-      `/admin/v1/queue/requests?project_id=${projectId}&limit=200`,
+      `/admin/v1/queue/requests?project_id=${projectId}&state=queued&limit=200`,
     );
     if (list.body.items.some((r) => r.state === "queued")) return;
     await new Promise((resolve) => setTimeout(resolve, 250));

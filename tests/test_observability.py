@@ -46,10 +46,12 @@ from aethergate.domain.enums import (
 )
 from aethergate.domain.ids import (
     EndpointId,
+    ExecutionAttemptId,
     ModelAliasId,
     ProjectId,
     ProviderAccountId,
     ProviderId,
+    ReservationId,
     RouteBindingId,
 )
 from aethergate.egress import DestinationPolicy
@@ -788,6 +790,76 @@ async def test_summary_project_scoping(obs_env):
                 s, context=obs_env["pa_ctx"], window_seconds=3600,
                 project_id=obs_env["proj_b"],
             )
+
+
+async def test_retry_metrics_real_scheduler_reclaim(obs_env):
+    """A real pre-dispatch reclaim yields exactly one additional ExecutionAttempt.
+
+    Reproduces the only real retry path (a request reserved but never dispatched
+    whose lease expires, then reclaimed and re-claimed) using the real scheduler
+    repository primitives and ``SchedulingService.recover``/``claim_and_reserve``:
+    attempt #1 is reserved with an expired lease, recovery safely reclaims the
+    request to ``queued`` and abandons attempt #1, and the worker claims attempt
+    #2 and completes. The retry metric must count exactly one retried request and
+    one retry attempt (a queued-only poll would count zero).
+    """
+    factory = obs_env["factory"]
+    service = _make_service(factory, _StreamAdapter())
+    ctx = obs_env["inf_by_project"][obs_env["proj_a"]]
+    enq = await service.admit_and_enqueue(
+        alias_name="gpt-4", messages=[Message(role="user", content="hi")],
+        params=GenerationParams(), stream=False, context=ctx,
+    )
+    past = datetime.now(UTC) - timedelta(seconds=5)
+    async with factory() as s:
+        async with s.begin():
+            request = await sched_repo.claim_next_queued_for_scope(
+                s, datetime.now(UTC), ENDPOINT_ID, None, str(obs_env["proj_a"])
+            )
+            assert request is not None and request.id == enq.request_id
+            reservation = await sched_repo.create_reservation(
+                s, reservation_id=ReservationId("res-1"), request_id=enq.request_id,
+                endpoint_id=ENDPOINT_ID, acquired_at=past,
+            )
+            await sched_repo.create_attempt(
+                s, attempt_id=ExecutionAttemptId("attempt-1"),
+                request_id=enq.request_id,
+                endpoint_id=ENDPOINT_ID, reservation_id=reservation.id,
+                fencing_token=1, worker_id="w-crashed", lease_expires_at=past,
+                started_at=past,
+            )
+            request.state = RequestState.RESERVED
+            request.worker_id = "w-crashed"
+            request.fencing_token = 1
+            request.lease_expires_at = past
+            request.started_at = past
+
+    await service.recover()
+    async with factory() as s:
+        row = await sched_repo.get_request(s, enq.request_id)
+        assert row.state == RequestState.QUEUED
+
+    second = await service.claim_and_reserve("w1")
+    assert not isinstance(second, str) and second is not None
+    assert second.request_id == enq.request_id
+    await service.run_complete(second)
+
+    async with factory() as s:
+        result = await observability.repository.retry_metrics(
+            s, window_start=datetime.now(UTC) - timedelta(minutes=10),
+            window_end=datetime.now(UTC) + timedelta(minutes=1), project_ids=None,
+        )
+        attempts = (
+            await s.execute(
+                select(models.ExecutionAttempt).where(
+                    models.ExecutionAttempt.request_id == enq.request_id
+                )
+            )
+        ).scalars().all()
+    assert len(attempts) == 2
+    assert result.attempted_requests == 1
+    assert result.retried_requests == 1
+    assert result.retry_attempts == 1
 
 
 async def test_upstream_health_requires_system_admin(obs_env):

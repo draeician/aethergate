@@ -1,25 +1,143 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. AGV2-022D (remove final browser Decimal coercion from budget headroom) is complete and
-  pushed to `origin/v2`; `.aethergate-wip` was removed only after the final remote verification. The
-  accounting phase is now fully closed: the last remaining `Number()`/`parseFloat()`/`.toFixed()` money
-  coercion in the browser (dashboard budget headroom) is gone, and every required regression gate is
-  green against the baseline below.
-- AGV2-022/022V/022C/022D accounting phase closed. AGV2-022 (accounting management UI), AGV2-022V (live
-  queue-unblock + released-reservation proofs), AGV2-022C (close the regression gate + budget-policy
-  disable wake-up), and AGV2-022D (remove the final browser Decimal coercion) are all pushed. The phase
-  is closed only against the green full suite plus the runtime frontend Decimal-coercion scan below.
-- Migration head unchanged at `0016`; no new migration; `0001`–`0016` untouched. Legacy Python v1 app
-  and the dated architecture audit are untouched.
-- Budget wake semantics now cover both directions in
-  `src/aethergate/accounting/admin.py::update_project_budget_policy`: (1) raising a budget policy limit
-  clears the persisted `next_eligible_at` of `budget_window_exhausted` queued requests (AGV2-022V);
-  (2) **disabling** an enabled policy also clears it (AGV2-022C) so queued requests are re-evaluated
-  instead of waiting for the old window reset. Name-only edits, limit decreases, unchanged policies,
-  and disabled->enabled do not wake requests.
-- The web nginx proxy defect fixed in AGV2-022V (`proxy_read_timeout`/`proxy_send_timeout 600s`) remains
-  in place; the full suite exercises the long-held inference path through it.
+- Branch: `v2`. **AGV2-023 (operational observability — queue wait, streaming TTFT, retry rate,
+  passive upstream health)** is complete and pushed to `origin/v2`; `.aethergate-wip` was removed only
+  after the final remote verification.
+- **Migration head is now `0017`** (`0016` -> `0017`); `0001`–`0016` untouched. Legacy Python v1
+  `app/` and the dated architecture audit are untouched.
+- New read-model module `src/aethergate/observability/` (`service.py`, `repository.py`) and thin admin
+  router `src/aethergate/api/observability_admin.py` over `/admin/v1/observability`.
+- The dashboard's three "Not yet instrumented" placeholders are replaced with real queue-wait,
+  streaming-TTFT, and retry metrics, plus system-admin passive upstream-health cards and a 15m/1h/24h
+  window selector; no-sample states render "No samples" (never a fake `0ms`/`100%`).
+
+## AGV2-023 — Operational observability (queue wait, streaming TTFT, retry, upstream health)
+
+### Why this task exists
+The web-console requirement calls for authoritative queue-wait, TTFT, retry-rate, and upstream-health
+telemetry. Budget headroom was already Decimal-safe; the other three areas were labeled "Not yet
+instrumented". This task adds the durable first-token/provider-outcome metadata plus bounded aggregate
+read models, without logging/decrypting prompt or completion content and without introducing a second
+scheduling/accounting authority.
+
+### Migration 0017 (`0017_execution_attempt_observability.py`, `down_revision = 0016`)
+Extends `execution_attempts` with safe non-content metadata:
+- `first_token_at TIMESTAMPTZ NULL` — first non-empty streaming content chunk time;
+- `upstream_error BOOLEAN NOT NULL DEFAULT FALSE` — true only for a terminal `ProviderError`;
+- `upstream_status_code INTEGER NULL` — sanitized numeric upstream status when reliably known.
+
+Justified indexes only: `ix_execution_attempts_started_at`,
+`ix_execution_attempts_endpoint_finished` (`endpoint_id, finished_at`), and
+`ix_inference_requests_queued_at`. No content/log columns. Historical rows are not backfilled with
+fabricated values (`first_token_at` NULL, `upstream_error` false, `upstream_status_code` NULL). The
+migration is reversible (`downgrade` drops the columns and indexes); `tests/test_migrations.py::test_migration_0016_to_0017`
+proves `0016 -> 0017`, empty -> latest, and the explicit downgrade.
+
+### First-token streaming transition
+`SchedulingService.run_stream` calls `scheduler/repository.py::mark_first_token` on the first non-empty
+`chunk.content`. It atomically: checks fence/attempt ownership; moves the request and attempt
+`dispatched -> streaming`; sets `first_token_at` exactly once; is idempotent on repeat; refuses a
+stale/foreign/terminal attempt; and never fires for a content-less chunk. Only the **presence** of
+content is inspected — no prompt/completion content is persisted or logged. Encrypted StreamEvent
+behavior is unchanged. A stream with no non-empty content chunk leaves TTFT NULL (never zero).
+
+### Provider failure classification
+`run_complete`/`run_stream` on `ProviderError` settle the attempt with `upstream_error=true` and persist
+`upstream_status_code` when integer; `UnsupportedProvider`/`SecretResolutionError`/internal config
+failures settle `upstream_error=false`. Cancellations are not upstream failures; `outcome_unknown`
+stays ambiguous. Only numeric status is stored — never exception text, headers, URLs, or bodies.
+
+### Metric definitions
+- **Queue wait** = earliest `ExecutionAttempt.started_at` − `InferenceRequest.queued_at` (admission
+  delay; the mutable request `started_at` is deliberately not used). p50/p95/p99 + sample count.
+- **Streaming TTFT** = `first_token_at` − attempt `started_at`, streaming attempts only
+  (dispatch-to-first-token; no decrypt, no terminal-completion time, no non-stream requests).
+- **Retry rate** = additional `ExecutionAttempt`s for the same gateway request id
+  (`attempted_requests`, `retried_requests`, `retry_attempts`, `request_retry_rate` nullable at 0
+  denominator). Queued polling and new-request-id SDK retries are not counted.
+- **Passive upstream health** per endpoint: sample count, succeeded/upstream-failed/ambiguous/429
+  counts, nullable success rate, last success/failure, and related quota-group cooldown. No active
+  probes, no synthetic percentages.
+- Percentiles are computed by PostgreSQL (`percentile_cont`) in bounded, read-only, SQL-scoped
+  queries; no unbounded history in Python/React. Window default 900 s (60..86400). No samples =>
+  NULL percentiles (never zero).
+
+### Admin API + RBAC
+- `GET /admin/v1/observability/summary` — window + queue-wait/TTFT/retry. Uses the existing
+  `admin:queue:read` permission (no new RBAC scope): `system_admin` reads the deployment aggregate or
+  an explicit project; `project_admin`/`project_viewer` read only their own project; a cross-project
+  project-role query is non-enumerating (`404`).
+- `GET /admin/v1/observability/upstreams` — `system_admin` deployment scope only; project roles get
+  `403` and cannot enumerate endpoint/provider-account health.
+
+### Frontend
+`frontend/src/pages/DashboardPage.tsx` renders the three real metric groups (queue wait, streaming
+TTFT labeled dispatch-to-first-token, retry rate) plus system-admin upstream-health cards; a window
+selector drives the read; `frontend/src/lib/client.ts` gains `observabilitySummary` /
+`observabilityUpstreams` on the regenerated OpenAPI types; `frontend/src/lib/format.ts` gains
+`formatMillis`/`formatRate` with explicit no-sample handling. Generated files
+(`frontend/src/generated/*`) were regenerated, not hand-edited (drift check clean).
+
+### Live nomnom verification (real stack; inference-auth bypass = false)
+- **WIP/migration**: marker lifecycle correct; `0016 -> 0017`, empty -> latest, head `0017`.
+- **Queue wait (six requests / two slots)** (`e2e/observability.spec.ts`): six concurrent official-SDK
+  requests against a dedicated `max_concurrency=2` endpoint all succeed; the summary reports
+  `sample_count >= 6` with non-null, ordered `p50 <= p95 <= p99`. Live DB sample snapshot (2 h):
+  70 queue-wait samples, p50 ≈ 156.6 ms, p95 ≈ 85.2 s, p99 ≈ 124.6 s.
+- **Streaming TTFT**: a real official-SDK stream returns `OK_STREAM`; `first_token_at` becomes
+  non-null and a TTFT sample appears (live 2 h: 6 samples, p50 ≈ 110.7 ms, p95 ≈ 169.5 ms, TTFT > 0);
+  no StreamEvent is decrypted for the metric and no prompt/completion content appears in the summary.
+- **Upstream health**: pointing a disposable route at a nonexistent Ollama model fails the official SDK
+  and increments `upstream_failed_attempts` with safe status evidence (persisted `upstream_status_code=404`,
+  no raw provider body/URL); restoring `qwen3.8-2b-distill:Q6_K` succeeds and records success evidence.
+- **Retry semantics**: the real scheduler pre-dispatch reclaim path (reserved attempt with an expired
+  lease -> recovery reclaims -> worker re-claims) yields exactly two `ExecutionAttempt`s for one
+  gateway request and `retry_attempts == 1`. Covered deterministically by
+  `tests/test_observability.py::test_retry_metrics_real_scheduler_reclaim` (v2 intentionally never
+  auto-retries dispatched work).
+- **RBAC**: `system_admin` sees deployment summary + upstream health; `project_admin`/`project_viewer`
+  see only their own summary; project roles cannot call upstream health (`403`); a cross-project
+  explicit `project_id` is non-enumerating.
+
+### Regression evidence (AGV2-023)
+- Backend containerized suite (`scripts/dev/v2 test`): **527 passed, 0 failed** (baseline 506 + 20
+  `tests/test_observability.py` + 1 `test_migrations.py::test_migration_0016_to_0017`; 527 collected).
+- Frontend unit/component (`npm run test`): **87 passed** (baseline 82 + 5 new DashboardPage
+  observability cases), 22 files.
+- Full browser suite (`npx playwright test`, chromium, `WEB_BASE_URL=http://127.0.0.1:8081`): **32
+  passed, 0 failed** (baseline 26 + 6 `e2e/observability.spec.ts`).
+- `npm run build` clean; `npm run lint` clean; `npx tsc -b --noEmit` clean.
+- OpenAPI/client drift clean: `python scripts/gen_openapi.py` + `npm run generate:client` produced no
+  diff after regeneration.
+- `ruff check src tests` clean; `git diff --check` clean.
+- Secret/token/content canary scan clean (no `.env`/`.pem`/`.key`/credential files; no key patterns in
+  the changed files).
+- Official OpenAI Python SDK regression (`openai 2.54.0`, Python 3.12.3), inference-auth bypass
+  `false` (verified via `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false` in the running api and an
+  unauthenticated `/v1/models` returning `401`): non-stream + stream succeed in the observability spec.
+- Migration head `0017`; `0001`–`0016` untouched.
+
+### Real defect found and fixed (latent live-data defect)
+Running the new observability six-request proof added project-A traffic, which pushed
+`operator-rbac.spec.ts`'s "project_admin cancels own queued work" past the point where its
+oldest-first, page-1 `waitForQueuedRequest` scan (limit 200, no state filter) could see the freshly
+queued request. Root-caused as the documented live-data accumulation/pagination defect family and
+fixed by filtering the queue read to `state=queued` before scanning. Two stale `outcome_unknown`
+requests were holding both slots of the shared `ollama-endpoint` from abandoned prior runs; they were
+reconciled through the real operator path (`aethergate.reconcile`) to free the slots.
+
+### Dynamic ports (this run)
+- API base URL ephemeral `http://127.0.0.1:40953/v1`; web console loopback-only on
+  `http://127.0.0.1:8081` (host `8080` occupied by `matrix-comms-element`; the committed
+  `compose.web.yaml` default stays `127.0.0.1:8080`, and only the gitignored `deploy/v2/.env` redirect
+  URI plus a throwaway compose `!override` port map pointed at `8081`); IdP issuer
+  `http://192.168.22.50:8090`.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-023`, `branch=v2`, UTC start timestamp) was created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, every commit pushed
+to `origin/v2`, and the remote branch verified. It was never staged, committed, or pushed (gitignored).
 
 ## AGV2-022D — Remove final browser Decimal coercion from budget headroom
 
@@ -554,25 +672,35 @@ to `origin/v2`, and the remote branch verified.
 - `ruff format` remains out of scope (pre-existing reformat); `ruff check` is the gate.
 
 ## Key files
+- Observability (new): `src/aethergate/observability/service.py`,
+  `src/aethergate/observability/repository.py`, `src/aethergate/api/observability_admin.py`,
+  `src/aethergate/migrations/versions/0017_execution_attempt_observability.py`,
+  `tests/test_observability.py`, `frontend/e2e/observability.spec.ts`,
+  `docs/architecture/observability.md`.
+- Scheduler observability metadata: `src/aethergate/scheduler/repository.py`
+  (`mark_first_token`, `settle` with `upstream_error`/`upstream_status_code`),
+  `src/aethergate/scheduler/service.py` (`run_stream` first-token transition; provider-failure
+  classification), `src/aethergate/persistence/models.py` (`ExecutionAttempt` columns/indexes).
+- Frontend: `frontend/src/pages/DashboardPage.tsx` (+ `.test.tsx`), `frontend/src/lib/client.ts`,
+  `frontend/src/lib/format.ts`, `frontend/src/generated/openapi.json` / `schema.d.ts`.
+- E2E: `frontend/e2e/observability.spec.ts` (new), `frontend/e2e/operator-rbac.spec.ts`
+  (`waitForQueuedRequest` state-scoped), `frontend/e2e/web-console.spec.ts` (placeholders replaced).
 - Frontend accounting: `frontend/src/features/accounting/*` (7 pages + 3 test files),
   `frontend/src/lib/decimal.ts` (now incl. `compareDecimalToZero`), `frontend/src/lib/client.ts`,
-  `frontend/src/lib/roles.ts`, `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`,
-  `frontend/src/pages/DashboardPage.tsx` (decimal-safe budget headroom).
-- E2E: `frontend/e2e/accounting.spec.ts` (accounting RBAC + live pricing/snapshot + budget
-  block/unblock + released-reservation proofs), `frontend/e2e/catalog-inference.spec.ts` (timeout bump),
-  `frontend/e2e/fixtures.ts` (`runOfficialSdk`, `spawnOfficialSdk`, `runReleaseHarness`,
-  `listWorkerContainers`, `goToLastPage`), `frontend/e2e/sdk_inference.py`, `frontend/nginx.conf`
-  (proxy read/send timeout).
+  `frontend/src/lib/roles.ts`, `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`.
 - Backend: `src/aethergate/domain/value_objects.py` (canonical money serialization),
-  `src/aethergate/scheduler/service.py` (signed usage debits), `src/aethergate/scheduler/repository.py`
-  (`clear_budget_wait_metadata_for_policy`), `src/aethergate/accounting/admin.py` (clears wait metadata
-  on limit raise **and policy disable**), `src/aethergate/live_accounting_release.py` (live
-  released-reservation harness), `tests/test_contracts.py`, `tests/test_accounting.py`.
-- Docs: `docs/web-console.md`, `docs/development/README.md`, `frontend/README.md`.
+  `src/aethergate/scheduler/service.py` (signed usage debits),
+  `src/aethergate/accounting/admin.py` (clears wait metadata on limit raise **and policy disable**),
+  `src/aethergate/live_accounting_release.py` (live released-reservation harness),
+  `tests/test_contracts.py`, `tests/test_accounting.py`.
+- Docs: `docs/architecture/observability.md`, `docs/architecture/scheduler.md`,
+  `docs/architecture/admin-api.md`, `docs/web-console.md`, `docs/development/README.md`,
+  `frontend/README.md`.
 
 ## Recommended Next Step
-Observability metrics (queue/TTFT percentiles, upstream health, retry rate) — the single deferred
-follow-up noted throughout the accounting phase and the only recommended next step. Reuse the
-now-verified Decimal-safe, typed-client, role-guard, pagination, PATCH, one-time-reveal, and
-long-held-SDK-proof patterns, starting from the green regression baseline: backend **506**, frontend
-**82**, full Playwright **26**.
+Structured-log exporter / retention (the deferred observability follow-up explicitly out of scope for
+AGV2-023 — Prometheus/OpenTelemetry exporter, external metrics TSDB, active upstream probes,
+alerting/paging, and a logging-stack rewrite remain separate). Reuse the now-verified observability
+read-model module, the bounded SQL percentile pattern, the typed `/admin/v1/observability` surface,
+and the generated-client + role-guard + live-SDK-proof patterns, starting from the green regression
+baseline: backend **527**, frontend **87**, full Playwright **32**, migration head **0017**.

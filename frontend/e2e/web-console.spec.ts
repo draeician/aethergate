@@ -54,9 +54,13 @@ test('signed-in console renders live queue data', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({
     timeout: 30_000,
   })
-  await expect(page.getByText('Queued')).toBeVisible()
-  await expect(page.getByText('In Flight')).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Not yet instrumented' })).toBeVisible()
+  await expect(page.getByText('Queued', { exact: true })).toBeVisible()
+  await expect(page.getByText('In Flight', { exact: true })).toBeVisible()
+  // The former "Not yet instrumented" placeholders are replaced by real metrics.
+  await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible()
+  await expect(page.getByText('Queue wait')).toBeVisible()
+  await expect(page.getByText(/Dispatch-to-first-token/)).toBeVisible()
+  await expect(page.getByText('Retry rate')).toBeVisible()
 })
 
 test('logout revokes the server session and returns to login', async ({ page }) => {
