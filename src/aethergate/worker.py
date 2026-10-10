@@ -25,6 +25,7 @@ import logging
 import signal
 import uuid
 
+from aethergate.logging_config import configure_logging_from_settings, log_event
 from aethergate.scheduler.runtime import build_scheduling_service
 from aethergate.scheduler.service import ClaimedWork
 
@@ -36,6 +37,18 @@ async def _run_once(worker_id: str, service) -> str:
     await service.recover()
     outcome = await service.claim_and_reserve(worker_id)
     if isinstance(outcome, ClaimedWork):
+        # Safe correlation only: gateway request id + attempt/endpoint IDs, and
+        # the upstream provider request ID is deliberately NOT logged (distinct
+        # from the gateway request id and never persisted as correlation).
+        log_event(
+            logger,
+            "worker.dispatch",
+            request_id=outcome.request_id,
+            attempt_id=outcome.attempt_id,
+            endpoint_id=outcome.endpoint_id,
+            stream=outcome.stream,
+            worker_id=worker_id,
+        )
         if outcome.stream:
             await service.run_stream(outcome)
         else:
@@ -100,7 +113,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    configure_logging_from_settings()
     worker_id = args.worker_id or uuid.uuid4().hex
 
     loop = asyncio.new_event_loop()

@@ -310,6 +310,27 @@ or token in browser storage, and it never calls legacy `/admin/*` endpoints.
 - Temporary queue payload storage is separate from permanent prompt logging, still encrypted,
   access-controlled, and expiring. (Settled)
 
+### Structured logging and redaction (AGV2-024)
+
+Alpha/production uses JSON structured logs; development keeps human-readable
+output (`aethergate.logging_config`). Lifecycle logs carry only safe metadata:
+timestamp, level, logger/event, gateway `request_id`, `attempt_id`, `endpoint_id`/
+`model_alias_id`/`project_id`, lifecycle `state`, HTTP `method`/route **template**/
+`status`, `duration_ms`, and safe numeric `upstream_status_code`. The HTTP access
+log records the matched route template, never the raw path/query.
+
+Never logged: `Authorization` headers, cookies, CSRF, OIDC tokens/codes/verifiers/
+nonces, `agk_`/`ags_`/bootstrap/provider keys, database URLs/passwords,
+prompt/completion/tool content, encrypted payload/result bytes, and raw provider
+bodies/headers. A central :class:`~aethergate.logging_config.RedactionFilter` is a
+defense-in-depth backstop that scrubs known secret shapes (credential prefixes,
+Bearer tokens, cookies, OIDC fields, DB URLs/passwords, PEM keys) from any record;
+it is never permission to log sensitive objects. A centralized test
+(`tests/test_logging_safety.py`) canary-proves every secret and content class is
+absent from captured logs and that a gateway request ID in a response correlates
+with its access log record. The gateway request ID is deliberately distinct from
+the upstream provider request ID.
+
 ## Egress control
 
 - Enforce approved egress destinations; explicitly support authorized private LAN endpoints. (Settled)

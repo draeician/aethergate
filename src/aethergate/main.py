@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -48,8 +53,71 @@ from aethergate.errors import (
     QueueTransitionError,
     SessionInvalid,
 )
+from aethergate.logging_config import (
+    configure_logging_from_settings,
+    gateway_request_id_var,
+    log_event,
+)
 
-app = FastAPI(title="AetherGate", version=__version__)
+_access_logger = logging.getLogger("aethergate.access")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    configure_logging_from_settings()
+    yield
+
+
+# Route templates that use the OpenAI/admin versioned surface. The access log
+# records only the matched route template (never the raw path/query), so opaque
+# resource IDs and any sensitive query strings are never logged.
+app = FastAPI(title="AetherGate", version=__version__, lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _structured_access_log(request: Request, call_next):
+    """Emit one safe structured access log per request.
+
+    Only the matched route template, method, status, duration, and the gateway
+    request ID are logged. Query strings, headers, cookies, bodies, resource IDs,
+    and content are never logged.
+    """
+    started = time.perf_counter()
+    # Establish the gateway request ID up front and expose it to log correlation;
+    # handler code reuses the same ID via ``get_gateway_request_id``.
+    request_id = get_gateway_request_id(request)
+    token = gateway_request_id_var.set(request_id)
+    try:
+        try:
+            response = await call_next(request)
+        except Exception:
+            route = request.scope.get("route")
+            log_event(
+                _access_logger,
+                "http.request",
+                level=logging.ERROR,
+                method=request.method,
+                route=getattr(route, "path", None) or "unmatched",
+                status=500,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                request_id=request_id,
+            )
+            raise
+    finally:
+        gateway_request_id_var.reset(token)
+    route = request.scope.get("route")
+    log_event(
+        _access_logger,
+        "http.request",
+        method=request.method,
+        route=getattr(route, "path", None) or "unmatched",
+        status=response.status_code,
+        duration_ms=round((time.perf_counter() - started) * 1000, 3),
+        request_id=request_id,
+    )
+    return response
+
+
 app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(chat_router)

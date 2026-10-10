@@ -171,6 +171,29 @@ existing queued/in-flight/outcome_unknown, oldest wait, slots, quota/cooldown,
 and Decimal-safe budget headroom are retained; polling reuses the bounded
 hidden-tab-aware helper.
 
+## Structured log correlation (AGV2-024)
+
+Request lifecycle is made diagnosable through structured logs without content or
+secrets. Each HTTP request gets a **gateway request ID** (also returned to the
+client and used in error envelopes); the same ID appears on that request's
+structured access log record and on worker lifecycle logs
+(`worker.dispatch`, `request.settled`), alongside `attempt_id`/`endpoint_id` and
+the lifecycle `state`. The gateway request ID is **distinct** from the upstream
+provider request ID (`X-Upstream-Request-Id`), which is never used for gateway
+correlation. See `docs/architecture/security.md` for the full redaction/never-log
+policy and the canary test coverage.
+
+## Health / readiness
+
+Liveness is process-only. Readiness additionally requires that the applied
+schema revision equals the code's expected head
+(`aethergate.schema_check.schema_is_current`); an unmigrated/incompatible schema
+returns `503 schema_not_current` rather than serving traffic. Readiness never
+depends on individual upstream providers. A safe diagnostics bundle
+(`python -m aethergate.diagnostics`) reports migration state, a DB-reachable
+boolean, sanitized config flags, safe queue counts, and the observability summary
+(all redacted).
+
 ## Non-goals (deferred)
 
 Prometheus/OpenTelemetry exporters, external metrics retention/TSDB, active

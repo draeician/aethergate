@@ -59,6 +59,7 @@ from aethergate.errors import (
 )
 from aethergate.identity import service as identity_service
 from aethergate.inference.service import InferenceService, PreparedDispatch
+from aethergate.logging_config import log_event
 from aethergate.persistence import models
 from aethergate.scheduler import repository as scheduler_repository
 
@@ -1389,6 +1390,17 @@ class SchedulingService:
                         upstream_request_id=upstream_request_id,
                         now=now,
                     )
+        if settled:
+            log_event(
+                logger,
+                "request.settled",
+                request_id=claim.request_id,
+                attempt_id=claim.attempt_id,
+                endpoint_id=claim.endpoint_id,
+                state=state,
+                upstream_error=upstream_error,
+                upstream_status_code=upstream_status_code,
+            )
 
     async def _settle_accounting(
         self,
