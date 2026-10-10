@@ -11,6 +11,39 @@ from aethergate.encryption import QueueEncryptor
 VALID_QUEUE_KEY = QueueEncryptor.generate_key()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_settings_env(monkeypatch, tmp_path):
+    """Keep these tests independent of ambient CI/container environment.
+
+    ``Settings`` reads process env (and ``.env``) unless told otherwise, so a
+    workflow-level ``AETHERGATE_QUEUE_KEY``/``AETHERGATE_ENV``/etc. would silently
+    satisfy a validation this suite is asserting on. Clear the relevant vars and
+    run from an empty directory so no on-disk ``.env`` contributes either.
+    """
+    for name in (
+        "DATABASE_URL",
+        "POSTGRES_HOST",
+        "POSTGRES_PORT",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "AETHERGATE_ENV",
+        "AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS",
+        "AETHERGATE_UPSTREAM_ALLOWLIST",
+        "AETHERGATE_QUEUE_KEY",
+        "AETHERGATE_BOOTSTRAP_TOKEN",
+        "AETHERGATE_OIDC_ENABLED",
+        "AETHERGATE_OIDC_ISSUER",
+        "AETHERGATE_OIDC_CLIENT_ID",
+        "AETHERGATE_OIDC_CLIENT_SECRET",
+        "AETHERGATE_OIDC_REDIRECT_URI",
+        "AETHERGATE_OIDC_WEB_CALLBACK_PATH",
+        "AETHERGATE_OIDC_DEVICE_CLIENT_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+
 def _dev_settings(**overrides) -> Settings:
     # ``_env_file=None`` plus explicit values keep this isolated from any ambient
     # environment (CI/container env would otherwise flip OIDC/bootstrap flags).
@@ -46,11 +79,16 @@ def test_invalid_queue_key_is_error():
     assert any("Fernet" in e for e in result.errors)
 
 
-def test_prod_requires_queue_key():
+def test_prod_requires_queue_key(monkeypatch):
     # Settings itself forbids missing queue_key in prod, so this path is enforced
-    # there; assert the prod validator rejects it.
+    # there; assert the prod validator rejects it. Explicitly clear any ambient
+    # AETHERGATE_QUEUE_KEY (e.g. a workflow-level CI value) and isolate env-file
+    # loading so the test does not pass merely because the environment supplied a
+    # key — the production requirement itself is not weakened.
+    monkeypatch.delenv("AETHERGATE_QUEUE_KEY", raising=False)
     with pytest.raises(ValueError):
         Settings(
+            _env_file=None,
             database_url="postgresql+asyncpg://u:p@h/db",
             app_env="prod",
             upstream_allowlist="api.example.com",
@@ -60,6 +98,7 @@ def test_prod_requires_queue_key():
 def test_prod_rejects_inference_auth_bypass():
     with pytest.raises(ValueError):
         Settings(
+            _env_file=None,
             database_url="postgresql+asyncpg://u:p@h/db",
             app_env="prod",
             queue_key=VALID_QUEUE_KEY,

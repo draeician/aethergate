@@ -56,6 +56,7 @@ class _Clock:
 
 def _settings(**overrides) -> Settings:
     base: dict = {
+        "_env_file": None,
         "database_url": "postgresql+asyncpg://u:p@h/db",
         "app_env": "dev",
         "bootstrap_token": BOOTSTRAP_TOKEN,

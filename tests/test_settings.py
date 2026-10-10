@@ -9,7 +9,7 @@ from aethergate.config import Settings
 
 
 @pytest.fixture(autouse=True)
-def _clear_db_env(monkeypatch):
+def _clear_db_env(monkeypatch, tmp_path):
     for name in (
         "DATABASE_URL",
         "POSTGRES_HOST",
@@ -31,6 +31,8 @@ def _clear_db_env(monkeypatch):
         "AETHERGATE_OIDC_DEVICE_CLIENT_ID",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Run from an empty directory so no on-disk .env contributes either.
+    monkeypatch.chdir(tmp_path)
 
 
 def test_database_url_takes_precedence():
