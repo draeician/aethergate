@@ -39,6 +39,33 @@ These override any generic boilerplate below when they conflict.
 - Distinguish settled requirements from current direction and deferred decisions as marked in
   `project_spec.md`; do not promote deferred decisions to settled.
 
+## Session lessons (persisted — read on every startup)
+
+Hard-won, recurring mistakes. Do not repeat these.
+
+- **Use the canonical test command; never invent container invocations.** Backend tests run through
+  `scripts/dev/v2 test` (it attaches the right compose network and injects the correct
+  `AETHERGATE_TEST_DATABASE_URL`). Ad-hoc `docker run` / `docker compose run` forms either fail on
+  DNS (the DB container is not on the compose network) or omit `POSTGRES_*`, which produces *spurious
+  failures* (3 tests failed once for exactly this reason) and wastes a full run. If you must run
+  pytest directly, replicate every `POSTGRES_*`/`AETHERGATE_QUEUE_KEY`/`AETHERGATE_BOOTSTRAP_TOKEN`
+  env var the compose service sets.
+- **Every failing test is a real defect until root-caused.** Do not label a failure "pre-existing",
+  "flaky", or "transient" to move on — the task explicitly forbids claiming completion over a red
+  suite. Re-run, isolate the spec, and read the Playwright `error-context.md`/`trace` before deciding.
+  A "transient" login failure after recreating containers is usually a stale nginx→api DNS or IdP/JWKS
+  cache — restart the `web` container so nginx re-resolves `api`, then confirm; do not just re-run and
+  hope.
+- **Live E2E data accumulates across runs, and list pages sort oldest-first at 20 per page.** Any
+  assertion of the form "the row I just created is visible" is a latent defect once that table exceeds
+  one page. Audit *every* such assertion, not only the ones the task names. Fix with real UI
+  pagination (`goToLastPage`) or a UI filter scoped to the run's unique resource. In AGV2-022C this bit
+  three tables (projects, providers, price policies) and only the first two were named in the task.
+- **Rebuild the image and restart the affected container before browser/E2E work.** Source edits do not
+  take effect until `docker build -t aethergate-v2:local -f deploy/v2/Dockerfile .` and the api/worker
+  containers are recreated from the new image; a reused `web` container also needs a restart for nginx
+  DNS.
+
 ## Long-task / compaction recovery protocol
 
 These rules are authoritative for work launched from `docs/development/current-task.md` and override
