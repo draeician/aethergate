@@ -1,0 +1,32 @@
+# AetherGate v2 — CI-only override. NEVER used in production/alpha deploys.
+#
+# Adds the deterministic, offline fake Ollama upstream and wires the API/worker
+# to it. The API egress allowlist is set to the fake upstream's compose service
+# name (`fake-ollama`) so the real LiteLLM ollama transport reaches it over the
+# compose network. Loopback IPs remain denied by the destination policy.
+#
+# Bring up with:
+#   docker compose --project-directory deploy/v2 \
+#     -f deploy/v2/compose.yaml -f deploy/v2/compose.web.yaml \
+#     -f deploy/v2/compose.ci.yaml up -d
+services:
+  api:
+    environment:
+      AETHERGATE_UPSTREAM_ALLOWLIST: "fake-ollama"
+      # CI always runs with inference auth bypass disabled (real credential path).
+      AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS: "false"
+
+  worker:
+    environment:
+      AETHERGATE_UPSTREAM_ALLOWLIST: "fake-ollama"
+
+  fake-ollama:
+    image: aethergate-v2:local
+    container_name: aethergate-v2-fake-ollama
+    command: ["python", "-m", "aethergate.testing.fake_ollama_server"]
+    environment:
+      FAKE_OLLAMA_PORT: "11434"
+      FAKE_OLLAMA_DELAY: ${FAKE_OLLAMA_DELAY:-0}
+      FAKE_OLLAMA_FAIL_STATUS: ${FAKE_OLLAMA_FAIL_STATUS:-}
+    # No host port: the API/worker reach it over the compose network by name.
+    restart: "no"

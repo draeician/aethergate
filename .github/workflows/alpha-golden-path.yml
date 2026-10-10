@@ -1,0 +1,156 @@
+name: alpha-golden-path
+
+on:
+  pull_request:
+  push:
+    branches: [v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha-golden-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden:
+    name: offline alpha golden path (fake ollama + browser + SDK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      WEB_BASE_URL: http://127.0.0.1:8080
+      OIDC_ISSUER: http://127.0.0.1:8090
+      COMPOSE_FILES: >-
+        -f deploy/v2/compose.yaml
+        -f deploy/v2/compose.web.yaml
+        -f deploy/v2/compose.ci.yaml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Generate deterministic secrets (CI-only, ephemeral)
+        run: |
+          python - <<'PY'
+          import secrets
+          from cryptography.fernet import Fernet
+          lines = [
+            f"POSTGRES_PASSWORD={secrets.token_urlsafe(24)}",
+            f"AETHERGATE_QUEUE_KEY={Fernet.generate_key().decode()}",
+            f"AETHERGATE_BOOTSTRAP_TOKEN=agb_{secrets.token_urlsafe(32)}",
+          ]
+          open("deploy/v2/.env", "w").write("\n".join(lines) + "\n")
+          PY
+          # The dev IdP issuer must be reachable by both browser and container.
+          {
+            echo "AETHERGATE_OIDC_ENABLED=true"
+            echo "AETHERGATE_OIDC_ISSUER=${OIDC_ISSUER}"
+            echo "AETHERGATE_OIDC_CLIENT_ID=aethergate-dev-client"
+            echo "AETHERGATE_OIDC_REDIRECT_URI=${WEB_BASE_URL}/admin/v1/auth/oidc/callback"
+            echo "AETHERGATE_OIDC_SCOPES=openid"
+            echo "AETHERGATE_OIDC_SUBJECT=dev-user"
+            echo "AETHERGATE_OIDC_WEB_CALLBACK_PATH=/auth/callback"
+          } >> deploy/v2/.env
+          chmod 600 deploy/v2/.env
+
+      - name: Build image
+        run: docker build -t aethergate-v2:local -f deploy/v2/Dockerfile .
+
+      - name: Build web image
+        run: docker build -t aethergate-v2-web:local frontend/
+
+      - name: Start stack (postgres + api + worker + idp + fake-ollama + web)
+        run: docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) up -d --no-build
+
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$WEB_BASE_URL/health/ready" >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) logs --no-color api worker
+          exit 1
+
+      - name: IdP readiness + bootstrap
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "$OIDC_ISSUER/.well-known/openid-configuration" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          # Migrate the empty database to head.
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) run --rm --no-deps api \
+            alembic -c src/aethergate/migrations/alembic.ini upgrade head
+
+      - name: Install SDK/test deps on the runner
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          (cd frontend && npm ci)
+
+      - name: Golden path main (setup + SDK)
+        env:
+          AETHERGATE_BOOTSTRAP_TOKEN_FILE: deploy/v2/.env
+        run: |
+          export AETHERGATE_BOOTSTRAP_TOKEN="$(grep '^AETHERGATE_BOOTSTRAP_TOKEN=' deploy/v2/.env | cut -d= -f2-)"
+          python scripts/ci/golden_path.py \
+            --phase main \
+            --base-url "$WEB_BASE_URL" \
+            --workdir /tmp/ag-golden \
+            --upstream-base http://fake-ollama:11434
+
+      - name: Export inference key for Playwright
+        run: |
+          echo "GOLDEN_INFERENCE_KEY=$(grep '^AETHERGATE_GOLDEN_INFERENCE_KEY=' /tmp/ag-golden/golden_secrets.env | cut -d= -f2-)" >> "$GITHUB_ENV"
+
+      - name: Install Chromium
+        run: (cd frontend && npx playwright install --with-deps chromium)
+
+      - name: Browser golden smoke
+        run: (cd frontend && npx playwright test e2e/alpha-golden.spec.ts)
+
+      - name: Backup
+        run: scripts/ops/v2 backup --output /tmp/ag-golden/backup.dump --force
+
+      - name: Destroy + recreate database, restore
+        run: |
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) stop worker api
+          # Drop and recreate the database so restore is proven against an empty target.
+          docker exec aethergate-v2-postgres psql -U aethergate -d postgres \
+            -c "DROP DATABASE IF EXISTS aethergate WITH (FORCE);" \
+            -c "CREATE DATABASE aethergate OWNER aethergate;"
+          scripts/ops/v2 restore --input /tmp/ag-golden/backup.dump --force
+
+      - name: Wait for readiness after restore
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$WEB_BASE_URL/health/ready" >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Golden path post-restore (state + SDK)
+        run: |
+          python scripts/ci/golden_path.py \
+            --phase post-restore \
+            --base-url "$WEB_BASE_URL" \
+            --workdir /tmp/ag-golden
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) down -v

@@ -499,6 +499,101 @@ def test_migration_0015_to_0016() -> None:
         asyncio.run(drop_database(url))
 
 
+def _exec_sql(url: str, statements: list[str]) -> list[tuple]:
+    """Run raw SQL statements; return the last statement's rows."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(url)
+
+    async def _run() -> list[tuple]:
+        from sqlalchemy import text
+
+        async with engine.begin() as conn:
+            rows: list[tuple] = []
+            for stmt in statements:
+                result = await conn.execute(text(stmt))
+                if result.returns_rows:
+                    rows = list(result.fetchall())
+        return rows
+
+    out = asyncio.run(_run())
+    asyncio.run(engine.dispose())
+    return out
+
+
+def test_populated_0016_to_0017_preserves_rows() -> None:
+    """Populated 0016 -> 0017 preserves representative rows and defaults."""
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1617pop")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0016", env=env)
+
+        # Representative identity/catalog/queue/accounting rows at 0016.
+        _exec_sql(
+            url,
+            [
+                "INSERT INTO projects (id, name, is_active) VALUES ('p1','proj',true)",
+                "INSERT INTO principals (id, project_id, kind, name, is_active) "
+                "VALUES ('pr1','p1','user','alice',true)",
+                "INSERT INTO providers (id, kind, name, capabilities, is_active) "
+                "VALUES ('prov1','ollama','ollama','[]',true)",
+                "INSERT INTO provider_accounts (id, provider_id, name, is_active) "
+                "VALUES ('acct1','prov1','acct',true)",
+                "INSERT INTO endpoints (id, provider_account_id, name, base_destination, "
+                "max_concurrency, is_active, operational_state) "
+                "VALUES ('ep1','acct1','ep','http://localhost',1,true,'active')",
+                "INSERT INTO model_aliases (id, name, capabilities, is_active) "
+                "VALUES ('ma1','m1','[]',true)",
+                "INSERT INTO route_bindings (id, model_alias_id, endpoint_id, "
+                "provider_account_id, is_active) "
+                "VALUES ('rb1','ma1','ep1','acct1',true)",
+                "INSERT INTO inference_requests (id, project_id, model_alias_id, "
+                "endpoint_id, state, stream, payload_encrypted, queued_at, expires_at, "
+                "cancellation_requested) "
+                "VALUES ('req1','p1','ma1','ep1','dispatched',false,decode('00','hex'),"
+                "now(), now() + interval '1 hour', false)",
+                # A pre-existing execution attempt (no first_token_at at 0016).
+                "INSERT INTO execution_attempts (id, request_id, endpoint_id, state, "
+                "fencing_token, started_at) "
+                "VALUES ('att1','req1','ep1','dispatched',7,now())",
+            ],
+        )
+
+        _run_alembic("upgrade", "head", env=env)
+
+        # Historical rows readable; new columns have correct defaults/nulls.
+        rows = _exec_sql(
+            url,
+            [
+                "SELECT state FROM inference_requests WHERE id='req1'",
+                "SELECT upstream_error, upstream_status_code, first_token_at "
+                "FROM execution_attempts WHERE id='att1'",
+            ],
+        )
+        # The last SELECT is the attempt defaults.
+        upstream_error, upstream_status_code, first_token_at = rows[0]
+        assert upstream_error is False
+        assert upstream_status_code is None
+        assert first_token_at is None  # no fake backfill
+
+        # Pre-existing request/attempt survived.
+        assert _exec_sql(
+            url, ["SELECT count(*) FROM inference_requests WHERE id='req1'"]
+        ) == [(1,)]
+        assert _exec_sql(
+            url, ["SELECT count(*) FROM execution_attempts WHERE id='att1'"]
+        ) == [(1,)]
+        # Head is 0017.
+        assert _exec_sql(url, ["SELECT version_num FROM alembic_version"]) == [("0017",)]
+    finally:
+        asyncio.run(drop_database(url))
+
+
 def test_migration_0016_to_0017() -> None:
     if not TEST_DATABASE_URL:
         pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
