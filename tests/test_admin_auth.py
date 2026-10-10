@@ -617,6 +617,10 @@ async def admin_http(admin_engine, admin_factory, monkeypatch):
     await reset_schema(admin_engine)
     monkeypatch.setattr(admin_service, "get_settings", lambda: _settings())
     monkeypatch.setattr("aethergate.api.admin.get_session_factory", lambda: admin_factory)
+    # The inference-auth dependency resolves via the process-wide session factory;
+    # point it at the test database so the admin-vs-inference rejection is proven
+    # against the test schema instead of any ambient (dev/CI) database.
+    monkeypatch.setattr("aethergate.api.deps.get_session_factory", lambda: admin_factory)
 
     async def _test_session():
         async with admin_factory() as s:

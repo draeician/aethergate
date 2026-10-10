@@ -147,24 +147,6 @@ jobs:
         run: |
           echo "GOLDEN_INFERENCE_KEY=$(grep '^AETHERGATE_GOLDEN_INFERENCE_KEY=' /tmp/ag-golden/golden_secrets.env | cut -d= -f2-)" >> "$GITHUB_ENV"
 
-      - name: Install Chromium
-        run: (cd frontend && npx playwright install --with-deps chromium)
-
-      - name: Warm OIDC discovery (avoid first-login cold start)
-        # The api caches OIDC discovery/JWKS on first use; a cold cache plus a
-        # transient discovery fetch can 503 the first browser login. Warm it
-        # through the web origin before the browser smoke (documented lesson).
-        run: |
-          for i in $(seq 1 30); do
-            if curl -fsS -L "$WEB_BASE_URL/admin/v1/auth/oidc/login" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 1
-          done
-
-      - name: Browser golden smoke
-        run: (cd frontend && npx playwright test e2e/alpha-golden.spec.ts)
-
       - name: Backup
         run: scripts/ops/v2 backup --output /tmp/ag-golden/backup.dump --force
 
@@ -199,6 +181,27 @@ jobs:
             --phase post-restore \
             --base-url "$WEB_BASE_URL" \
             --workdir /tmp/ag-golden
+
+      - name: Install Chromium
+        run: (cd frontend && npx playwright install --with-deps chromium)
+
+      - name: Warm OIDC discovery (avoid first-login cold start)
+        # The api caches OIDC discovery/JWKS on first use; a cold cache plus a
+        # transient discovery fetch can 503 the first browser login. Warm it
+        # through the web origin before the browser smoke (documented lesson).
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -L "$WEB_BASE_URL/admin/v1/auth/oidc/login" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Browser golden smoke
+        # Runs AFTER the restore count assertions: the smoke performs live SDK
+        # inference, which appends usage records, so it must not run between the
+        # recorded pre-backup counts and the post-restore count check.
+        run: (cd frontend && npx playwright test e2e/alpha-golden.spec.ts)
 
       - name: Dump logs on failure
         # Guard: if setup failed before deploy/v2/.env was written, Compose cannot

@@ -264,6 +264,9 @@ async def cli_http(cli_engine, cli_factory, monkeypatch):
     monkeypatch.setattr("aethergate.api.session_auth.get_settings", lambda: settings)
     monkeypatch.setattr("aethergate.api.cli_auth.get_settings", lambda: settings)
     monkeypatch.setattr("aethergate.api.admin.get_session_factory", lambda: cli_factory)
+    # The CLI-session-vs-inference rejection is proven against the test database,
+    # not any ambient (dev/CI) database reached through the process-wide factory.
+    monkeypatch.setattr("aethergate.api.deps.get_session_factory", lambda: cli_factory)
 
     idp = DevOidcIdp(
         issuer=ISSUER,

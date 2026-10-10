@@ -77,6 +77,9 @@ async def crud_http(crud_engine, crud_factory, monkeypatch):
     await reset_schema(crud_engine)
     monkeypatch.setattr(admin_service, "get_settings", _settings)
     monkeypatch.setattr("aethergate.api.admin.get_session_factory", lambda: crud_factory)
+    # Inference-auth rejection is proven against the test database, not any
+    # ambient (dev/CI) database reached through the process-wide factory.
+    monkeypatch.setattr("aethergate.api.deps.get_session_factory", lambda: crud_factory)
 
     async def _test_session():
         async with crud_factory() as s:
