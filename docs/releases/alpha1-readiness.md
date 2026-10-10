@@ -89,6 +89,18 @@ the generated OpenAPI — is identical everywhere. Refresh is explicit via
 `scripts/ci/refresh_lock.sh` followed by OpenAPI/client regeneration and the full
 gate run (`docs/development/dependency-locking.md`).
 
+## AGV2-024V — remote CI status
+
+Final `origin/v2` SHA `b3c61d5e7409bbb0504b33c87a5361bf5105beed` — all four workflows
+`completed/success`:
+
+| Workflow | Run ID | Conclusion |
+|---|---|---|
+| backend | 38092737427 | completed/success |
+| frontend | 38092737557 | completed/success |
+| schema-secret-gate | 38092737259 | completed/success |
+| alpha-golden-path | 38092737337 | completed/success |
+
 ## AGV2-024V — closing the first remote CI run
 
 The first pushed Alpha 1 SHA (`fb00f875513b8bec90d5284facf122850768868e`) failed

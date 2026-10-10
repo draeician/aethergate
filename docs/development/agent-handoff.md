@@ -88,9 +88,16 @@ All four workflows were red:
   stack with bypass `false`. Full CI golden-path simulated locally end-to-end (disposable stack:
   migrate → readiness → bootstrap → OIDC login → catalog → SDK → backup → restore → SDK), all green.
 
-### Final remote CI (final SHA)
-- (recorded after push: backend / frontend / schema-secret-gate / alpha-golden-path all
-  completed/success — run IDs appended below.)
+### Final remote CI (final SHA `b3c61d5e7409bbb0504b33c87a5361bf5105beed`)
+All four required workflows `completed/success`:
+- backend — run `38092737427` (4m3s)
+- frontend — run `38092737557` (1m3s)
+- schema-secret-gate — run `38092737259` (49s)
+- alpha-golden-path — run `38092737337` (3m3s)
+
+(First remote run `fb00f875…` was red in all four; the intermediate run on the
+lock+step-1 fixes was green for frontend/schema-secret-gate and exposed the two
+follow-up defects fixed above.)
 
 ### Migration head
 `0017` (unchanged; `0001`–`0017` untouched).
