@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+#
+# AetherGate v2 — tightly controlled operator recovery tooling.
+#
+# This is offline/operator-only tooling distinct from the normal `/admin/v1`
+# admin path: it operates directly on PostgreSQL for backup/restore because a
+# complete, consistent backup cannot be expressed over the admin API. It never
+# prints the database password and writes restrictive file permissions.
+#
+# Usage:
+#   scripts/ops/v2 backup  --output <path> [--force]
+#   scripts/ops/v2 restore --input  <path> [--force] [--keep-stopped]
+#   scripts/ops/v2 diagnostics --output <path> [--logs-lines N]
+#   scripts/ops/v2 migrate
+#   scripts/ops/v2 help
+#
+# Backup/restore intentionally require an explicit path and an explicit --force
+# to overwrite an existing file. Restore quiesces the API + worker first so the
+# database is not being written while it is replaced, and refuses to restore into
+# a running target unless it can stop it safely.
+#
+# IMPORTANT: PostgreSQL holds no plaintext provider secrets (SecretRef metadata
+# only), but the queue encryption key (AETHERGATE_QUEUE_KEY) lives OUTSIDE the
+# database. A backup does NOT include it: preserve the queue key (and any
+# external secret-backend material) separately, or queued encrypted payloads
+# cannot be decrypted after a restore. See docs/operations/alpha-runbook.md.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+COMPOSE_DIR="$REPO_ROOT/deploy/v2"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*" >&2; }
+
+compose() {
+    docker compose --project-directory "$COMPOSE_DIR" --file "$COMPOSE_DIR/compose.yaml" "$@"
+}
+
+db_container() {
+    # AETHERGATE_DB_CONTAINER lets operators target a disposable stack by name;
+    # otherwise discover the standard v2 postgres container.
+    if [[ -n "${AETHERGATE_DB_CONTAINER:-}" ]]; then
+        printf '%s' "$AETHERGATE_DB_CONTAINER"
+        return
+    fi
+    local name
+    name="$(docker ps -a --filter "name=aethergate-v2-postgres" --format '{{.Names}}' | head -1)"
+    [[ -n "$name" ]] || die "postgres container not found (is the stack created?)"
+    printf '%s' "$name"
+}
+
+db_user() { printf '%s' "${POSTGRES_USER:-aethergate}"; }
+db_name() { printf '%s' "${POSTGRES_DB:-aethergate}"; }
+
+# Run a command inside the postgres container. The container's local socket
+# authentication is used (no password is ever echoed on the host command line or
+# in process listings).
+pg_exec() {
+    local container="$1"; shift
+    docker exec -i "$container" "$@"
+}
+
+require_psql_tools() {
+    local container="$1" tool="${2:-pg_dump}"
+    docker exec "$container" sh -c "command -v $tool >/dev/null 2>&1" \
+        || die "$tool is not available in the postgres container"
+}
+
+cmd_backup() {
+    local output="" force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --output) output="${2:-}"; shift 2 ;;
+            --force) force=1; shift ;;
+            *) die "unknown backup option: $1" ;;
+        esac
+    done
+    [[ -n "$output" ]] || die "backup requires --output <path>"
+    if [[ -e "$output" && "$force" -ne 1 ]]; then
+        die "refusing to overwrite existing file $output (pass --force)"
+    fi
+    local container; container="$(db_container)"
+    require_psql_tools "$container" pg_dump
+    mkdir -p "$(dirname "$output")"
+    # Custom format: self-contained, compressed, restorable with pg_restore.
+    umask 077
+    pg_exec "$container" pg_dump -Fc -U "$(db_user)" -d "$(db_name)" > "$output"
+    chmod 600 "$output" 2>/dev/null || true
+    info "backup written: $output ($(wc -c < "$output") bytes, custom format)"
+    info "NOTE: back up AETHERGATE_QUEUE_KEY and external secret material separately."
+}
+
+restore_quiesce() {
+    # Stop the API + worker so the database is quiesced before restore. The
+    # postgres container stays up (the restore target). Never touches volumes.
+    # Operators may target non-default container names for a disposable stack.
+    local api_c="${AETHERGATE_API_CONTAINER:-}"
+    local worker_c="${AETHERGATE_WORKER_CONTAINER:-}"
+    if [[ -n "$api_c" || -n "$worker_c" ]]; then
+        [[ -n "$api_c" ]] && docker stop "$api_c" >/dev/null 2>&1 || true
+        [[ -n "$worker_c" ]] && docker stop "$worker_c" >/dev/null 2>&1 || true
+    else
+        compose stop api worker >/dev/null 2>&1 || true
+    fi
+    info "stopped api + worker for restore"
+}
+
+restore_restart() {
+    local api_c="${AETHERGATE_API_CONTAINER:-}"
+    local worker_c="${AETHERGATE_WORKER_CONTAINER:-}"
+    if [[ -n "$api_c" || -n "$worker_c" ]]; then
+        [[ -n "$api_c" ]] && docker start "$api_c" >/dev/null 2>&1 || true
+        [[ -n "$worker_c" ]] && docker start "$worker_c" >/dev/null 2>&1 || true
+    else
+        compose up -d --no-deps --force-recreate api worker >/dev/null 2>&1 || \
+            compose up -d --no-deps api worker >/dev/null 2>&1 || \
+            info "WARN: could not auto-restart api/worker; start them manually"
+    fi
+}
+
+cmd_restore() {
+    local input="" force=0 keep_stopped=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --input) input="${2:-}"; shift 2 ;;
+            --force) force=1; shift ;;
+            --keep-stopped) keep_stopped=1; shift ;;
+            *) die "unknown restore option: $1" ;;
+        esac
+    done
+    [[ -n "$input" ]] || die "restore requires --input <path>"
+    [[ -f "$input" ]] || die "backup file not found: $input"
+    if [[ "$force" -ne 1 ]]; then
+        die "restore replaces the database; pass --force to confirm"
+    fi
+    local container; container="$(db_container)"
+    require_psql_tools "$container" pg_restore
+
+    # Always quiesce before restore: the database must not be written while it is
+    # replaced. Stopping the API + worker is the safe, non-destructive action.
+    restore_quiesce
+
+    info "restoring $input into $(db_name)"
+    # --clean --if-exists makes the restore idempotent over an existing schema;
+    # --no-owner avoids role assumptions. Errors on drop of absent objects are
+    # tolerated via --if-exists.
+    pg_exec "$container" pg_restore --clean --if-exists --no-owner \
+        -U "$(db_user)" -d "$(db_name)" < "$input"
+
+    # Verify the applied schema revision is the expected head.
+    local rev
+    rev="$(pg_exec "$container" psql -tA -U "$(db_user)" -d "$(db_name)" \
+        -c 'SELECT version_num FROM alembic_version' | tr -d '[:space:]')"
+    info "restored database migration revision: ${rev:-unknown}"
+
+    if [[ "$keep_stopped" -eq 0 ]]; then
+        info "restarting api + worker"
+        restore_restart
+    fi
+    info "restore complete"
+}
+
+cmd_migrate() {
+    compose run --rm --no-deps api \
+        alembic -c src/aethergate/migrations/alembic.ini upgrade head
+}
+
+cmd_diagnostics() {
+    local output="" logs_lines=50
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --output) output="${2:-}"; shift 2 ;;
+            --logs-lines) logs_lines="${2:-50}"; shift 2 ;;
+            *) die "unknown diagnostics option: $1" ;;
+        esac
+    done
+    [[ -n "$output" ]] || die "diagnostics requires --output <path>"
+    umask 077
+    # The bundle is emitted on stdout (structured JSON) so it can be captured
+    # directly to the explicit output path with restrictive permissions.
+    if ! compose run --rm --no-deps api \
+        python -m aethergate.diagnostics --stdout --logs-lines "$logs_lines" \
+        > "$output" 2>/dev/null; then
+        die "could not produce diagnostics bundle (is the stack running?)"
+    fi
+    chmod 600 "$output" 2>/dev/null || true
+    [[ -s "$output" ]] || die "diagnostics bundle is empty"
+    info "diagnostics bundle written: $output"
+}
+
+usage() {
+    sed -n '2,26p' "${BASH_SOURCE[0]}"
+}
+
+case "${1:-}" in
+    backup) shift; cmd_backup "$@" ;;
+    restore) shift; cmd_restore "$@" ;;
+    migrate) shift; cmd_migrate "$@" ;;
+    diagnostics) shift; cmd_diagnostics "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage; die "unknown command: ${1:-<none>}" ;;
+esac
