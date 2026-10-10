@@ -1,77 +1,65 @@
-# AetherGate v1.0
+# AetherGate v2
 
-A self-hosted, OpenAI-compatible AI Gateway designed to monetize local inference. AetherGate sits between your users and your local LLM server (e.g., Ollama), adding Authentication, Billing, Rate Limiting, and Logging.
+AetherGate v2 is a self-hosted, OpenAI-compatible inference gateway with a
+durable scheduler, quota/budget accounting, enterprise identity, a versioned
+`/admin/v1` management API, a Linux CLI, and a web operator console.
 
-## Features
-* **OpenAI-Compatible Proxy:** Drop-in replacement for `openai.api_base`.
-* **User Management:** Create users, manage balances, and issue API keys.
-* **Real-Time Billing:** Deducts credit per-token (Input/Output) automatically.
-* **Rate Limiting:** Protects your backend with configurable limits (e.g., `60/m`).
-* **Admin Dashboard:** Visual "Mission Control" for monitoring revenue and logs.
-* **Dockerized:** Single command deployment.
+This repository is at **Alpha 1** (internal/self-hosted). See
+`docs/releases/alpha1-readiness.md` for scope and gates, and
+`docs/operations/alpha-runbook.md` for the operator runbook. The legacy v1
+Python app under `app/` is retained for reference only and is not part of v2.
 
-## Quick Start
+## Supported today (Alpha 1)
 
-### 1. Configuration
-Create a `.env` file in the root directory:
-```bash
-SECRET_KEY="your-secret-key"
-MASTER_API_KEY="sk-admin-master-key"
-DATABASE_URL="sqlite+aiosqlite:///./aethergate.db"
-OLLAMA_API_BASE="http://nomnom:11434" # Your backend URL
-```
+- `GET /v1/models`, `GET /v1/models/{model}`
+- `POST /v1/chat/completions` (non-streaming and streaming)
+- `/admin/v1` management API (identity/RBAC, catalog/routing, accounting, queue,
+  observability, OIDC/session, CLI/device flow)
+- Linux CLI (`aethergate`, thin client over `/admin/v1`)
+- Web console (operator + management + accounting + observability)
 
-### 2. Run with Docker (Recommended)
+Not yet: Responses API, embeddings, v1->v2 migration, production HA, external
+metrics/alerting.
 
-```bash
-docker compose up -d
-```
+## Quick start (development)
 
-* **API:** `http://localhost:8000`
-* **Dashboard:** `http://localhost:8501`
-
-### 3. Run Manually (Development)
+Prerequisites: Docker + Docker Compose, Python 3.12, Node 22 (for the web image).
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# 1. Configuration preflight (never prints secrets)
+python -m aethergate.config_check
 
-# Initialize DB
-python manage.py init
+# 2. Build + start the core stack (postgres + api + worker) and migrate
+scripts/dev/v2 build
+scripts/dev/v2 up
+scripts/dev/v2 migrate
+scripts/dev/v2 wait
 
-# Start API
-uvicorn app.main:app --reload
-
-# Start Dashboard
-streamlit run dashboard.py
+# 3. (Optional) web console + deterministic dev OIDC IdP
+scripts/dev/v2 web up
 ```
 
-## Administration (CLI)
+The API binds an ephemeral loopback host port; `scripts/dev/v2 url` prints it.
+`scripts/dev/v2 test` runs the canonical containerized backend suite.
 
-Manage the system using the `manage.py` utility inside the container or venv.
+For a real operator install (secrets, bootstrap, OIDC, TLS expectations,
+backup/restore, upgrade), follow `docs/operations/alpha-runbook.md`.
 
-```bash
-# Create a User with $10.00 credit
-python manage.py add-user <Username> --balance 10.00
+## Repository layout
 
-# Generate an API Key
-python manage.py gen-key <Username> --name "default"
+- `src/aethergate/` — v2 application (API, worker, scheduler, accounting,
+  identity, catalog, observability, contracts, admin/CLI surfaces).
+- `frontend/` — web console (React + TypeScript).
+- `deploy/v2/` — Compose files and the container image definition.
+- `scripts/dev/v2` — development helper.
+- `scripts/ops/v2` — operator recovery tooling (backup/restore/diagnostics).
+- `scripts/ci/` — offline CI/golden-path tooling.
+- `docs/` — architecture, operations, releases, and development documentation.
 
-# Set Price for a Model (e.g., $1.00 per 1M input tokens)
-python manage.py add-model "qwen2.5:3b" "ollama/qwen2.5:3b" --price-in 0.000001 --price-out 0.000002
+## Documentation
 
-# Check User Balance
-python manage.py check-balance <Username>
-```
-
-## Administration (HTTP API)
-
-You can also manage the system remotely using the Admin Endpoints.
-**Header Required:** `x-admin-key: <MASTER_API_KEY>`
-
-* `GET /admin/users` - List all users.
-* `POST /admin/users` - Create a new user.
-* `POST /admin/keys` - Generate a new key for a user.
-* `POST /admin/models` - Update model pricing.
-
-See `API_REFERENCE.md` for full details.
+- Operator runbook: `docs/operations/alpha-runbook.md`
+- Alpha status: `docs/releases/alpha1-readiness.md`
+- Architecture: `docs/architecture/`
+- Development: `docs/development/README.md`
+- Web console: `docs/web-console.md`

@@ -3,6 +3,14 @@
 Container-first development on the nomnom test bed. The v2 stack lives in `deploy/v2/`
 (Compose project `aethergate-v2`), and a single helper wraps the workflow.
 
+Alpha 1 hardening adds: CI under `.github/workflows/`, a deterministic offline
+fake Ollama fixture (`aethergate.testing.fake_ollama`), configuration preflight
+(`python -m aethergate.config_check`), operator backup/restore/diagnostics
+(`scripts/ops/v2`), a safe diagnostics bundle (`python -m aethergate.diagnostics`),
+structured JSON logging with redaction (`aethergate.logging_config`), and the
+offline golden-path tooling (`scripts/ci/`). See
+`docs/operations/alpha-runbook.md` and `docs/releases/alpha1-readiness.md`.
+
 ## One-command workflow
 
 ```bash
@@ -469,6 +477,20 @@ cd frontend && npm run build && npm run lint && npm run test
 
 DB-gated tests use `AETHERGATE_TEST_DATABASE_URL` and skip when it is unset; `scripts/dev/v2 test`
 sets it automatically to a throwaway `aethergate_test` database.
+
+Alpha CI (`.github/workflows/`) additionally enforces, offline and deterministic:
+`ruff check src tests`, `git diff --check`, a repository secret/canary scan
+(`scripts/ci/secret_scan.sh`), empty -> head and populated `0016 -> 0017`
+migrations, `python -m aethergate.config_check`, OpenAPI/generated-client drift,
+the frontend suite, and the offline golden path (fake Ollama + DevOidcIdp +
+real API/worker/web + official OpenAI Python SDK + backup/restore). The live
+nomnom acceptance with real Ollama is run separately via
+`scripts/ci/nomnom_acceptance.sh`.
+
+Operator tooling: `scripts/ops/v2 backup|restore|migrate|diagnostics`
+(PostgreSQL-native backup/restore, safe diagnostics bundle). The diagnostics
+module is also runnable directly: `python -m aethergate.diagnostics --output
+<path>` or `--stdout`.
 
 ## Migrations
 

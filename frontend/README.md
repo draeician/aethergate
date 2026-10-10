@@ -43,7 +43,10 @@ npm run test:e2e      # Playwright browser tests (requires a live stack)
 ```
 
 The Playwright specs in `e2e/` target `WEB_BASE_URL` (default `http://127.0.0.1:8080`) and use the
-deterministic local OIDC provider — no external IdP credentials required.
+deterministic local OIDC provider — no external IdP credentials required. The
+offline CI browser smoke is `e2e/alpha-golden.spec.ts` (deterministic IdP + fake
+Ollama upstream; no Internet/model download). See
+`docs/operations/alpha-runbook.md`.
 
 ## Management UI (AGV2-021)
 
