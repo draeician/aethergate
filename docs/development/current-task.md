@@ -1,10 +1,10 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-022C
+AGV2-022D
 
 ## Title
-Close accounting regression gate and budget-policy disable wake-up
+Remove final browser Decimal coercion from budget headroom
 
 ## WIP Marker — FIRST LOCAL ACTION
 
@@ -13,7 +13,7 @@ Immediately after entering the repository, before pull/read/implementation work,
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-022C
+- task ID: AGV2-022D
 - branch: v2
 - UTC start timestamp
 
@@ -31,28 +31,26 @@ Remove it only after:
 
 ## Why This Task Exists
 
-AGV2-022V successfully closed its two accounting live-proof gaps and surfaced/fixed two real defects:
-- queued budget-window work now wakes when a budget limit is raised;
-- nginx no longer cuts long-held synchronous inference at 60 seconds.
+AGV2-022C closed the required regression gate:
+- backend 506 passed;
+- frontend 74 passed;
+- full Playwright 26 passed, 0 failed, twice;
+- budget-policy limit-raise and disable wake semantics are correct.
 
-The task-specific accounting browser suite is green, but the required full Playwright regression is not:
-- 24 passed;
-- 2 failed.
+Final code review found one remaining violation of AGV2-022's phase-wide Decimal rule:
 
-Both failures are understood and narrow:
-1. management project-create assertion assumes the newly-created project is on page 1, but the list is
-   oldest-first and test data has accumulated beyond one page.
-2. the management credential lifecycle runs multiple real slow-model SDK calls inside Playwright's
-   default 60-second timeout.
+`frontend/src/pages/DashboardPage.tsx` does:
 
-Final review also found one adjacent scheduler correctness hole:
-- disabling an enabled ProjectBudgetPolicy changes admission immediately;
-- the evaluator correctly ignores disabled policies;
-- but queued requests blocked by that policy still retain future `next_eligible_at` metadata and are
-  not re-evaluated until the old window reset.
-- The AGV2-022V fix currently wakes requests only when `limit_amount` increases.
+`const headroom = Number(budget.headroom)`
 
-Close these three items only. Do not start observability or protocol expansion yet.
+and compares `headroom <= 0`.
+
+That is not acceptable because:
+- accounting Decimal values must never pass through JavaScript IEEE-754 `Number`;
+- `BudgetStatusRead.headroom` is signed `Money` and may be negative after overage;
+- the browser should make only an exact sign/zero classification, not a lossy numeric conversion.
+
+The accounting feature pages are already Decimal-safe. Close this final dashboard leak only.
 
 ## Recovery
 
@@ -65,116 +63,104 @@ If context is compacted/restarted/uncertain:
 6. inspect git status/history;
 7. continue from repository state.
 
-## 1. Wake budget-blocked queued requests when a policy is disabled
+## 1. Add exact signed-Decimal comparison helper
 
-In `accounting/admin.py::update_project_budget_policy`, wake requests blocked by a policy when the
-mutation makes that policy less restrictive.
+Extend `frontend/src/lib/decimal.ts` with a helper that can classify a signed fixed-point Decimal
+string without using:
+- `Number()`;
+- `parseFloat()`;
+- bigint conversion that would discard scale/format semantics;
+- any third-party binary floating point path.
 
-Required wake conditions:
-- `new_limit > existing.limit_amount`; OR
-- `existing.enabled is True` and `new_enabled is False`.
+Preferred API:
+- `isDecimalNonPositive(value: string): boolean`
+or
+- `compareDecimalToZero(value: string): -1 | 0 | 1`.
 
-Use the existing scoped repository primitive:
-`clear_budget_wait_metadata_for_policy`.
+Requirements:
+- accepts canonical backend signed Decimal strings;
+- handles optional leading `-`;
+- handles zero forms such as `0`, `0.0`, `0.000000000000`, and negative zero defensively;
+- correctly handles arbitrarily awkward valid values within the backend Numeric(24,12) contract;
+- rejects or safely handles malformed values rather than silently coercing.
 
-Do not clear wait metadata for:
-- unchanged policy;
-- name-only edit;
-- limit decrease;
-- disabled -> enabled;
-unless another established semantic explicitly requires it.
+Do not weaken the existing exact-string rules.
 
-The clear primitive must remain scoped to:
-- state = queued;
-- wait_reason = budget_window_exhausted;
-- wait_limit_id = this policy.
+## 2. Remove Number(headroom) from DashboardPage
 
-Worker re-evaluation remains authoritative; if another budget policy still blocks, the worker will
-reapply correct wait metadata.
+Replace the dashboard budget exhausted check with the exact Decimal helper.
 
-## 2. Deterministic disable-unblock regression
+Semantics:
+- `blocked = budget.enabled && headroom <= 0`;
+- positive exact Decimal => "ok";
+- zero => "exhausted";
+- negative => "exhausted";
+- disabled budget => not marked exhausted even when headroom <= 0.
 
-Add a deterministic accounting/scheduler test:
+Keep rendering the exact server-returned headroom string verbatim.
 
-1. request price = P;
-2. enabled budget limit allows first request but not second;
-3. first request succeeds and commits P;
-4. second request becomes queued with `budget_window_exhausted`;
-5. disable the same policy through the real accounting admin/service update path if practical;
-6. prove its wait metadata is cleared;
-7. prove the SAME request_id becomes eligible and succeeds;
-8. exactly one new UsageRecord and one signed negative usage_debit;
-9. no duplicate settlement.
+Do not recompute headroom from limit/committed/reserved.
 
-Prefer exercising `update_project_budget_policy` itself so the regression covers the actual product
-mutation path rather than directly calling the repository wake helper.
+## 3. Decimal canary tests
 
-Preserve all authorization and audit semantics.
+Extend `frontend/src/lib/decimal.test.ts` with signed comparison cases including at minimum:
 
-## 3. Fix management project-list pagination E2E
+- `0`;
+- `0.000000000000`;
+- `-0`;
+- `-0.000000000000`;
+- `0.000000000001`;
+- `-0.000000000001`;
+- `123456789.123456789012`;
+- `-123456789.123456789012`.
 
-In `frontend/e2e/management-rbac.spec.ts`:
-- after creating a uniquely named project through the UI, do not assume it is on page 1;
-- use the existing robust `goToLastPage` helper or an equally stable UI pagination approach;
-- assert the newly-created project through the browser UI;
-- do not fetch all projects and substitute a direct API assertion for the UI proof.
+Also test malformed strings appropriate to the helper's contract.
 
-The test must remain robust as disposable project count grows well beyond 20.
+No expected result may be derived with `Number` or `parseFloat` inside the implementation.
 
-If provider list accumulation can create the same failure mode, make that assertion pagination-safe too
-rather than waiting for the next run to fail.
+## 4. Dashboard component regression
 
-## 4. Fix management credential lifecycle timeout
+Extend `DashboardPage.test.tsx` with project-scoped budget-status cases.
 
-The credential lifecycle test uses multiple official SDK calls against slow Ollama generation.
+Prove:
+- exact tiny positive headroom => status "ok";
+- zero headroom => "exhausted";
+- exact tiny negative headroom => "exhausted";
+- very large precise positive/negative values retain their exact rendered text;
+- disabled policy is not marked exhausted solely due to non-positive headroom.
 
-Add an explicit test timeout consistent with other live SDK proofs, e.g.:
-`test.setTimeout(240_000)`
-or the scoped equivalent.
+Use raw string values that expose IEEE-754 coercion risk.
 
-Do not:
-- remove SDK calls;
-- replace them with raw fetch;
-- weaken assertions;
-- increase global timeout for every cheap browser test unless necessary.
+## 5. Search for remaining runtime money coercions
 
-Keep official OpenAI Python SDK, bypass=false, old/new/revoked key assertions unchanged.
+Inspect the v2 frontend runtime accounting surfaces:
+- DashboardPage;
+- accounting feature pages;
+- shared accounting helpers.
 
-## 5. Full Playwright suite must be green
+Prove no monetary Decimal field is passed through:
+- `Number(...)`;
+- `parseFloat(...)`;
+- `.toFixed(...)`.
 
-This is the gating criterion that AGV2-022V did not satisfy.
+Integer fields such as:
+- unit_scale;
+- window_seconds;
+- token/request counts;
+- slot counts;
+may still use normal integer conversion where appropriate.
 
-Run the complete browser suite, not just accounting.spec.ts.
+Document the scan result in the handoff.
 
-Expected after fixes:
-- zero failed;
-- zero unexpected flaky failures.
-
-Record the exact count.
-
-Do not call the task complete if any Playwright test fails, even if it is described as pre-existing or
-unrelated.
-
-A retry-only pass is not enough for a deterministic pagination defect; fix the test.
-
-## 6. Re-verify AGV2-022V accounting proofs
-
-Re-run:
-- same-request `budget_window_exhausted` unblock live browser/SDK proof;
-- released pre-dispatch reservation browser proof.
-
-These must remain green after the scheduler wake semantics change.
-
-No need to rebuild or expand the accounting UI.
-
-## 7. Regression
+## 6. Regression gate
 
 Run:
-- full backend containerized suite; baseline **505**;
+- full backend containerized suite; baseline **506**;
 - frontend unit/component suite; baseline **74**;
-- FULL Playwright suite;
+- FULL Playwright suite; baseline **26**;
 - npm build;
 - npm lint;
+- `npx tsc -b --noEmit`;
 - OpenAPI/client drift;
 - ruff check src tests;
 - git diff --check;
@@ -185,51 +171,45 @@ No migration expected.
 
 Do not modify migrations 0001-0016.
 
-## 8. Handoff correction
+## 7. Handoff
 
-Update docs/development/agent-handoff.md.
+Update docs/development/agent-handoff.md truthfully.
 
-Do not leave AGV2-022V described as fully complete while recording a failed required regression gate.
-
-After this task passes, record:
-- AGV2-022/022V/022C accounting phase closed;
-- budget limit raise wake semantics;
-- budget policy disable wake semantics;
-- deterministic same-request proofs;
-- project pagination E2E fix;
-- lifecycle timeout fix;
-- full Playwright exact green count;
-- backend/frontend counts;
-- accounting live proofs still green;
-- build/lint/OpenAPI/SDK results;
+Record:
+- final Decimal coercion found;
+- exact helper semantics;
+- dashboard behavior for positive/zero/negative headroom;
+- runtime frontend coercion scan;
+- backend/frontend/Playwright counts;
+- build/lint/typecheck/OpenAPI results;
+- SDK regression;
 - migration head 0016/no migration;
 - WIP marker lifecycle;
-- exactly one recommended next step.
+- accounting phase closed only after this correction;
+- exactly one recommended next step: observability metrics (queue/TTFT percentiles, upstream health,
+  retry rate).
 
-## 9. No new product scope
+## No new product scope
 
 Do not implement:
-- observability metrics;
+- observability yet;
+- new accounting features;
 - Responses API;
 - embeddings;
-- accounting feature expansion;
 - v1 migration;
-- broad frontend redesign.
+- broad visual redesign.
 
 ## Commit and Push
 
 Suggested commit:
-`fix(web): close accounting regression gate`
-
-A separate narrow backend commit for disable wake semantics is acceptable.
+`fix(web): keep budget headroom decimal-safe`
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to commit/push.
 
 The task is complete only when:
-- backend/frontend regressions are green;
-- the FULL Playwright suite is green with zero failures;
-- accounting same-request and released-reservation live proofs remain green;
+- no runtime monetary Decimal coercion remains in the reviewed frontend accounting surfaces;
+- backend/frontend/full-Playwright regressions are green;
 - origin/v2 contains the final work and handoff;
 - local `.aethergate-wip` is removed only after final remote verification.
