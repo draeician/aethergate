@@ -1192,10 +1192,16 @@ class SchedulingService:
                 usage=result.usage,
             )
         except (ProviderError, UnsupportedProvider, SecretResolutionError) as exc:
-            if isinstance(exc, ProviderError):
+            upstream_error = isinstance(exc, ProviderError)
+            status_code = exc.status_code if upstream_error else None
+            if upstream_error:
                 await self._apply_cooldown(claim, exc)
             await self._settle(
-                claim, state=RequestState.FAILED, error_code=_sanitize_error_code(_error_hint(exc))
+                claim,
+                state=RequestState.FAILED,
+                error_code=_sanitize_error_code(_error_hint(exc)),
+                upstream_error=upstream_error,
+                upstream_status_code=status_code,
             )
         finally:
             heartbeat.cancel()
@@ -1209,6 +1215,7 @@ class SchedulingService:
         seq = 0
         terminal_state = RequestState.SUCCEEDED
         usage: Usage | None = None
+        first_token_recorded = False
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
         try:
             async for chunk in claim.prepared.adapter.stream(
@@ -1219,6 +1226,13 @@ class SchedulingService:
                     break
                 if chunk.usage is not None and chunk.usage.total_tokens > 0:
                     usage = chunk.usage
+                if not first_token_recorded and chunk.content:
+                    # First non-empty provider content chunk: durably transition
+                    # request+attempt dispatched -> streaming and record TTFT once.
+                    # Only the presence of content is inspected; it is never
+                    # stored or logged by this transition.
+                    await self._mark_first_token(claim)
+                    first_token_recorded = True
                 seq += 1
                 event = serialize_event(chunk.content, chunk.finish_reason, chunk.usage)
                 await self._append_event(claim.request_id, seq, event)
@@ -1230,10 +1244,16 @@ class SchedulingService:
                 claim, state=terminal_state, result_encrypted=None, usage=usage
             )
         except (ProviderError, UnsupportedProvider, SecretResolutionError) as exc:
-            if isinstance(exc, ProviderError):
+            upstream_error = isinstance(exc, ProviderError)
+            status_code = exc.status_code if upstream_error else None
+            if upstream_error:
                 await self._apply_cooldown(claim, exc)
             await self._settle(
-                claim, state=RequestState.FAILED, error_code=_sanitize_error_code(_error_hint(exc))
+                claim,
+                state=RequestState.FAILED,
+                error_code=_sanitize_error_code(_error_hint(exc)),
+                upstream_error=upstream_error,
+                upstream_status_code=status_code,
             )
         finally:
             heartbeat.cancel()
@@ -1241,6 +1261,28 @@ class SchedulingService:
                 await heartbeat
             except asyncio.CancelledError:
                 pass
+
+    async def _mark_first_token(self, claim: ClaimedWork) -> bool:
+        """Record the streaming first-token transition (idempotent, fenced)."""
+        now = utcnow()
+        async with self._session_factory() as session:
+            async with session.begin():
+                try:
+                    return await scheduler_repository.mark_first_token(
+                        session,
+                        request_id=claim.request_id,
+                        attempt_id=claim.attempt_id,
+                        fencing_token=claim.fencing_token,
+                        now=now,
+                    )
+                except SchedulerInvariantError:
+                    logger.exception(
+                        "first-token transition invariant broken for request=%s "
+                        "attempt=%s",
+                        claim.request_id,
+                        claim.attempt_id,
+                    )
+                    raise
 
     async def _heartbeat_loop(self, claim: ClaimedWork) -> None:
         """Renew ownership for in-flight work until execution terminates."""
@@ -1290,6 +1332,8 @@ class SchedulingService:
         error_code: str | None = None,
         upstream_request_id: str | None = None,
         usage: Usage | None = None,
+        upstream_error: bool = False,
+        upstream_status_code: int | None = None,
     ) -> None:
         """Settle to a terminal state, overriding to ``expired`` past lifetime.
 
@@ -1308,6 +1352,8 @@ class SchedulingService:
                     upstream_request_id = None
                     error_code = "lifetime_exceeded"
                     usage = None
+                    upstream_error = False
+                    upstream_status_code = None
                 usage_total = (
                     usage.total_tokens
                     if usage is not None and usage.total_tokens > 0
@@ -1324,6 +1370,8 @@ class SchedulingService:
                     result_encrypted=result_encrypted,
                     error_code=error_code,
                     upstream_request_id=upstream_request_id,
+                    upstream_error=upstream_error,
+                    upstream_status_code=upstream_status_code,
                 )
                 if settled and claim.quota_group_id is not None:
                     await scheduler_repository.settle_token_quota(

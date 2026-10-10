@@ -83,6 +83,11 @@ export type BudgetReservationRead = Schemas["BudgetReservationRead"];
 export type UsageRecordRead = Schemas["UsageRecordRead"];
 export type LedgerEntryRead = Schemas["LedgerEntryRead"];
 export type AuditEventRead = Schemas["AuditEventRead"];
+export type ObservabilitySummaryRead = Schemas["ObservabilitySummaryRead"];
+export type ObservabilityWindowRead = Schemas["ObservabilityWindowRead"];
+export type PercentileMetricsRead = Schemas["PercentileMetricsRead"];
+export type RetryMetricsRead = Schemas["RetryMetricsRead"];
+export type UpstreamHealthRead = Schemas["UpstreamHealthRead"];
 
 export interface Page<T> {
   items: T[];
@@ -663,6 +668,22 @@ export const api = {
 
   getAuditEvent(eventId: string): Promise<AuditEventRead> {
     return apiRequest<AuditEventRead>(`/admin/v1/audit-events/${eventId}`);
+  },
+
+  // -- observability (queue wait / TTFT / retry / upstream health) -------------
+
+  observabilitySummary(
+    query: Query = {},
+  ): Promise<ObservabilitySummaryRead> {
+    return apiRequest<ObservabilitySummaryRead>("/admin/v1/observability/summary", {
+      query,
+    });
+  },
+
+  observabilityUpstreams(query: Query = {}): Promise<Page<UpstreamHealthRead>> {
+    return apiRequest<Page<UpstreamHealthRead>>("/admin/v1/observability/upstreams", {
+      query,
+    });
   },
 };
 

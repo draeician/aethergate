@@ -382,6 +382,40 @@ export interface paths {
         patch: operations["update_model_alias_admin_v1_model_aliases__alias_id__patch"];
         trace?: never;
     };
+    "/admin/v1/observability/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Summary */
+        get: operations["get_summary_admin_v1_observability_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/observability/upstreams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Upstreams */
+        get: operations["list_upstreams_admin_v1_observability_upstreams_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/oidc/identities": {
         parameters: {
             query?: never;
@@ -1832,6 +1866,38 @@ export interface components {
              */
             owned_by: string;
         };
+        /**
+         * ObservabilitySummaryRead
+         * @description Queue-wait, streaming-TTFT, and retry metrics for the caller's scope.
+         *
+         *     Queue wait is ``earliest attempt started_at - queued_at``. TTFT (streaming
+         *     only) is ``first_token_at - started_at``. No prompt/completion/provider
+         *     content is ever included.
+         */
+        ObservabilitySummaryRead: {
+            queue_wait: components["schemas"]["PercentileMetricsRead"];
+            retry: components["schemas"]["RetryMetricsRead"];
+            ttft: components["schemas"]["PercentileMetricsRead"];
+            window: components["schemas"]["ObservabilityWindowRead"];
+        };
+        /**
+         * ObservabilityWindowRead
+         * @description The bounded rolling window a metric read was computed over.
+         */
+        ObservabilityWindowRead: {
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /** Window Seconds */
+            window_seconds: number;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+        };
         /** Page[ApiCredentialRead] */
         Page_ApiCredentialRead_: {
             /** Items */
@@ -2063,6 +2129,17 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** Page[UpstreamHealthRead] */
+        Page_UpstreamHealthRead_: {
+            /** Items */
+            items: components["schemas"]["UpstreamHealthRead"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
         /** Page[UsageRecordRead] */
         Page_UsageRecordRead_: {
             /** Items */
@@ -2073,6 +2150,20 @@ export interface components {
             offset: number;
             /** Total */
             total: number;
+        };
+        /**
+         * PercentileMetricsRead
+         * @description p50/p95/p99 plus sample count. Percentiles are NULL with no samples.
+         */
+        PercentileMetricsRead: {
+            /** P50 Ms */
+            p50_ms?: number | null;
+            /** P95 Ms */
+            p95_ms?: number | null;
+            /** P99 Ms */
+            p99_ms?: number | null;
+            /** Sample Count */
+            sample_count: number;
         };
         /** PricePolicyCreate */
         PricePolicyCreate: {
@@ -2592,6 +2683,23 @@ export interface components {
          */
         ResourceScopeType: "deployment" | "project";
         /**
+         * RetryMetricsRead
+         * @description Retry metrics for the observation cohort.
+         *
+         *     A retry is an additional ``ExecutionAttempt`` for the same gateway request.
+         *     ``request_retry_rate`` is NULL when there are no attempted requests.
+         */
+        RetryMetricsRead: {
+            /** Attempted Requests */
+            attempted_requests: number;
+            /** Request Retry Rate */
+            request_retry_rate?: number | null;
+            /** Retried Requests */
+            retried_requests: number;
+            /** Retry Attempts */
+            retry_attempts: number;
+        };
+        /**
          * Role
          * @description Built-in administrative roles for the control plane.
          *
@@ -2723,6 +2831,39 @@ export interface components {
              * @default false
              */
             include_usage: boolean;
+        };
+        /**
+         * UpstreamHealthRead
+         * @description Passive, factual per-endpoint upstream health (deployment-scoped).
+         *
+         *     ``upstream_success_rate`` is NULL when there is no definitive upstream
+         *     evidence. No active probe or synthetic health percentage is produced.
+         */
+        UpstreamHealthRead: {
+            /** Ambiguous Attempts */
+            ambiguous_attempts: number;
+            /** Cooldown Until */
+            cooldown_until?: string | null;
+            /** Endpoint Id */
+            endpoint_id: string;
+            /** Endpoint Name */
+            endpoint_name: string;
+            /** Last Failure At */
+            last_failure_at?: string | null;
+            /** Last Success At */
+            last_success_at?: string | null;
+            /** Provider Account Id */
+            provider_account_id?: string | null;
+            /** Rate Limited Attempts */
+            rate_limited_attempts: number;
+            /** Sample Count */
+            sample_count: number;
+            /** Succeeded Attempts */
+            succeeded_attempts: number;
+            /** Upstream Failed Attempts */
+            upstream_failed_attempts: number;
+            /** Upstream Success Rate */
+            upstream_success_rate?: number | null;
         };
         /** UsageRecordRead */
         UsageRecordRead: {
@@ -3586,6 +3727,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelAliasRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_summary_admin_v1_observability_summary_get: {
+        parameters: {
+            query?: {
+                window_seconds?: number | null;
+                project_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ObservabilitySummaryRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_upstreams_admin_v1_observability_upstreams_get: {
+        parameters: {
+            query?: {
+                window_seconds?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_UpstreamHealthRead_"];
                 };
             };
             /** @description Validation Error */

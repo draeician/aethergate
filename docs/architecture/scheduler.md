@@ -274,6 +274,24 @@ budget conservatively without fabricating usage.
 Schema: migration `0015` adds `endpoints.operational_state` with `active` server default and a CHECK
 `IN ('active','paused','draining')`.
 
+## Observability metadata (AGV2-023)
+
+Migration `0017` extends `execution_attempts` with safe, non-content observability
+metadata: `first_token_at` (time the first non-empty streaming content chunk
+arrived), `upstream_error` (true only for a terminal `ProviderError`), and
+`upstream_status_code` (sanitized numeric status when reliably known). See
+`docs/architecture/observability.md` for metric definitions.
+
+`run_stream` calls `scheduler/repository.py::mark_first_token` on the first
+non-empty `chunk.content`, atomically moving the request and its attempt
+`dispatched -> streaming` and setting `first_token_at` exactly once (fenced and
+idempotent; never fires for a content-less chunk; never persists content).
+Terminal settlement persists `upstream_error`/`upstream_status_code` for a
+`ProviderError`; `UnsupportedProvider`/`SecretResolutionError`/config failures
+stay `upstream_error=false`. No transaction stays open while waiting for
+inference, and this transition observes no prompt/completion content beyond the
+presence of a content chunk.
+
 ## Identity revalidation before dispatch (AGV2-012)
 
 Before the worker resolves the route or reserves any capacity, it re-validates the request's

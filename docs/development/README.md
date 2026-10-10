@@ -444,6 +444,17 @@ are signed (`usage_debit` negative); a released pre-dispatch reservation renders
 The live pricing/immutable-snapshot and budget block/unblock criteria are demonstrated end-to-end by
 `frontend/e2e/accounting.spec.ts` (official OpenAI Python SDK, inference-auth bypass = false).
 
+## Operational observability (AGV2-023)
+
+The `/admin/v1/observability` read models provide queue-wait, streaming-TTFT,
+retry-rate, and passive upstream-health telemetry derived from durable scheduler
+facts (see `docs/architecture/observability.md`). Migration `0017` adds the
+`execution_attempts` first-token/upstream-outcome metadata. The dashboard replaces
+the former "Not yet instrumented" placeholders with these metrics and a
+15m/1h/24h window selector; no-sample states render "No samples" (never a fake
+`0ms`/`100%`). Backend coverage lives in `tests/test_observability.py`; the
+migration is covered by `tests/test_migrations.py::test_migration_0016_to_0017`.
+
 ## Tests
 ```bash
 # host (offline; DB-gated tests skip)
@@ -485,6 +496,9 @@ transactions); `0013` binds the OIDC login transaction to the initiating browser
 `endpoints.operational_state` (`active` default, CHECK `active|paused|draining`) for the queue operator
 control plane; `0016` adds the device-flow and CLI-session tables (`device_authorizations` with a
 one-way `device_code_hash` verifier and one-time/expiry metadata, and `cli_sessions` with a one-way
-`token_hash` verifier, expiry, and revocation).
+`token_hash` verifier, expiry, and revocation); `0017` adds execution-attempt
+observability metadata (`first_token_at`, `upstream_error`, `upstream_status_code`)
+plus the justified rolling-window indexes on `execution_attempts.started_at`,
+`(execution_attempts.endpoint_id, finished_at)`, and `inference_requests.queued_at`.
 Schema is applied
 only via `scripts/dev/v2 migrate`; startup never calls `create_all()`.

@@ -1548,6 +1548,59 @@
         "title": "ModelObject",
         "type": "object"
       },
+      "ObservabilitySummaryRead": {
+        "additionalProperties": false,
+        "description": "Queue-wait, streaming-TTFT, and retry metrics for the caller's scope.\n\nQueue wait is ``earliest attempt started_at - queued_at``. TTFT (streaming\nonly) is ``first_token_at - started_at``. No prompt/completion/provider\ncontent is ever included.",
+        "properties": {
+          "queue_wait": {
+            "$ref": "#/components/schemas/PercentileMetricsRead"
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryMetricsRead"
+          },
+          "ttft": {
+            "$ref": "#/components/schemas/PercentileMetricsRead"
+          },
+          "window": {
+            "$ref": "#/components/schemas/ObservabilityWindowRead"
+          }
+        },
+        "required": [
+          "window",
+          "queue_wait",
+          "ttft",
+          "retry"
+        ],
+        "title": "ObservabilitySummaryRead",
+        "type": "object"
+      },
+      "ObservabilityWindowRead": {
+        "additionalProperties": false,
+        "description": "The bounded rolling window a metric read was computed over.",
+        "properties": {
+          "window_end": {
+            "format": "date-time",
+            "title": "Window End",
+            "type": "string"
+          },
+          "window_seconds": {
+            "title": "Window Seconds",
+            "type": "integer"
+          },
+          "window_start": {
+            "format": "date-time",
+            "title": "Window Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "window_start",
+          "window_end",
+          "window_seconds"
+        ],
+        "title": "ObservabilityWindowRead",
+        "type": "object"
+      },
       "Page_ApiCredentialRead_": {
         "additionalProperties": false,
         "properties": {
@@ -2220,6 +2273,38 @@
         "title": "Page[SecretRefRead]",
         "type": "object"
       },
+      "Page_UpstreamHealthRead_": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UpstreamHealthRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "title": "Page[UpstreamHealthRead]",
+        "type": "object"
+      },
       "Page_UsageRecordRead_": {
         "additionalProperties": false,
         "properties": {
@@ -2250,6 +2335,54 @@
           "total"
         ],
         "title": "Page[UsageRecordRead]",
+        "type": "object"
+      },
+      "PercentileMetricsRead": {
+        "additionalProperties": false,
+        "description": "p50/p95/p99 plus sample count. Percentiles are NULL with no samples.",
+        "properties": {
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "p99_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99 Ms"
+          },
+          "sample_count": {
+            "title": "Sample Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sample_count"
+        ],
+        "title": "PercentileMetricsRead",
         "type": "object"
       },
       "PricePolicyCreate": {
@@ -3963,6 +4096,42 @@
         "title": "ResourceScopeType",
         "type": "string"
       },
+      "RetryMetricsRead": {
+        "additionalProperties": false,
+        "description": "Retry metrics for the observation cohort.\n\nA retry is an additional ``ExecutionAttempt`` for the same gateway request.\n``request_retry_rate`` is NULL when there are no attempted requests.",
+        "properties": {
+          "attempted_requests": {
+            "title": "Attempted Requests",
+            "type": "integer"
+          },
+          "request_retry_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Retry Rate"
+          },
+          "retried_requests": {
+            "title": "Retried Requests",
+            "type": "integer"
+          },
+          "retry_attempts": {
+            "title": "Retry Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attempted_requests",
+          "retried_requests",
+          "retry_attempts"
+        ],
+        "title": "RetryMetricsRead",
+        "type": "object"
+      },
       "Role": {
         "description": "Built-in administrative roles for the control plane.\n\n``system_admin`` is deployment-wide; ``project_admin`` and ``project_viewer``\nare scoped to exactly one project (their ``resource_id``). Custom-role CRUD\nis deferred, but the model is designed so new roles can be added without a\nrewrite of the authorization service.",
         "enum": [
@@ -4376,6 +4545,109 @@
           }
         },
         "title": "StreamOptions",
+        "type": "object"
+      },
+      "UpstreamHealthRead": {
+        "additionalProperties": false,
+        "description": "Passive, factual per-endpoint upstream health (deployment-scoped).\n\n``upstream_success_rate`` is NULL when there is no definitive upstream\nevidence. No active probe or synthetic health percentage is produced.",
+        "properties": {
+          "ambiguous_attempts": {
+            "title": "Ambiguous Attempts",
+            "type": "integer"
+          },
+          "cooldown_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cooldown Until"
+          },
+          "endpoint_id": {
+            "title": "Endpoint Id",
+            "type": "string"
+          },
+          "endpoint_name": {
+            "title": "Endpoint Name",
+            "type": "string"
+          },
+          "last_failure_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Failure At"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "provider_account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Account Id"
+          },
+          "rate_limited_attempts": {
+            "title": "Rate Limited Attempts",
+            "type": "integer"
+          },
+          "sample_count": {
+            "title": "Sample Count",
+            "type": "integer"
+          },
+          "succeeded_attempts": {
+            "title": "Succeeded Attempts",
+            "type": "integer"
+          },
+          "upstream_failed_attempts": {
+            "title": "Upstream Failed Attempts",
+            "type": "integer"
+          },
+          "upstream_success_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Success Rate"
+          }
+        },
+        "required": [
+          "endpoint_id",
+          "endpoint_name",
+          "sample_count",
+          "succeeded_attempts",
+          "upstream_failed_attempts",
+          "ambiguous_attempts",
+          "rate_limited_attempts"
+        ],
+        "title": "UpstreamHealthRead",
         "type": "object"
       },
       "UsageRecordRead": {
@@ -6000,6 +6272,122 @@
         "summary": "Update Model Alias",
         "tags": [
           "admin-catalog"
+        ]
+      }
+    },
+    "/admin/v1/observability/summary": {
+      "get": {
+        "operationId": "get_summary_admin_v1_observability_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "window_seconds",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Window Seconds"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservabilitySummaryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Summary",
+        "tags": [
+          "admin-observability"
+        ]
+      }
+    },
+    "/admin/v1/observability/upstreams": {
+      "get": {
+        "operationId": "list_upstreams_admin_v1_observability_upstreams_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "window_seconds",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Window Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_UpstreamHealthRead_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Upstreams",
+        "tags": [
+          "admin-observability"
         ]
       }
     },

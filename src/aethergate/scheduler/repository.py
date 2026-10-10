@@ -335,6 +335,8 @@ async def settle(
     result_encrypted: bytes | None = None,
     error_code: str | None = None,
     upstream_request_id: str | None = None,
+    upstream_error: bool = False,
+    upstream_status_code: int | None = None,
 ) -> bool:
     """Atomically settle request+attempt to a terminal state and release capacity.
 
@@ -345,6 +347,10 @@ async def settle(
     reservation is released only after both rows transitioned; if the attempt
     fails to transition, a :class:`SchedulerInvariantError` is raised so the
     transaction rolls back rather than leaving a half-settled request.
+
+    ``upstream_error``/``upstream_status_code`` record safe provider-outcome
+    classification on the attempt in the same atomic transition (numeric status
+    only; never provider text/headers/bodies).
     """
     request_result = await session.execute(
         update(models.InferenceRequest)
@@ -365,6 +371,16 @@ async def settle(
     if request_result.rowcount != 1:
         return False
 
+    attempt_values: dict[str, object] = {
+        "state": state,
+        "finished_at": finished_at,
+        "upstream_request_id": upstream_request_id,
+        "error_code": error_code,
+    }
+    if upstream_error:
+        attempt_values["upstream_error"] = True
+    if upstream_status_code is not None:
+        attempt_values["upstream_status_code"] = upstream_status_code
     attempt_result = await session.execute(
         update(models.ExecutionAttempt)
         .where(
@@ -372,12 +388,7 @@ async def settle(
             models.ExecutionAttempt.fencing_token == fencing_token,
             models.ExecutionAttempt.state.in_(["dispatched", "streaming"]),
         )
-        .values(
-            state=state,
-            finished_at=finished_at,
-            upstream_request_id=upstream_request_id,
-            error_code=error_code,
-        )
+        .values(**attempt_values)
     )
     if attempt_result.rowcount != 1:
         raise SchedulerInvariantError(
@@ -506,6 +517,107 @@ async def mark_dispatched(
             f"did not transition"
         )
     return "dispatched"
+
+
+async def mark_first_token(
+    session: AsyncSession,
+    *,
+    request_id: str,
+    attempt_id: str,
+    fencing_token: int,
+    now: datetime,
+) -> bool:
+    """Atomically record the first non-empty streaming content chunk.
+
+    Advances both the request and its execution attempt ``dispatched ->
+    streaming`` and sets ``ExecutionAttempt.first_token_at`` exactly once, but
+    only when both rows are still owned by ``fencing_token`` and active
+    ``dispatched``/``streaming``. Returns ``True`` when this call recorded the
+    timestamp for the first time, and ``False`` when the transition does not
+    apply (already streaming with a timestamp, terminal/foreign ownership, or a
+    stale fence) — a late/stale worker can never overwrite another attempt or a
+    terminal state, and a repeated call is idempotent.
+
+    The request's own ``state`` moves to ``streaming``; a request already
+    ``streaming`` with ``first_token_at`` set is a no-op. No prompt/completion
+    content or provider secret material is written here.
+    """
+    request_result = await session.execute(
+        update(models.InferenceRequest)
+        .where(
+            models.InferenceRequest.id == request_id,
+            models.InferenceRequest.fencing_token == fencing_token,
+            models.InferenceRequest.state.in_(
+                [RequestState.DISPATCHED, RequestState.STREAMING]
+            ),
+        )
+        .values(state=RequestState.STREAMING)
+    )
+    if request_result.rowcount != 1:
+        return False
+
+    attempt_result = await session.execute(
+        update(models.ExecutionAttempt)
+        .where(
+            models.ExecutionAttempt.id == attempt_id,
+            models.ExecutionAttempt.fencing_token == fencing_token,
+            models.ExecutionAttempt.state.in_(["dispatched", "streaming"]),
+            models.ExecutionAttempt.first_token_at.is_(None),
+        )
+        .values(state="streaming", first_token_at=now)
+    )
+    if attempt_result.rowcount == 1:
+        return True
+
+    # No attempt row advanced. It is either an idempotent repeat (already
+    # streaming with a recorded timestamp) or a real coupled-invariant break.
+    existing = (
+        await session.execute(
+            select(models.ExecutionAttempt).where(
+                models.ExecutionAttempt.id == attempt_id
+            )
+        )
+    ).scalar_one_or_none()
+    if (
+        existing is not None
+        and existing.fencing_token == fencing_token
+        and existing.state == "streaming"
+        and existing.first_token_at is not None
+    ):
+        return False
+    raise SchedulerInvariantError(
+        f"request {request_id} marked streaming but attempt {attempt_id} "
+        f"did not record first_token_at"
+    )
+
+
+async def record_attempt_upstream_outcome(
+    session: AsyncSession,
+    *,
+    attempt_id: str,
+    upstream_error: bool,
+    upstream_status_code: int | None,
+) -> None:
+    """Persist safe provider outcome classification on an execution attempt.
+
+    ``upstream_error`` is true only for a terminal ``ProviderError``; secret/
+    configuration/unsupported-provider failures pass ``False``. Only the
+    sanitized numeric ``upstream_status_code`` is stored — never a header, URL,
+    provider response body, or exception text. Idempotent: a later call may
+    upgrade ``upstream_error`` to true but never clears a recorded status.
+    """
+    values: dict[str, object] = {}
+    if upstream_error:
+        values["upstream_error"] = True
+    if upstream_status_code is not None:
+        values["upstream_status_code"] = upstream_status_code
+    if not values:
+        return
+    await session.execute(
+        update(models.ExecutionAttempt)
+        .where(models.ExecutionAttempt.id == attempt_id)
+        .values(**values)
+    )
 
 
 async def renew_lease(

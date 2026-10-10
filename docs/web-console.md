@@ -171,13 +171,29 @@ navigates directly to a catalog route or calls a catalog/queue-deployment mutati
 | Endpoint slots | `GET /admin/v1/queue/endpoints` | `system_admin` only |
 | Quota/cooldown | `GET /admin/v1/queue/quota-status` | `system_admin` only |
 | Budget headroom | `GET /admin/v1/projects/{id}/budget-status` | project-scoped roles |
+| Queue wait / streaming TTFT / retry | `GET /admin/v1/observability/summary` | scoped to the caller's authorized project(s) |
+| Upstream health | `GET /admin/v1/observability/upstreams` | `system_admin` only |
 
-### Not-yet-instrumented metrics
+### Operational observability metrics
 
-The product spec also calls for queue/TTFT percentiles, upstream health, and retry rate. The backend
-does not yet expose these authoritatively, so the dashboard renders them explicitly as
-"Not yet instrumented" — it never fabricates zeros from unrelated fields. These are the recommended
-backend observability follow-up.
+The dashboard renders authoritative operational metrics from the durable scheduler
+facts (see `docs/architecture/observability.md` for the exact definitions):
+
+- **Queue wait** — admission delay (`earliest attempt start − queued`); shows
+  p50/p95/p99 and sample count.
+- **Streaming TTFT** — dispatch-to-first-token (streaming only, `first_token_at −
+  attempt started_at`); the label states it is streaming/dispatch-to-first-token.
+- **Retry rate** — request retry rate plus retried/attempted counts and the
+  retry-attempt total (additional attempts for the same gateway request).
+- **Upstream health** (`system_admin`) — one compact card per endpoint with a
+  passive success rate, successes, upstream failures, ambiguous attempts, 429
+  count, last success/failure, and cooldown.
+
+A 15m / 1h / 24h window selector drives the summary/upstream reads. When there is
+no sample the console renders "No samples" — it never fabricates a `0ms`
+percentile or a `100%` success rate. Project roles see only their own
+queue/TTFT/retry aggregate and never request or render deployment endpoint
+health.
 
 ## Development and deployment
 

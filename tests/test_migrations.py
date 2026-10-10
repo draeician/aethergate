@@ -497,3 +497,50 @@ def test_migration_0015_to_0016() -> None:
         assert "browser_sessions" in tables
     finally:
         asyncio.run(drop_database(url))
+
+
+def test_migration_0016_to_0017() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1617")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0016", env=env)
+        assert {
+            "first_token_at",
+            "upstream_error",
+            "upstream_status_code",
+        } & _columns(url, "execution_attempts") == set()
+        assert "ix_execution_attempts_endpoint_finished" not in _indexes(
+            url, "execution_attempts"
+        )
+
+        _run_alembic("upgrade", "head", env=env)
+        cols = _columns(url, "execution_attempts")
+        assert {"first_token_at", "upstream_error", "upstream_status_code"} <= cols
+        assert "first_token_at" in _nullable_columns(url, "execution_attempts")
+        assert "upstream_status_code" in _nullable_columns(url, "execution_attempts")
+        assert "upstream_error" not in _nullable_columns(url, "execution_attempts")
+        assert "ix_execution_attempts_started_at" in _indexes(url, "execution_attempts")
+        assert "ix_execution_attempts_endpoint_finished" in _indexes(
+            url, "execution_attempts"
+        )
+        assert "ix_inference_requests_queued_at" in _indexes(
+            url, "inference_requests"
+        )
+
+        # Explicit, reversible downgrade.
+        _run_alembic("downgrade", "0016", env=env)
+        assert {
+            "first_token_at",
+            "upstream_error",
+            "upstream_status_code",
+        } & _columns(url, "execution_attempts") == set()
+        assert "ix_execution_attempts_endpoint_finished" not in _indexes(
+            url, "execution_attempts"
+        )
+    finally:
+        asyncio.run(drop_database(url))

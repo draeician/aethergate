@@ -96,3 +96,18 @@ Accounting invariants:
 Live E2E: `e2e/accounting.spec.ts` (accounting RBAC + exact-Decimal price policy + immutable snapshot
 proof + budget block/unblock proof via the official OpenAI SDK).
 
+## Operational observability (AGV2-023)
+
+The dashboard (`src/pages/DashboardPage.tsx`) renders authoritative operational
+metrics from `/admin/v1/observability`:
+
+- Queue wait and streaming TTFT (dispatch-to-first-token) p50/p95/p99 with sample
+  counts, plus the request retry rate and retried/attempted counts.
+- `system_admin` passive per-endpoint upstream-health cards.
+- A 15m / 1h / 24h window selector; no-sample states render "No samples" (never a
+  fake `0ms`/`100%`). Project roles see only their own queue/TTFT/retry aggregate
+  and never request deployment upstream health.
+
+Typed methods live in `src/lib/client.ts` (`observabilitySummary`,
+`observabilityUpstreams`); millisecond/rate formatting in `src/lib/format.ts`.
+

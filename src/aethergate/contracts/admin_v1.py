@@ -825,6 +825,74 @@ class QuotaStatusRead(ContractModel):
     cooldown_until: datetime | None = None
 
 
+# --- Operational observability (queue wait / TTFT / retry / upstream health) --
+
+
+class ObservabilityWindowRead(ContractModel):
+    """The bounded rolling window a metric read was computed over."""
+
+    window_start: datetime
+    window_end: datetime
+    window_seconds: int
+
+
+class PercentileMetricsRead(ContractModel):
+    """p50/p95/p99 plus sample count. Percentiles are NULL with no samples."""
+
+    sample_count: int
+    p50_ms: float | None = None
+    p95_ms: float | None = None
+    p99_ms: float | None = None
+
+
+class RetryMetricsRead(ContractModel):
+    """Retry metrics for the observation cohort.
+
+    A retry is an additional ``ExecutionAttempt`` for the same gateway request.
+    ``request_retry_rate`` is NULL when there are no attempted requests.
+    """
+
+    attempted_requests: int
+    retried_requests: int
+    retry_attempts: int
+    request_retry_rate: float | None = None
+
+
+class ObservabilitySummaryRead(ContractModel):
+    """Queue-wait, streaming-TTFT, and retry metrics for the caller's scope.
+
+    Queue wait is ``earliest attempt started_at - queued_at``. TTFT (streaming
+    only) is ``first_token_at - started_at``. No prompt/completion/provider
+    content is ever included.
+    """
+
+    window: ObservabilityWindowRead
+    queue_wait: PercentileMetricsRead
+    ttft: PercentileMetricsRead
+    retry: RetryMetricsRead
+
+
+class UpstreamHealthRead(ContractModel):
+    """Passive, factual per-endpoint upstream health (deployment-scoped).
+
+    ``upstream_success_rate`` is NULL when there is no definitive upstream
+    evidence. No active probe or synthetic health percentage is produced.
+    """
+
+    endpoint_id: EndpointId
+    endpoint_name: str
+    provider_account_id: ProviderAccountId | None = None
+    sample_count: int
+    succeeded_attempts: int
+    upstream_failed_attempts: int
+    ambiguous_attempts: int
+    rate_limited_attempts: int
+    upstream_success_rate: float | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    cooldown_until: datetime | None = None
+
+
 __all__ = [
     "ProjectCreate",
     "ProjectRead",
@@ -895,4 +963,9 @@ __all__ = [
     "ReconcileRequest",
     "ReconcileResult",
     "QuotaStatusRead",
+    "ObservabilityWindowRead",
+    "PercentileMetricsRead",
+    "RetryMetricsRead",
+    "ObservabilitySummaryRead",
+    "UpstreamHealthRead",
 ]

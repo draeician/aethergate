@@ -12,6 +12,7 @@ from aethergate.api import (
     admin_errors,
     catalog_admin,
     cli_auth,
+    observability_admin,
     queue_admin,
     session_auth,
 )
@@ -56,6 +57,7 @@ app.include_router(admin_api.router)
 app.include_router(catalog_admin.router)
 app.include_router(accounting_admin.router)
 app.include_router(queue_admin.router)
+app.include_router(observability_admin.router)
 app.include_router(session_auth.router)
 app.include_router(cli_auth.router)
 

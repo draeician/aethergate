@@ -342,6 +342,26 @@ with stable codes: `503 device_flow_unavailable`, `404 device_code_invalid`, `40
 device_access_denied` / `device_expired` / `cli_session_invalid`, and a `400 slow_down`-shaped poll
 is never an error (it is a typed poll status).
 
+## Operational observability surface (AGV2-023)
+
+`/admin/v1/observability` exposes read-only operational metrics derived from
+durable scheduler facts (see `docs/architecture/observability.md`):
+
+- `GET /admin/v1/observability/summary` — window metadata plus queue-wait,
+  streaming-TTFT, and retry metrics. Query: optional `window_seconds`
+  (60..86400, default 900) and optional `project_id`. Authorization uses the
+  existing `admin:queue:read` permission (no new scope): `system_admin` reads the
+  deployment aggregate or an explicit project; `project_admin`/`project_viewer`
+  read only their own project; a cross-project project-role query is
+  non-enumerating (`404`).
+- `GET /admin/v1/observability/upstreams` — paginated passive per-endpoint
+  upstream health. `system_admin` deployment scope only; project roles get `403`
+  and can never enumerate endpoint/provider-account health.
+
+No prompt/completion/provider-secret material appears in either response.
+Percentiles are NULL with no samples (never fabricated zero); success rate is
+NULL with no definitive upstream evidence.
+
 ## Deferred
 
 - Concrete schema/OpenAPI layout for `/admin/v1` (owned by the `contracts` workstream, established first).

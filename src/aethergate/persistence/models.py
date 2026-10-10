@@ -623,7 +623,7 @@ class InferenceRequest(Base, TimestampMixin):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     queued_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True, index=True
     )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -704,6 +704,9 @@ class ExecutionAttempt(Base, TimestampMixin):
     """A single worker execution attempt for a request, guarded by a fence token."""
 
     __tablename__ = "execution_attempts"
+    __table_args__ = (
+        Index("ix_execution_attempts_endpoint_finished", "endpoint_id", "finished_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_id)
     request_id: Mapped[str] = mapped_column(
@@ -721,10 +724,24 @@ class ExecutionAttempt(Base, TimestampMixin):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     upstream_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Observability-only, non-content metadata. ``first_token_at`` is the time the
+    # first non-empty streaming content chunk arrived; ``upstream_error`` is true
+    # only for a terminal ``ProviderError``; ``upstream_status_code`` is the
+    # sanitized numeric upstream status when reliably known. Never content/secret.
+    first_token_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    upstream_error: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    upstream_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class StreamEvent(Base, TimestampMixin):
