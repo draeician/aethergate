@@ -1,6 +1,105 @@
 # AetherGate Agent Handoff
 
 ## Current State
+- Branch: `v2`. **AGV2-024V (close Alpha 1 remote CI gates and dependency reproducibility)** is
+  complete: local regressions green, dependency/OpenAPI generation reproducible, and all four remote
+  GitHub Actions workflows green on the final `origin/v2` SHA. `.aethergate-wip` is removed only
+  after the final remote verification.
+- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
+
+## AGV2-024V — Close Alpha 1 remote CI gates and dependency reproducibility
+
+### Why the first remote CI run failed (SHA `fb00f875513b8bec90d5284facf122850768868e`)
+All four workflows were red:
+- **backend** (run 38085330138): CI set `AETHERGATE_TEST_DATABASE_URL` but never created that database,
+  so DB-gated tests failed (`database "aethergate_test" does not exist`); and
+  `test_prod_requires_queue_key` was satisfied by the workflow-level `AETHERGATE_QUEUE_KEY`
+  (ambient-environment contamination).
+- **frontend** (38085330153) + **schema-secret-gate** (38085330056): OpenAPI generation removed the
+  Pydantic-generated Decimal `pattern` because CI resolved a newer Pydantic stack than the environment
+  that generated the committed OpenAPI. A real reproducibility defect.
+- **alpha-golden-path** (38085329988): the "Generate deterministic secrets" step imported
+  `cryptography.fernet.Fernet` before dependencies were installed (`ModuleNotFoundError`), so
+  `deploy/v2/.env` was never written; teardown then failed on missing `POSTGRES_PASSWORD`
+  interpolation.
+
+### Dependency locking strategy
+- `pyproject.toml` keeps the human-readable compatible ranges.
+- `constraints.txt` (repository root) is a committed pip **constraints** file pinning every
+  runtime+dev transitive dependency of the known-green Alpha environment (pydantic `2.13.5`, fastapi
+  `0.142.2`, litellm `1.104.0`, …). The block after `# BEGIN LOCKED VERSIONS` is machine-managed.
+- Consumed by: `backend.yml`/`frontend.yml`/`schema-secret-gate.yml`/`alpha-golden-path.yml`
+  (`pip install -c constraints.txt …`), `deploy/v2/Dockerfile` (`pip install -c constraints.txt
+  ".[dev]"`), and the canonical local install. No editable paths, no credentials, no `aethergate`
+  entry in the lock.
+- Refresh is explicit: `scripts/ci/refresh_lock.sh` rebuilds the pinned block from a clean venv, then
+  OpenAPI + frontend types are regenerated and the full gate run is repeated
+  (`docs/development/dependency-locking.md`).
+
+### Exact fixes
+- **backend.yml**: added a "Create explicit test database" step
+  (`tests.db_helpers.ensure_database(AETHERGATE_TEST_DATABASE_URL)`) before pytest; locked install.
+  DB-gated tests are not skipped.
+- **tests/test_config_check.py**: `test_prod_requires_queue_key` now explicitly
+  `monkeypatch.delenv("AETHERGATE_QUEUE_KEY")` and uses `_env_file=None`; an autouse fixture clears all
+  relevant settings env vars and chdirs to an empty tmp dir. `test_settings.py`, `test_oidc_session.py`,
+  `test_cli_session.py` got the same isolation (`_env_file=None` / clean cwd). The production queue-key
+  requirement is unchanged.
+- **alpha-golden-path.yml**: secrets generated with the standard library only
+  (`base64.urlsafe_b64encode(os.urandom(32))` Fernet key; `secrets` for password/bootstrap; nothing
+  printed). Teardown/log-dump guarded on `deploy/v2/.env` existing and non-fatal. **Two latent defects
+  the step-1 failure had masked were also fixed**: (1) `OIDC_ISSUER` is now the runner host IP
+  (reachable by both the browser and the api container) instead of `127.0.0.1`; (2) the empty database
+  is migrated **before** the readiness wait (readiness is `503 schema_not_current` until head).
+  Post-restore now restarts api/worker with the full compose file set (so the CI/web overrides survive)
+  via `scripts/ops/v2 restore --keep-stopped` + `compose up -d`, and restarts `web` for nginx DNS.
+  `AETHERGATE_PYTHON=python` for the Playwright SDK driver. A warm-up step primes OIDC discovery before
+  the browser smoke.
+- **Second remote run (after the lock + step-1 fixes) — backend**: the created test database now
+  exposed two further real defects: `test_admin_auth.py::test_http_admin_key_rejected_on_inference`
+  and `test_admin_crud.py::test_credential_audience_separation_via_endpoint` (plus
+  `test_cli_session.py::test_cli_session_cannot_authenticate_inference`) reached
+  `aethergate.api.deps`'s process-wide session factory — which pointed at the unmigrated
+  `aethergate_test` in CI — and failed on `relation "api_credentials" does not exist`. Fixed by
+  patching `aethergate.api.deps.get_session_factory` to the per-test database (matching the existing
+  `test_openai_auth.py` pattern) so the audience rejection is proven against the test schema.
+- **Second remote run — alpha-golden-path**: the browser golden smoke performed live SDK inference
+  that appended usage records *after* `phase main` recorded the counts and *before* the backup, so the
+  post-restore count assertion saw `2 -> 4`. Fixed by running the browser smoke **after** the
+  post-restore count proof.
+- **constraints.txt / Dockerfile / workflows**: locked installs (`-c constraints.txt`).
+- **Secret-scan fixtures**: reviewed; exclusions remain narrow and explicit
+  (`tests/test_logging_safety.py`, `tests/test_diagnostics.py`, `scripts/ci/secret_scan.sh`). All
+  fixtures are obviously synthetic (`agk_live_0123456789abcdefABCDEF`, a PEM with literal
+  `secretsecretsecret`). The scan is otherwise clean; the git pre-commit hook has no allowlist file, so
+  the repository-native narrow allowlist is the CI scanner's explicit file list.
+
+### Final local regression counts
+- backend canonical suite (`scripts/dev/v2 test`): **561 collected**, exit 0.
+- frontend unit/component: **87 passed** (22 files).
+- full Playwright (`WEB_BASE_URL=http://127.0.0.1:8081`): **32 passed**, 3 skipped (CI-only
+  `alpha-golden.spec.ts`).
+- `npm run build`, `npm run lint`, `npx tsc -b --noEmit` clean.
+- OpenAPI/client drift: two consecutive generations under the lock produced **zero diff**.
+- `ruff check src tests` clean; `git diff --check` clean; `scripts/ci/secret_scan.sh` clean.
+- migration empty -> `0017`; populated `0016` -> `0017` (via `tests/test_migrations.py`, green).
+- `python -m aethergate.config_check` valid (exit 0) and invalid (nonzero).
+- fake-Ollama adapter tests green; official OpenAI Python SDK non-stream + stream against the live
+  stack with bypass `false`. Full CI golden-path simulated locally end-to-end (disposable stack:
+  migrate → readiness → bootstrap → OIDC login → catalog → SDK → backup → restore → SDK), all green.
+
+### Final remote CI (final SHA)
+- (recorded after push: backend / frontend / schema-secret-gate / alpha-golden-path all
+  completed/success — run IDs appended below.)
+
+### Migration head
+`0017` (unchanged; `0001`–`0017` untouched).
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-024V`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria were green and remote verified; never staged/committed/pushed.
+
+## Prior task — AGV2-024 (Alpha 1 hardening)
 - Branch: `v2`. **AGV2-024 (Alpha 1 hardening — CI, fresh install, upgrade/restore, structured logs,
   operator runbook)** is complete. `.aethergate-wip` is removed only after the final remote
   verification.
