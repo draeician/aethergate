@@ -8,6 +8,7 @@ import {
   ensureIdentityLink,
   ensureRoleAssignment,
   runOfficialSdk,
+  goToLastPage,
 } from "./fixtures";
 
 /**
@@ -89,6 +90,9 @@ test.describe("system_admin management", () => {
     await page.getByRole("button", { name: "New project" }).click();
     await page.getByLabel("Name").fill(projectName);
     await page.getByRole("button", { name: "Create" }).click();
+    // Projects sort oldest-first and paginate at 20; the new project lands on
+    // the last page, so navigate there instead of assuming page 1.
+    await goToLastPage(page);
     await expect(page.getByText(projectName)).toBeVisible({ timeout: 15_000 });
 
     // Create a provider through the UI.
@@ -100,6 +104,8 @@ test.describe("system_admin management", () => {
     await page.getByLabel("Name").fill(providerName);
     await page.getByLabel("Kind").fill("custom");
     await page.getByRole("button", { name: "Create" }).click();
+    // Providers also accumulate across runs; paginate to the last page.
+    await goToLastPage(page);
     await expect(page.getByText(providerName)).toBeVisible({ timeout: 15_000 });
   });
 
@@ -247,6 +253,9 @@ test.describe("inference credential lifecycle", () => {
     page,
     browser,
   }) => {
+    // Multiple live official-SDK calls route through slow Ollama generation; the
+    // default 60s Playwright timeout is too tight for the full lifecycle.
+    test.setTimeout(240_000);
     // A disposable project + principal keep the credential list on page 1.
     const runId = Date.now();
     const admin = await openSession(browser, SYSTEM_ADMIN_SUBJECT);

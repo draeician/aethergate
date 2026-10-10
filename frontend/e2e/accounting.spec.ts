@@ -205,6 +205,10 @@ test.describe("system_admin pricing and immutable snapshots (live SDK proof)", (
     // 1. Create a request-priced policy with an awkward exact Decimal through the UI.
     await page.getByRole("link", { name: "Pricing" }).click();
     await expect(page.getByRole("heading", { name: "Pricing" })).toBeVisible();
+    // Policy rows accumulate across runs and paginate at 20 (oldest-first), so
+    // scope the pricing table to this run's route instead of assuming the new
+    // policy is on page 1.
+    await page.getByLabel("Route binding").selectOption(routeId);
     await page.getByRole("button", { name: "New policy" }).click();
     const dialog = page.getByRole("dialog");
     await expect(
