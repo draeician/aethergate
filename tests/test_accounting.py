@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from aethergate.accounting import admin as accounting_admin
 from aethergate.accounting import repository as accounting_repo
 from aethergate.accounting import service as accounting_service
 from aethergate.adapters.base import (
@@ -32,11 +33,14 @@ from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
 from aethergate.domain.entities import RequestContext
 from aethergate.domain.enums import (
+    AdminAuthenticationKind,
     BillingUnit,
     Capability,
     PrincipalKind,
     QuotaMetric,
     RequestState,
+    ResourceScopeType,
+    Role,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -50,6 +54,7 @@ from aethergate.domain.ids import (
     ProviderId,
     QuotaGroupId,
     QuotaLimitId,
+    RoleAssignmentId,
     RouteBindingId,
 )
 from aethergate.egress import DestinationPolicy
@@ -444,6 +449,24 @@ async def _count(factory, model) -> int:
         return int((await session.execute(select(func.count()).select_from(model))).scalar_one())
 
 
+def _system_admin_context(ctx: RequestContext) -> domain.AdminRequestContext:
+    """A deployment-scoped system_admin context for exercising admin mutations."""
+    return domain.AdminRequestContext(
+        project_id=ctx.project_id,
+        principal_id=ctx.principal_id,
+        authentication_kind=AdminAuthenticationKind.BROWSER_SESSION,
+        roles=(Role.SYSTEM_ADMIN,),
+        assignments=(
+            domain.RoleAssignment(
+                id=RoleAssignmentId("ra-sys-admin"),
+                principal_id=ctx.principal_id,
+                role=Role.SYSTEM_ADMIN,
+                resource_scope_type=ResourceScopeType.DEPLOYMENT,
+            ),
+        ),
+    )
+
+
 # --- request-priced budget --------------------------------------------------
 
 
@@ -566,6 +589,97 @@ async def test_budget_window_exhausted_request_unblocks_after_policy_raise(sched
             await sched_repo.clear_budget_wait_metadata_for_policy(session, policy.id)
 
     # The same request ID is now eligible and dispatches, not a replacement.
+    reclaimed = await service.claim_and_reserve("w1")
+    assert not isinstance(reclaimed, str) and reclaimed is not None
+    assert reclaimed.request_id == second_id
+    await service.run_complete(reclaimed)
+
+    # Exactly one additional usage record and one signed usage_debit for the
+    # second request; no duplicate settlement.
+    async with factory() as session:
+        usages = (await session.execute(select(models.UsageRecord))).scalars().all()
+        assert {u.request_id for u in usages} == {first_id, second_id}
+        ledgers = (await session.execute(select(models.LedgerEntry))).scalars().all()
+        assert len(ledgers) == 2
+        second_ledgers = [
+            led
+            for led in ledgers
+            if led.usage_record_id
+            == next(u.id for u in usages if u.request_id == second_id)
+        ]
+        assert len(second_ledgers) == 1
+        assert second_ledgers[0].entry_type == "usage_debit"
+        assert second_ledgers[0].amount == Decimal("-0.050000000000")
+        assert mock.complete_calls == 2
+
+
+async def test_budget_window_exhausted_request_unblocks_after_policy_disable(sched_engine):
+    await reset_schema(sched_engine)
+    mock = AccountingMockAdapter()
+    async with async_sessionmaker(sched_engine, expire_on_commit=False)() as session:
+        async with session.begin():
+            await _seed_provider_account(session)
+            rb = await _seed_route(session, alias_id="alias-a", alias_name="a", endpoint_id="ep-a")
+            await _seed_price_policy(
+                session, route_binding_id=rb, billing_unit=BillingUnit.REQUEST,
+                request_price=Decimal("0.05"),
+            )
+            context = await ensure_dev_identity(session)
+            await _seed_budget_policy(
+                session, project_id=context.project_id, name="usd-budget",
+                limit_amount=Decimal("0.05"), window_seconds=60,
+            )
+
+    service, factory = await _build(sched_engine, mock)
+    first_id = await _enqueue(service, context, alias="a")
+    second_id = await _enqueue(service, context, alias="a")
+
+    # Limit == price admits exactly one request; the second is queued with
+    # budget_window_exhausted, not a terminal rejection.
+    first = await service.claim_and_reserve("w1")
+    assert not isinstance(first, str) and first is not None
+    assert first.request_id == first_id
+    await service.run_complete(first)
+
+    assert await service.claim_and_reserve("w1") == "budget"
+
+    async with factory() as session:
+        queued = await sched_repo.get_request(session, second_id)
+        assert queued.state == RequestState.QUEUED
+        assert queued.wait_reason == "budget_window_exhausted"
+        assert queued.wait_limit_metric == "budget"
+        assert queued.wait_limit_id is not None
+        assert queued.next_eligible_at is not None
+        assert queued.error_code is None
+
+    # Only the first request has settled.
+    async with factory() as session:
+        usages = (await session.execute(select(models.UsageRecord))).scalars().all()
+        assert [u.request_id for u in usages] == [first_id]
+    assert await _count(factory, models.LedgerEntry) == 1
+
+    # Disable the same policy through the real admin mutation path, which must
+    # wake the blocked request via clear_budget_wait_metadata_for_policy (not by
+    # calling the repository helper directly).
+    async with factory() as session:
+        async with session.begin():
+            policy = (await session.execute(select(models.ProjectBudgetPolicy))).scalar_one()
+            await accounting_admin.update_project_budget_policy(
+                session,
+                context=_system_admin_context(context),
+                policy_id=policy.id,
+                enabled=False,
+            )
+
+    # The persisted wait metadata is cleared, so the worker re-evaluates the
+    # same request on the next poll.
+    async with factory() as session:
+        woke = await sched_repo.get_request(session, second_id)
+        assert woke.wait_reason is None
+        assert woke.wait_limit_id is None
+        assert woke.wait_limit_metric is None
+        assert woke.next_eligible_at is None
+
     reclaimed = await service.claim_and_reserve("w1")
     assert not isinstance(reclaimed, str) and reclaimed is not None
     assert reclaimed.request_id == second_id
