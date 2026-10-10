@@ -14,6 +14,7 @@ import { useAuth } from "../context/auth-context";
 import { isSystemAdmin, hasRole } from "../lib/roles";
 import { usePolling } from "../lib/usePolling";
 import { formatDuration, operationalStateLabel } from "../lib/format";
+import { compareDecimalToZero } from "../lib/decimal";
 
 function StatCard({
   label,
@@ -152,8 +153,7 @@ function QuotaRow({ quota }: { quota: QuotaStatusRead }) {
 }
 
 function BudgetRow({ budget }: { budget: BudgetStatusRead }) {
-  const headroom = Number(budget.headroom);
-  const blocked = budget.enabled && headroom <= 0;
+  const blocked = budget.enabled && compareDecimalToZero(budget.headroom) <= 0;
   return (
     <div className="bg-[var(--ag-surface)] border border-[var(--ag-border)] rounded-xl p-4">
       <div className="flex items-center justify-between mb-1">

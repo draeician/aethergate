@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isValidDecimalString,
   isPositiveDecimalString,
+  compareDecimalToZero,
   formatMoney,
   normalizeDecimalInput,
 } from "./decimal";
@@ -42,5 +43,29 @@ describe("decimal", () => {
     expect(formatMoney(null)).toBe("—");
     expect(formatMoney(undefined, "USD")).toBe("—");
     expect(formatMoney("")).toBe("—");
+  });
+
+  it("classifies signed Decimal strings exactly without Number coercion", () => {
+    expect(compareDecimalToZero("0")).toBe(0);
+    expect(compareDecimalToZero("0.000000000000")).toBe(0);
+    expect(compareDecimalToZero("-0")).toBe(0);
+    expect(compareDecimalToZero("-0.000000000000")).toBe(0);
+    expect(compareDecimalToZero("0.000000000001")).toBe(1);
+    expect(compareDecimalToZero("-0.000000000001")).toBe(-1);
+    expect(compareDecimalToZero("123456789.123456789012")).toBe(1);
+    expect(compareDecimalToZero("-123456789.123456789012")).toBe(-1);
+  });
+
+  it("handles malformed signed input safely", () => {
+    expect(compareDecimalToZero("")).toBe(0);
+    expect(compareDecimalToZero("1e-3")).toBe(0);
+    expect(compareDecimalToZero("0x10")).toBe(0);
+    expect(compareDecimalToZero("NaN")).toBe(0);
+    expect(compareDecimalToZero("Infinity")).toBe(0);
+    expect(compareDecimalToZero("12,34")).toBe(0);
+    expect(compareDecimalToZero("1.2.3")).toBe(0);
+    expect(compareDecimalToZero("-")).toBe(0);
+    expect(compareDecimalToZero(".5")).toBe(0);
+    expect(compareDecimalToZero("5.")).toBe(0);
   });
 });

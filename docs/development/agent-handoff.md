@@ -1,16 +1,15 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. AGV2-022C (close accounting regression gate and budget-policy disable wake-up) is
-  complete and pushed to `origin/v2`; `.aethergate-wip` was removed only after the final remote
-  verification. The accounting phase is closed only now that the **full Playwright suite is green**:
-  **26 passed, 0 failed** (two consecutive full runs), plus backend **506 passed** and frontend
-  **74 passed**.
-- AGV2-022/022V/022C accounting phase closed: AGV2-022 (accounting management UI) and AGV2-022V
-  (live queue-unblock + released-reservation proofs) were functionally correct, but AGV2-022V left the
-  required full-browser regression gate red (24 passed / 2 failed). AGV2-022C fixes those two failures
-  and one adjacent scheduler hole; the phase is closed **only** against the green full suite recorded
-  below.
+- Branch: `v2`. AGV2-022D (remove final browser Decimal coercion from budget headroom) is complete and
+  pushed to `origin/v2`; `.aethergate-wip` was removed only after the final remote verification. The
+  accounting phase is now fully closed: the last remaining `Number()`/`parseFloat()`/`.toFixed()` money
+  coercion in the browser (dashboard budget headroom) is gone, and every required regression gate is
+  green against the baseline below.
+- AGV2-022/022V/022C/022D accounting phase closed. AGV2-022 (accounting management UI), AGV2-022V (live
+  queue-unblock + released-reservation proofs), AGV2-022C (close the regression gate + budget-policy
+  disable wake-up), and AGV2-022D (remove the final browser Decimal coercion) are all pushed. The phase
+  is closed only against the green full suite plus the runtime frontend Decimal-coercion scan below.
 - Migration head unchanged at `0016`; no new migration; `0001`–`0016` untouched. Legacy Python v1 app
   and the dated architecture audit are untouched.
 - Budget wake semantics now cover both directions in
@@ -21,6 +20,71 @@
   and disabled->enabled do not wake requests.
 - The web nginx proxy defect fixed in AGV2-022V (`proxy_read_timeout`/`proxy_send_timeout 600s`) remains
   in place; the full suite exercises the long-held inference path through it.
+
+## AGV2-022D — Remove final browser Decimal coercion from budget headroom
+
+### Why this task exists
+AGV2-022C closed the required regression gate, but a final code review found one remaining violation of
+the phase-wide Decimal rule: `frontend/src/pages/DashboardPage.tsx` did
+`const headroom = Number(budget.headroom)` and compared `headroom <= 0`. `BudgetStatusRead.headroom` is
+a signed `Money` string and may be negative after overage; the browser may only make an exact
+sign/zero classification, never an IEEE-754 `Number` conversion. This task closes that single dashboard
+leak; it starts no new product scope (no observability, Responses, embeddings, accounting expansion, v1
+migration, or redesign).
+
+### Exact signed-Decimal comparison helper
+`frontend/src/lib/decimal.ts` gains `compareDecimalToZero(value: string): -1 | 0 | 1`, a pure regex
+classifier with no `Number()`, `parseFloat()`, bigint, or third-party float path. It accepts an optional
+leading `-`, and returns `-1`/`0`/`1` for exact negative/zero/positive. Zero forms `0`,
+`0.000000000000`, `-0`, and `-0.000000000000` are all `0`; `0.000000000001` is `1`;
+`-0.000000000001` is `-1`; `123456789.123456789012` is `1` and `-123456789.123456789012` is `-1`.
+Malformed input (`""`, `1e-3`, `NaN`, `Infinity`, `12,34`, `1.2.3`, `-`, `.5`, `5.`) is classified as
+`0` ("not positive") so callers fail closed rather than treating garbage as an available balance.
+`isValidDecimalString` / `isPositiveDecimalString` retain their existing non-negative contract.
+
+### Dashboard behavior
+`BudgetRow` now computes `blocked = budget.enabled && compareDecimalToZero(budget.headroom) <= 0`.
+Exact positive => "ok"; zero or exact negative => "exhausted"; a disabled budget is never marked
+exhausted solely because headroom is non-positive. The rendered headroom string is the server-returned
+value verbatim (`{budget.headroom} {budget.currency} ...`); no client-side recomputation from
+limit/committed/reserved.
+
+### Runtime frontend Decimal-coercion scan
+Grep of `frontend/src/` for `Number(`, `parseFloat(`, and `.toFixed(` now matches only the
+`decimal.ts` module docstring (a prose mention). The only remaining numeric conversions are `parseInt`
+on integer fields: `unit_scale` (PricingPage), `window_seconds` (BudgetsPage, QuotasPage),
+`limit_units` (QuotasPage), `max_concurrency` (EndpointsPage), and `default_output_tokens`
+(RoutesPage). No monetary Decimal field passes through `Number()`/`parseFloat()`/`.toFixed()` anywhere
+in the reviewed runtime accounting surfaces (DashboardPage, `features/accounting/*`,
+`features/catalog/QuotasPage`, `lib/decimal.ts`).
+
+### Regression evidence (AGV2-022D)
+- Backend containerized suite (`scripts/dev/v2 test`): **506 passed** (`506 tests collected`; clean
+  green run, no failures). Baseline unchanged (frontend-only task).
+- Frontend unit/component (`npm run test`): **82 passed** (baseline 74 + 8 new: 2 `compareDecimalToZero`
+  decimal canaries + 6 DashboardPage budget-headroom cases), 22 files.
+- Full browser suite (`npx playwright test`, chromium, `WEB_BASE_URL=http://127.0.0.1:8081`):
+  **26 passed, 0 failed**. The first attempt had one transient `oidc_unavailable` (503) on the first
+  accounting login; it was root-caused to a transient `OidcConfigurationError("OIDC discovery failed")`
+  (httpx fetch of `/.well-known/openid-configuration` momentarily failed; the API caches discovery for
+  300s and does not cache failures, so it self-heals). The IdP was reachable immediately after
+  (`/jwks` 200, `.well-known` 200), and the full suite passed clean on the immediately following run.
+- `npm run build` clean; `npm run lint` clean; `npx tsc -b --noEmit` clean.
+- OpenAPI/client drift clean: `python scripts/gen_openapi.py` + `npm run generate:client` produced no
+  diff on `frontend/src/generated/openapi.json` / `schema.d.ts` (no contract/route change).
+- `ruff check src tests` clean; `git diff --check` clean.
+- Secret/token/content canary scan clean (no `.env`/`.pem`/`.key`/credential files; no key patterns in
+  the changed files).
+- Official OpenAI Python SDK regression (`openai 2.54.0`), inference-auth bypass `false` (verified via
+  the running api `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false` and an unauthenticated `/v1/models`
+  returning 401): non-stream + stream against the UI-created disposable alias succeed
+  (`catalog-inference.spec.ts` test 9), plus the credential lifecycle and accounting live SDK proofs.
+- No migration; `0016` remains head; `0001`–`0016` untouched.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-022D`, `branch=v2`, UTC start timestamp) was created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, every commit pushed
+to `origin/v2`, and the remote branch verified. It was never staged, committed, or pushed (gitignored).
 
 ## AGV2-022C — Close accounting regression gate and budget-policy disable wake-up
 
@@ -491,8 +555,9 @@ to `origin/v2`, and the remote branch verified.
 
 ## Key files
 - Frontend accounting: `frontend/src/features/accounting/*` (7 pages + 3 test files),
-  `frontend/src/lib/decimal.ts`, `frontend/src/lib/client.ts`, `frontend/src/lib/roles.ts`,
-  `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`.
+  `frontend/src/lib/decimal.ts` (now incl. `compareDecimalToZero`), `frontend/src/lib/client.ts`,
+  `frontend/src/lib/roles.ts`, `frontend/src/App.tsx`, `frontend/src/components/Sidebar.tsx`,
+  `frontend/src/pages/DashboardPage.tsx` (decimal-safe budget headroom).
 - E2E: `frontend/e2e/accounting.spec.ts` (accounting RBAC + live pricing/snapshot + budget
   block/unblock + released-reservation proofs), `frontend/e2e/catalog-inference.spec.ts` (timeout bump),
   `frontend/e2e/fixtures.ts` (`runOfficialSdk`, `spawnOfficialSdk`, `runReleaseHarness`,
@@ -506,7 +571,8 @@ to `origin/v2`, and the remote branch verified.
 - Docs: `docs/web-console.md`, `docs/development/README.md`, `frontend/README.md`.
 
 ## Recommended Next Step
-Begin the next management phase (reservations/usage/ledger live-history deep links and cross-linking, or
-the observability metrics follow-up), reusing the now-verified Decimal-safe, typed-client, role-guard,
-pagination, PATCH, one-time-reveal, and long-held-SDK-proof patterns established here, starting from the
-green regression baseline: backend **506**, frontend **74**, full Playwright **26**.
+Observability metrics (queue/TTFT percentiles, upstream health, retry rate) — the single deferred
+follow-up noted throughout the accounting phase and the only recommended next step. Reuse the
+now-verified Decimal-safe, typed-client, role-guard, pagination, PATCH, one-time-reveal, and
+long-held-SDK-proof patterns, starting from the green regression baseline: backend **506**, frontend
+**82**, full Playwright **26**.
