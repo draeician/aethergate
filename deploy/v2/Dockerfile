@@ -7,12 +7,15 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 
 WORKDIR /build
 
-COPY pyproject.toml ./
+COPY pyproject.toml constraints.txt ./
 COPY src ./src
 
+# The committed constraints lock pins every runtime + dev transitive dependency
+# so the image resolves the exact known-green Alpha dependency graph (and thus a
+# deterministic generated OpenAPI) rather than a fresh resolution.
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install ".[dev]"
+    && /opt/venv/bin/pip install -c constraints.txt ".[dev]"
 
 FROM python:3.12-slim AS runtime
 
