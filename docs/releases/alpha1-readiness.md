@@ -101,18 +101,20 @@ The substantive code/test/workflow commit is
 | schema-secret-gate | 38092737259 | completed/success |
 | alpha-golden-path | 38092737337 | completed/success |
 
-AGV2-024V final verified `origin/v2` SHA
-`98e7c5a2c28bdd004973c0366169eb75950a46f3` (all substantive work + handoff):
+AGV2-024V final substantive `origin/v2` code/test/workflow SHA
+`b3c61d5e7409bbb0504b33c87a5361bf5105beed`:
 
 | Workflow | Run ID | Conclusion |
 |---|---|---|
-| backend | 38094547354 | completed/success |
-| frontend | 38094547346 | completed/success |
-| schema-secret-gate | 38094547363 | completed/success |
-| alpha-golden-path | 38094547355 | completed/success |
+| backend | 38092737427 | completed/success |
+| frontend | 38092737557 | completed/success |
+| schema-secret-gate | 38092737259 | completed/success |
+| alpha-golden-path | 38092737337 | completed/success |
 
-The gates are deterministic and offline; any docs-only successor of this SHA
-repeats the same four workflows.
+Every later commit in the task is documentation-only and was verified green with
+the same four workflows; the `origin/v2` tip at handoff is green for
+backend/frontend/schema-secret-gate/alpha-golden-path. The gates are deterministic
+and offline, so the result is stable across the docs-only commits.
 
 ## AGV2-024V — closing the first remote CI run
 

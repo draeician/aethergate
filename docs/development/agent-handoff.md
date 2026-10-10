@@ -96,15 +96,16 @@ all four required workflows `completed/success` there:
 - schema-secret-gate — run `38092737259`
 - alpha-golden-path — run `38092737337`
 
-AGV2-024V final verified `origin/v2` SHA
-`98e7c5a2c28bdd004973c0366169eb75950a46f3` (all substantive work + this handoff):
-- backend — run `38094547354`
-- frontend — run `38094547346`
-- schema-secret-gate — run `38094547363`
-- alpha-golden-path — run `38094547355`
+AGV2-024V final substantive `origin/v2` code/test/workflow SHA
+`b3c61d5e7409bbb0504b33c87a5361bf5105beed`:
+- backend — run `38092737427`
+- frontend — run `38092737557`
+- schema-secret-gate — run `38092737259`
+- alpha-golden-path — run `38092737337`
 
-The gates are deterministic and offline; any docs-only successor of this SHA
-repeats the same four workflows green.
+Every later commit in the task is documentation-only and was verified green with
+the same four workflows; the `origin/v2` tip at handoff is green for all four.
+The gates are deterministic and offline, so the result is stable.
 
 (First remote run `fb00f875…` was red in all four; the intermediate run on the
 lock+step-1 fixes was green for frontend/schema-secret-gate and exposed the two
