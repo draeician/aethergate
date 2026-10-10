@@ -11,6 +11,12 @@ The repository has no release-tag/SemVer-bump policy that this task is required 
 advance, so **no version bump is made to label Alpha 1**; the status is recorded
 here instead. Migration head is **`0017`**.
 
+The runtime/dev dependency graph is locked in the committed `constraints.txt`
+(consumed by CI, the Docker image, and the canonical local install) so the
+generated OpenAPI cannot drift with whatever version pip resolves on a given day.
+See `docs/development/dependency-locking.md` and the "Dependency reproducibility"
+section below.
+
 ## Definition of Alpha 1
 
 AetherGate may be called Alpha 1 because all of the following hold:
@@ -62,14 +68,53 @@ CI (offline, deterministic; see `.github/workflows/`):
 
 Local/nomnom regression gates (with baselines):
 
-- backend full suite: baseline **527** (now 561 with table-driven additions);
+- backend full suite: baseline **561** (canonical `scripts/dev/v2 test`, exit 0);
 - frontend unit/component: baseline **87**;
-- full Playwright: baseline **32**;
+- full Playwright: baseline **32** (3 skipped: the CI-only `alpha-golden.spec.ts`);
 - `npm run build`, `npm run lint`, `npx tsc -b --noEmit`;
-- OpenAPI/client drift; `ruff check src tests`; `git diff --check`;
+- OpenAPI/client drift (two consecutive generations produce zero diff); `ruff
+  check src tests`; `git diff --check`;
 - secret/token/content canary scan;
 - migration empty -> `0017`; populated `0016` -> `0017`;
 - backup/restore golden path; official SDK non-stream + stream, bypass `false`.
+
+## Dependency reproducibility (AGV2-024V)
+
+`pyproject.toml` keeps human-readable compatible ranges; the committed
+`constraints.txt` pins the exact known-green resolution of every runtime + dev
+transitive dependency. CI (`backend.yml`, `frontend.yml`, `schema-secret-gate.yml`,
+`alpha-golden-path.yml`), the Docker image (`deploy/v2/Dockerfile`), and the local
+canonical install all use `-c constraints.txt`, so the resolved graph — and thus
+the generated OpenAPI — is identical everywhere. Refresh is explicit via
+`scripts/ci/refresh_lock.sh` followed by OpenAPI/client regeneration and the full
+gate run (`docs/development/dependency-locking.md`).
+
+## AGV2-024V — closing the first remote CI run
+
+The first pushed Alpha 1 SHA (`fb00f875513b8bec90d5284facf122850768868e`) failed
+all four remote workflows. Root causes and fixes:
+
+- **backend** — CI never created the database named by
+  `AETHERGATE_TEST_DATABASE_URL`, so DB-gated tests failed with
+  `database "aethergate_test" does not exist`; and `test_prod_requires_queue_key`
+  was satisfied by the workflow-level `AETHERGATE_QUEUE_KEY` (ambient-env
+  contamination). Fixed by creating the test database via
+  `tests.db_helpers.ensure_database` before pytest, and by isolating the config
+  tests (`monkeypatch.delenv` + `_env_file=None` + a clean cwd). The production
+  queue-key requirement is unchanged.
+- **frontend + schema-secret-gate** — CI resolved a newer Pydantic than the
+  environment that generated the committed OpenAPI, changing the Decimal schema
+  string branch (dropping a Pydantic-generated `pattern`). Fixed by the committed
+  dependency lock so generation is reproducible.
+- **alpha-golden-path** — the secrets step imported `cryptography` before
+  dependencies were installed (`ModuleNotFoundError`), and teardown then failed on
+  missing `POSTGRES_PASSWORD` interpolation. Fixed by generating the Fernet key
+  with the standard library (`base64.urlsafe_b64encode(os.urandom(32))`) and
+  guarding teardown/log-dump on `deploy/v2/.env` existing. Two further latent
+  ordering/networking defects the step-1 failure had masked were also fixed: the
+  OIDC issuer is now the runner host IP (reachable by both browser and api
+  container) instead of `127.0.0.1`, and the empty database is migrated **before**
+  the readiness wait (readiness is `503 schema_not_current` until head).
 
 ## Known limitations
 

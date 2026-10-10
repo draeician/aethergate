@@ -463,6 +463,19 @@ the former "Not yet instrumented" placeholders with these metrics and a
 `0ms`/`100%`). Backend coverage lives in `tests/test_observability.py`; the
 migration is covered by `tests/test_migrations.py::test_migration_0016_to_0017`.
 
+## Dependency locking
+
+The runtime + dev dependency graph is pinned in the committed `constraints.txt`.
+Install with the lock so the environment matches CI/Docker:
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -c constraints.txt -e ".[dev]"
+```
+
+Refresh is an explicit change: `scripts/ci/refresh_lock.sh`, then regenerate
+OpenAPI/frontend types and re-run the gates. See `docs/development/dependency-locking.md`.
+
 ## Tests
 ```bash
 # host (offline; DB-gated tests skip)
