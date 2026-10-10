@@ -91,15 +91,19 @@ gate run (`docs/development/dependency-locking.md`).
 
 ## AGV2-024V — remote CI status
 
-Final `origin/v2` SHA `b3c61d5e7409bbb0504b33c87a5361bf5105beed` — all four workflows
+Final `origin/v2` SHA `63adf0fbb7521f625bd81f9aeae6ffbf4726e172` — all four workflows
 `completed/success`:
 
 | Workflow | Run ID | Conclusion |
 |---|---|---|
-| backend | 38092737427 | completed/success |
-| frontend | 38092737557 | completed/success |
-| schema-secret-gate | 38092737259 | completed/success |
-| alpha-golden-path | 38092737337 | completed/success |
+| backend | 38093060558 | completed/success |
+| frontend | 38093060561 | completed/success |
+| schema-secret-gate | 38093060568 | completed/success |
+| alpha-golden-path | 38093060607 | completed/success |
+
+Any later commits in this task are documentation-only and repeat the same
+deterministic, offline gates; the substantive code/test/workflow SHA above is the
+one whose green runs are recorded here.
 
 ## AGV2-024V — closing the first remote CI run
 
