@@ -92,12 +92,14 @@ No migration; head remains `0017`; `0001`–`0017` untouched.
 
 ### Final remote CI (AGV2-028V)
 The substantive code/test SHA is `e1d7086` (fix `f9e7619` + tests `e1d7086`; later commits are
-docs-only). All four required workflows are `completed/success` on the then-current `origin/v2`
-tip `3f93f05d7f9e7850cf23fc15d463a16661196ea2` (push events):
-- backend — run `38182977904`
-- frontend — run `38182977886`
-- schema-secret-gate — run `38182977887`
-- alpha-golden-path — run `38182977874`
+docs-only). All four required workflows are `completed/success` on the `origin/v2` tips verified
+during this task (push events):
+- `5e4c94fd3f5b69a40d1213b0521681d8fb0e8661` — `backend 38183328077`, `frontend 38183328123`,
+  `schema-secret-gate 38183328067`, `alpha-golden-path 38183328081` (the alpha-golden run initially
+  hit the documented transient OIDC/JWKS browser cold-start flake at `loginAs` in the pre-existing
+  remote-URL test; `gh run rerun --failed` then passed — the same code passed on `3f93f05`).
+- `3f93f05d7f9e7850cf23fc15d463a16661196ea2` — `backend 38182977904`, `frontend 38182977886`,
+  `schema-secret-gate 38182977887`, `alpha-golden-path 38182977874`.
 
 Every commit after the substantive code/test SHA is documentation-only and is verified green with
 the same four deterministic, offline workflows; the `origin/v2` tip at handoff is green for all four.
