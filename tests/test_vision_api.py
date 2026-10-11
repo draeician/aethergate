@@ -335,6 +335,51 @@ async def test_chat_image_on_text_only_alias_rejected(vision_client):
     assert adapter.requests == []
 
 
+async def test_chat_auto_detail_succeeds_and_reaches_adapter(vision_client):
+    client, adapter = vision_client
+    body = _chat_vision_body()
+    body["messages"][0]["content"][1]["image_url"]["detail"] = "auto"
+    resp = await client.post("/v1/chat/completions", json=body)
+    assert resp.status_code == 200
+    assert adapter.requests  # reached the adapter
+
+
+@pytest.mark.parametrize("detail", ["low", "high", "original"])
+async def test_chat_non_default_detail_returns_400_without_dispatch(
+    vision_client, detail
+):
+    client, adapter = vision_client
+    body = _chat_vision_body()
+    body["messages"][0]["content"][1]["image_url"]["detail"] = detail
+    resp = await client.post("/v1/chat/completions", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_feature"
+    assert detail in resp.json()["error"]["message"]
+    assert adapter.requests == []  # never reached the adapter/upstream
+
+
+async def test_responses_auto_detail_succeeds_and_reaches_adapter(vision_client):
+    client, adapter = vision_client
+    body = _responses_vision_body()
+    assert body["input"][0]["content"][1]["detail"] == "auto"
+    resp = await client.post("/v1/responses", json=body)
+    assert resp.status_code == 200
+    assert adapter.requests
+
+
+@pytest.mark.parametrize("detail", ["low", "high", "original"])
+async def test_responses_non_default_detail_returns_400_without_dispatch(
+    vision_client, detail
+):
+    client, adapter = vision_client
+    body = _responses_vision_body()
+    body["input"][0]["content"][1]["detail"] = detail
+    resp = await client.post("/v1/responses", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_feature"
+    assert adapter.requests == []
+
+
 async def test_chat_text_only_still_works(vision_client):
     client, _adapter = vision_client
     resp = await client.post(

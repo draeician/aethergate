@@ -148,6 +148,47 @@ try {
   result.chat_vision_remote_url_400 = "ok";
 }
 
+// Explicit neutral `detail: "auto"` is supported.
+const chatVisionAuto = await client.chat.completions.create({
+  model: visionModel,
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "js sdk vision auto" },
+        { type: "image_url", image_url: { url: pngDataUrl, detail: "auto" } },
+      ],
+    },
+  ],
+});
+if (!chatVisionAuto.choices?.[0]?.message?.content) {
+  fail("chat vision with detail=auto produced empty content");
+}
+result.chat_vision_detail_auto = "ok";
+
+// Non-default `detail` (low/high) is explicitly rejected (never silently ignored).
+for (const detail of ["low", "high"]) {
+  try {
+    await client.chat.completions.create({
+      model: visionModel,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: pngDataUrl, detail } },
+          ],
+        },
+      ],
+    });
+    fail(`non-default image detail ${detail} request unexpectedly succeeded`);
+  } catch (err) {
+    if (err?.status !== 400) {
+      fail(`image detail ${detail} returned unexpected status ${err?.status}`);
+    }
+  }
+}
+result.chat_vision_detail_400 = "ok";
+
 if (withStreaming) {
   // Chat stream
   const chatStream = await client.chat.completions.create({

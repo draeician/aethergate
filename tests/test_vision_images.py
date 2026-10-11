@@ -63,6 +63,69 @@ def test_unsupported_media_type_rejected():
     assert "image_media_type" in info.value.feature
 
 
+def test_valid_webp_is_accepted():
+    part = parse_inline_image(WEBP_DATA_URL, max_image_bytes=10_000_000)
+    assert part.media_type == "image/webp"
+    assert part.data.startswith(b"RIFF")
+    assert part.data[8:12] == b"WEBP"
+
+
+def _riff(form_type: bytes, body: bytes = b"") -> bytes:
+    """Build a minimal RIFF container with the given 4-byte form type."""
+    chunk = form_type + body
+    return b"RIFF" + (len(chunk)).to_bytes(4, "little") + chunk
+
+
+def test_webp_labeled_riff_wave_rejected():
+    # RIFF/WAVE (audio) mislabeled as WebP must be rejected: RIFF alone is not
+    # a WebP container signature.
+    payload = _riff(b"WAVE", b"\x00" * 16)
+    with pytest.raises(UnsupportedFeature) as info:
+        parse_inline_image(data_url("image/webp", payload), max_image_bytes=1_000_000)
+    assert info.value.feature == "image_signature_mismatch"
+
+
+def test_webp_labeled_riff_avi_rejected():
+    payload = _riff(b"AVI ", b"\x00" * 16)
+    with pytest.raises(UnsupportedFeature) as info:
+        parse_inline_image(data_url("image/webp", payload), max_image_bytes=1_000_000)
+    assert info.value.feature == "image_signature_mismatch"
+
+
+def test_webp_labeled_arbitrary_riff_rejected():
+    payload = _riff(b"XXXX", b"\x00" * 16)
+    with pytest.raises(UnsupportedFeature) as info:
+        parse_inline_image(data_url("image/webp", payload), max_image_bytes=1_000_000)
+    assert info.value.feature == "image_signature_mismatch"
+
+
+def test_webp_body_without_riff_container_rejected():
+    # Starts with the WEBP fourcc but has no RIFF container header.
+    payload = b"WEBP" + b"\x00" * 20
+    with pytest.raises(UnsupportedFeature) as info:
+        parse_inline_image(data_url("image/webp", payload), max_image_bytes=1_000_000)
+    assert info.value.feature == "image_signature_mismatch"
+
+
+def test_webp_too_short_header_rejected():
+    # "RIFF" with fewer than 12 header bytes cannot carry the WEBP fourcc.
+    with pytest.raises(UnsupportedFeature):
+        parse_inline_image(
+            data_url("image/webp", b"RIFF\x00\x00\x00\x00WEB"),
+            max_image_bytes=1_000_000,
+        )
+
+
+def test_webp_signature_error_never_reflects_bytes_or_base64():
+    payload = _riff(b"WAVE", b"\x00" * 16)
+    encoded = base64.b64encode(payload).decode("ascii")
+    with pytest.raises(UnsupportedFeature) as info:
+        parse_inline_image(data_url("image/webp", payload), max_image_bytes=1_000_000)
+    assert encoded not in str(info.value)
+    assert "RIFF" not in str(info.value)
+    assert "WAVE" not in str(info.value)
+
+
 def test_malformed_data_url_rejected():
     with pytest.raises(UnsupportedFeature) as info:
         parse_inline_image("data:image/png;base64", max_image_bytes=1000)
@@ -214,6 +277,99 @@ def test_enforce_request_image_limits_direct():
         enforce_request_image_limits(
             parts, max_images_per_request=4, max_total_image_bytes=1
         )
+
+
+def _chat_image(image_url: str, **image_url_extra) -> dict:
+    inner = {"url": image_url}
+    inner.update(image_url_extra)
+    return {"type": "image_url", "image_url": inner}
+
+
+@pytest.mark.parametrize("detail", [None, "auto"])
+def test_chat_omitted_and_auto_detail_succeed(detail):
+    part = _chat_image(PNG_DATA_URL)
+    if detail is not None:
+        part["image_url"]["detail"] = detail
+    req = _chat([{"role": "user", "content": [part]}])
+    messages = req.to_canonical_messages()
+    assert messages[0].has_images
+
+
+@pytest.mark.parametrize("detail", ["low", "high", "original"])
+def test_chat_non_default_detail_rejected(detail):
+    req = _chat(
+        [{"role": "user", "content": [_chat_image(PNG_DATA_URL, detail=detail)]}]
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert "image_detail" in info.value.feature
+    assert info.value.param == "messages[user].content[0].image_url.detail"
+
+
+def test_chat_invalid_detail_enum_rejected():
+    req = _chat(
+        [{"role": "user", "content": [_chat_image(PNG_DATA_URL, detail="ultra")]}]
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert "image_detail" in info.value.feature
+
+
+def test_chat_non_string_detail_rejected():
+    req = _chat(
+        [{"role": "user", "content": [_chat_image(PNG_DATA_URL, detail=2)]}]
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert "image_detail" in info.value.feature
+
+
+def _responses_image(url: str, **part_extra) -> dict:
+    part = {"type": "input_image", "image_url": url}
+    part.update(part_extra)
+    return part
+
+
+@pytest.mark.parametrize("detail", [None, "auto"])
+def test_responses_omitted_and_auto_detail_succeed(detail):
+    part = _responses_image(PNG_DATA_URL)
+    if detail is not None:
+        part["detail"] = detail
+    req = ResponsesRequest.model_validate(
+        {"model": "m", "input": [{"role": "user", "content": [part]}]}
+    )
+    messages = req.to_canonical_messages()
+    assert messages[0].has_images
+
+
+@pytest.mark.parametrize("detail", ["low", "high", "original"])
+def test_responses_non_default_detail_rejected(detail):
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "m",
+            "input": [
+                {"role": "user", "content": [_responses_image(PNG_DATA_URL, detail=detail)]}
+            ],
+        }
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert "image_detail" in info.value.feature
+    assert info.value.param == "input[0].content[0].detail"
+
+
+def test_responses_invalid_detail_enum_rejected():
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "m",
+            "input": [
+                {"role": "user", "content": [_responses_image(PNG_DATA_URL, detail="tiny")]}
+            ],
+        }
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert "image_detail" in info.value.feature
 
 
 def test_responses_maps_input_image_to_canonical_parts():

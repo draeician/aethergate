@@ -346,18 +346,21 @@ def _sdk_responses_inference(
 
 
 def _sdk_chat_vision(
-    base_url: str, key: str, model: str, *, stream: bool
+    base_url: str, key: str, model: str, *, stream: bool, detail: str | None = None
 ) -> str:
     """Official SDK Chat vision input (non-stream + stream)."""
     from openai import OpenAI
 
     client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    image_url: dict = {"url": _png_data_url()}
+    if detail is not None:
+        image_url["detail"] = detail
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": "golden vision prompt"},
-                {"type": "image_url", "image_url": {"url": _png_data_url()}},
+                {"type": "image_url", "image_url": image_url},
             ],
         }
     ]
@@ -415,6 +418,32 @@ def _sdk_responses_vision(
     if response.status != "completed" or not response.output_text:
         _fail("responses vision non-stream had unexpected status/text")
     return "ok_responses_vision"
+
+
+def _sdk_chat_vision_rejected_detail_400(base_url: str, key: str, model: str) -> str:
+    """A pinned non-default `detail` mode must be an explicit SDK-visible 400."""
+    from openai import BadRequestError, OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    try:
+        client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _png_data_url(), "detail": "low"},
+                        }
+                    ],
+                }
+            ],
+        )
+    except BadRequestError:
+        return "ok_vision_detail_400"
+    _fail("non-default image detail was not rejected with 400")
+    return "unreachable"
 
 
 def _sdk_chat_vision_remote_url_400(base_url: str, key: str, model: str) -> str:
@@ -535,9 +564,16 @@ def phase_main(args: argparse.Namespace) -> int:
     ):
         _fail("Responses stream inference did not return ok_responses_stream")
 
-    _log("official SDK Chat vision non-stream")
+    _log("official SDK Chat vision non-stream (default + explicit auto detail)")
     if _sdk_chat_vision(args.base_url, key, "golden-vision-model", stream=False) != "ok_vision":
         _fail("Chat vision non-stream did not return ok_vision")
+    if (
+        _sdk_chat_vision(
+            args.base_url, key, "golden-vision-model", stream=False, detail="auto"
+        )
+        != "ok_vision"
+    ):
+        _fail("Chat vision non-stream with explicit auto detail failed")
     _log("official SDK Chat vision stream")
     if (
         _sdk_chat_vision(args.base_url, key, "golden-vision-model", stream=True)
@@ -567,6 +603,13 @@ def phase_main(args: argparse.Namespace) -> int:
         != "ok_text_only_image_400"
     ):
         _fail("image on text-only alias was not rejected with 400")
+    if (
+        _sdk_chat_vision_rejected_detail_400(
+            args.base_url, key, "golden-vision-model"
+        )
+        != "ok_vision_detail_400"
+    ):
+        _fail("non-default image detail was not rejected with 400")
 
     # Record safe state (IDs/counts only; no secrets).
     with _admin_client(args.base_url, admin_key) as client:
@@ -589,6 +632,7 @@ def phase_main(args: argparse.Namespace) -> int:
         "sdk_responses_vision_stream": "ok_responses_vision_stream",
         "sdk_vision_remote_url_400": "ok_vision_remote_400",
         "sdk_text_only_image_400": "ok_text_only_image_400",
+        "sdk_vision_detail_400": "ok_vision_detail_400",
     }
     (workdir / STATE_FILE).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     _write_secrets(

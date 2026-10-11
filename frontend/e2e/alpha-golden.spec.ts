@@ -103,4 +103,29 @@ test.describe("alpha golden path (offline CI)", () => {
     });
     expect(textOnly.status).toBe("ok_400");
   });
+
+  test("explicit auto detail succeeds; non-default detail is rejected with 400", async ({
+    page,
+  }) => {
+    await loginAs(page, SYSTEM_ADMIN_SUBJECT);
+    const key = process.env.GOLDEN_INFERENCE_KEY;
+    expect(key, "GOLDEN_INFERENCE_KEY must be set by the CI workflow").toBeTruthy();
+
+    const auto = await runOfficialSdk({
+      key: key!,
+      model: "golden-vision-model",
+      vision: true,
+      detail: "auto",
+    });
+    expect(auto.status).toBe("ok");
+
+    const rejected = await runOfficialSdk({
+      key: key!,
+      model: "golden-vision-model",
+      vision: true,
+      detail: "low",
+      expect400: true,
+    });
+    expect(rejected.status).toBe("ok_400");
+  });
 });

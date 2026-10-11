@@ -298,6 +298,7 @@ function sdkEnv(opts: {
   baseUrl?: string;
   timeout?: number;
   vision?: boolean;
+  detail?: string;
   expect400?: boolean;
 }) {
   const baseUrl = opts.baseUrl ?? `${WEB_BASE_URL.replace(/\/$/, "")}/v1`;
@@ -308,6 +309,7 @@ function sdkEnv(opts: {
     AETHERGATE_MODEL: opts.model,
     AETHERGATE_STREAM: opts.stream ? "1" : "0",
     ...(opts.vision ? { AETHERGATE_VISION: "1" } : {}),
+    ...(opts.detail !== undefined ? { AETHERGATE_DETAIL: opts.detail } : {}),
     ...(opts.expect400 ? { AETHERGATE_EXPECT_400: "1" } : {}),
     ...(opts.timeout !== undefined ? { AETHERGATE_TIMEOUT: String(opts.timeout) } : {}),
   };
@@ -342,6 +344,7 @@ export async function runOfficialSdk(opts: {
   baseUrl?: string;
   timeout?: number;
   vision?: boolean;
+  detail?: string;
   expect400?: boolean;
 }): Promise<SdkResult> {
   const env = sdkEnv(opts);

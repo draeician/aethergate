@@ -7,6 +7,7 @@ listing. It prints a single redacted status line and exits non-zero on failure.
 
 Additional modes (environment, never argv):
   ``AETHERGATE_VISION=1``    send an inline synthetic image with the prompt
+  ``AETHERGATE_DETAIL=<v>``  set the Chat image detail selector (e.g. auto/low)
   ``AETHERGATE_EXPECT_400=1`` assert the request fails with an SDK-visible 400
 
 Output contract (one line on stdout):
@@ -58,6 +59,7 @@ def main() -> int:
     stream = os.environ.get("AETHERGATE_STREAM") == "1"
     vision = os.environ.get("AETHERGATE_VISION") == "1"
     expect_400 = os.environ.get("AETHERGATE_EXPECT_400") == "1"
+    detail = os.environ.get("AETHERGATE_DETAIL")
     if not base_url or not api_key or not model:
         print("MISSING_ENV")
         return 2
@@ -69,12 +71,15 @@ def main() -> int:
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
     if vision:
         image_url = _REMOTE_IMAGE_URL if expect_400 else _PNG_DATA_URL
+        image_part: dict = {"url": image_url}
+        if detail is not None:
+            image_part["detail"] = detail
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "sdk vision proof"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "image_url", "image_url": image_part},
                 ],
             }
         ]
