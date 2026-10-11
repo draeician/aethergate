@@ -2840,7 +2840,7 @@ export interface components {
         };
         /**
          * ResponsesRequest
-         * @description Pinned Responses API request surface (text-generation subset).
+         * @description Pinned Responses API request surface (text + inline-image subset).
          */
         ResponsesRequest: {
             /** Api Base */

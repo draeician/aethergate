@@ -14,8 +14,10 @@ rejected. It does **not** claim full Responses compatibility.
 
 ## Scope
 
-This milestone implements the **text-generation subset** only. It reuses the
-existing provider-neutral path end to end:
+This milestone implements the **text + inline-image input subset** (text
+output) only — string/text input plus inline `input_image` (see
+`docs/contracts/vision.md`). It reuses the existing provider-neutral path end to
+end:
 
 ```
 ResponsesRequest (protocol DTO)
@@ -30,7 +32,7 @@ ResponsesRequest (protocol DTO)
 There is **no** second scheduler, worker, accounting path, or provider adapter,
 and **no** hidden fallback.
 
-## Supported request fields (text subset)
+## Supported request fields (text + inline-image subset)
 
 | Field | Behaviour |
 |---|---|
@@ -43,7 +45,7 @@ and **no** hidden fallback.
 | `top_p` | 0..1, canonical `GenerationParams.top_p`. |
 | `stream` | Non-stream (typed `ResponseObject`) or Responses SSE event stream. |
 | `input_text` | Text content part; maps to a canonical text part. |
-| `input_image` (inline) | Image content part with an inline `data:` `image_url` (PNG/JPEG/WebP); maps to a canonical image part. Remote URLs, `file_id`, and other sources are rejected. See `docs/contracts/vision.md`. |
+| `input_image` (inline) | Image content part with an inline `data:` `image_url` (PNG/JPEG/WebP); maps to a canonical image part. Remote URLs, `file_id`, and other sources are rejected. `detail` omitted/`auto` is accepted; `low`/`high`/`original` are rejected `400 unsupported_feature`. See `docs/contracts/vision.md`. |
 
 Unknown purely-additive fields follow the repository's additive-field tolerance
 policy and are ignored.

@@ -34,8 +34,8 @@ supported compatibility surface.
   settlement). Transport/provider-control fields are rejected; unknown aliases return an
   OpenAI-compatible structured error. Inline **image input** (vision -> text) is supported on
   image-capable aliases/providers via the pinned content-parts union (AGV2-028).
-- `POST /v1/responses` — implemented for the **text-generation subset** (AGV2-025) plus inline
-  `input_text`/`input_image` vision input (AGV2-028): string or text message/input-item `input`,
+- `POST /v1/responses` — implemented for the **text + inline-image input subset** (AGV2-025/028):
+  string or text message/input-item `input` plus inline `input_text`/`input_image`,
   `instructions`, `max_output_tokens`, `temperature`, `top_p`, `stream`. It uses the same durable
   scheduler/accounting/worker authority as Chat Completions and never a second path. Known
   unsupported Responses semantics are rejected with a structured HTTP 400 `unsupported_feature`
@@ -48,10 +48,12 @@ supported compatibility surface.
 - Supported: inline `data:` image input (PNG/JPEG/WebP) -> text output on Chat Completions and
   Responses, non-stream and stream, on image-capable aliases. Image-bearing requests reuse the
   existing scheduler/accounting/worker, remain encrypted while queued, and are bounded by explicit
-  image-count/image-byte/payload limits.
+  image-count/image-byte/payload limits. Image `detail` omitted/`auto` is accepted (neutral mode).
 - Explicitly unsupported: remote `http(s)://` image URLs (never fetched), `file_id`/files and
-  object storage, image generation/image output, audio, video, and unsupported media types. This
-  is **not** full multimodal compatibility. See `docs/contracts/vision.md`.
+  object storage, image generation/image output, audio, video, unsupported media types, and
+  non-default image `detail` modes (`low`/`high`/`original`) — rejected `400 unsupported_feature`
+  rather than silently ignored. This is **not** full multimodal compatibility. See
+  `docs/contracts/vision.md`.
 
 ## Compatibility principles
 

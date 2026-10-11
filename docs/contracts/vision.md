@@ -44,6 +44,34 @@ Input items use `input_text` / `input_image` content parts:
 
 `instructions` and the text-only input forms continue to work unchanged.
 
+## Image `detail` semantics (explicit)
+
+The pinned OpenAI contracts expose an image-detail selector, inspected from the
+locked official SDKs (not from memory):
+
+| Surface | Field | Allowed values | Default |
+|---|---|---|---|
+| Chat Completions | `image_url.detail` | `auto` \| `low` \| `high` (`openai==2.54.0` Python `ImageURL`); `openai@7.32.0` JS `ChatCompletionContentPartImage.ImageURL` also `original` | not stated |
+| Responses | `input_image.detail` | `low` \| `high` \| `auto` \| `original` (`ResponseInputImageParam`); JS `ResponseInputImageContent.detail?: ImageDetail \| null` | `auto` |
+
+AetherGate policy (identical for Chat and Responses):
+
+- **omitted** detail is accepted (the pinned Responses contract defaults to
+  `auto`; Chat's `auto` is the neutral provider default);
+- **`auto`** is accepted: it is the neutral/default mode and imposes no
+  additional fidelity semantics on the transport;
+- **`low`**, **`high`**, and **`original`** are recognized non-default semantic
+  modes. The pinned LiteLLM/Ollama path has no faithful per-image detail control,
+  so they are **explicitly rejected** with structured HTTP `400
+  unsupported_feature` (`param` = the precise `image_url.detail` /
+  `input_image.detail` path). They are never silently ignored and the request
+  never reaches the adapter/upstream.
+- any other (unrecognized) value or non-string value is likewise rejected as a
+  contract violation.
+
+This preserves the settled compatibility rule: a semantic field is either
+implemented faithfully or explicitly rejected, never silently dropped.
+
 ## Image source policy — inline data only
 
 Only the official inline `data:` URL representation is accepted, and only for
@@ -63,9 +91,16 @@ Explicitly rejected (structured HTTP `400`):
 - malformed data URLs, bad/non-canonical base64, empty payloads, and
   MIME/signature mismatches.
 
-Image bytes are validated by strict base64 decoding plus a magic-byte
-(media-type signature) check. No image parser/decompression library (e.g.
-Pillow) is invoked on untrusted input.
+Image bytes are validated by strict base64 decoding plus a per-format
+magic-byte signature check. No image parser/decompression library (e.g. Pillow)
+is invoked on untrusted input. Signatures are exact:
+
+- PNG: `89 50 4E 47 0D 0A 1A 0A`;
+- JPEG: `FF D8 FF`;
+- WebP: a RIFF container whose form-type fourcc at bytes 8:12 is `WEBP`
+  (`bytes 0:4 == b"RIFF"` **and** `bytes 8:12 == b"WEBP"` with a sufficient
+  header length). RIFF alone is **not** accepted (RIFF/WAVE, RIFF/AVI, and
+  arbitrary RIFF payloads are rejected).
 
 ## Explicit resource limits
 

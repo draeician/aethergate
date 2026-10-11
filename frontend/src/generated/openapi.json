@@ -4365,7 +4365,7 @@
         "type": "object"
       },
       "ResponsesRequest": {
-        "description": "Pinned Responses API request surface (text-generation subset).",
+        "description": "Pinned Responses API request surface (text + inline-image subset).",
         "properties": {
           "api_base": {
             "title": "Api Base"

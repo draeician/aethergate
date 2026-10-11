@@ -38,8 +38,8 @@ AetherGate may be called Alpha 1 because all of the following hold:
 ## Supported surfaces
 
 - OpenAI: `GET /v1/models`, `GET /v1/models/{model}`, `POST /v1/chat/completions`
-  (non-stream + stream), `POST /v1/responses` (Responses **text-generation
-  subset**: string/text input, `instructions`, `max_output_tokens`,
+  (non-stream + stream), `POST /v1/responses` (text + inline-image input
+  subset: string/text input, `instructions`, `max_output_tokens`,
   `temperature`, `top_p`, non-stream + stream; durable queue + accounting).
   Inline image input (**vision -> text**, non-stream + stream) is supported on
   both surfaces for image-capable aliases/providers (see
