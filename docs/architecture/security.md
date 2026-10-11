@@ -337,6 +337,12 @@ the upstream provider request ID.
 - Block metadata destinations, DNS rebinding, and redirect escapes. (Settled)
 - Inference callers never choose arbitrary server-side destinations, credentials, or trusted
   transport settings. (Settled — AG-033.)
+- Client image input is **inline-only** and must never become a second egress mechanism: remote
+  `http(s)://` image URLs are rejected before dispatch and are never fetched (no DNS/HTTP client is
+  invoked to resolve or fetch a client image URL); `file_id`/file storage, provider-local paths, and
+  arbitrary URI schemes are rejected. Image bytes are strictly validated (base64 + magic-byte
+  signature), bounded by explicit count/byte/payload limits, and encrypted while queued. The adapter
+  and worker never log image bytes/base64. (Settled — AGV2-028; see `docs/contracts/vision.md`.)
 
 ## Transport
 

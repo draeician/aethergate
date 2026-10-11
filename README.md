@@ -16,22 +16,29 @@ This repository is at **Alpha 1** (internal/self-hosted). See
 ## Supported today (Alpha 1)
 
 - `GET /v1/models`, `GET /v1/models/{model}`
-- `POST /v1/chat/completions` (non-streaming and streaming)
+- `POST /v1/chat/completions` (non-streaming and streaming), text-only **and**
+  inline image input (vision -> text) on image-capable aliases.
 - `POST /v1/responses` (Responses text-generation subset: string/text input,
   `instructions`, `max_output_tokens`, `temperature`, `top_p`, non-streaming and
-  streaming; durable queue + accounting). Unsupported Responses semantics
-  (tools/function/MCP/computer-use, multimodal, structured outputs, reasoning,
-  `previous_response_id`/conversations, background, stored responses) are
-  rejected with a structured `400 unsupported_feature`; see
-  `docs/contracts/responses.md`.
+  streaming; durable queue + accounting), plus inline `input_text`+`input_image`
+  vision input on image-capable aliases. Unsupported Responses semantics
+  (tools/function/MCP/computer-use, image *output*, structured outputs,
+  reasoning, `previous_response_id`/conversations, background, stored responses,
+  remote/file image sources) are rejected with a structured `400
+  unsupported_feature`; see `docs/contracts/responses.md` and
+  `docs/contracts/vision.md`.
 - `/admin/v1` management API (identity/RBAC, catalog/routing, accounting, queue,
   observability, OIDC/session, CLI/device flow)
 - Linux CLI (`aethergate`, thin client over `/admin/v1`)
 - Web console (operator + management + accounting + observability)
 
-Deferred: embeddings (`POST /v1/embeddings`); vision/multimodal input is the
-planned next inference surface. Also not yet: production HA, external
-metrics/alerting.
+Vision input is inline-only (`data:` URLs, PNG/JPEG/WebP); AetherGate never
+fetches a client-supplied image URL, never accepts `file_id`/file storage, and
+never logs image bytes. See `docs/contracts/vision.md`.
+
+Deferred: embeddings (`POST /v1/embeddings`); image *generation*; audio;
+files API; video; tools/MCP/computer-use; object/blob storage. Also not yet:
+production HA, external metrics/alerting.
 
 ## Quick start (development)
 

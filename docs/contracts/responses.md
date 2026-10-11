@@ -42,6 +42,8 @@ and **no** hidden fallback.
 | `temperature` | 0..2, canonical `GenerationParams.temperature`. |
 | `top_p` | 0..1, canonical `GenerationParams.top_p`. |
 | `stream` | Non-stream (typed `ResponseObject`) or Responses SSE event stream. |
+| `input_text` | Text content part; maps to a canonical text part. |
+| `input_image` (inline) | Image content part with an inline `data:` `image_url` (PNG/JPEG/WebP); maps to a canonical image part. Remote URLs, `file_id`, and other sources are rejected. See `docs/contracts/vision.md`. |
 
 Unknown purely-additive fields follow the repository's additive-field tolerance
 policy and are ignored.
@@ -65,8 +67,11 @@ set to the offending field.
 
 - `tools`, `tool_choice`, `max_tool_calls`, `parallel_tool_calls` (function /
   custom / MCP / computer-use / built-in tools);
-- image/audio/file input content parts (`input_image`, `input_audio`,
-  `input_file`) and output audio;
+- audio/file input content parts (`input_audio`, `input_file`) and output audio;
+- image input *sources* other than an inline `data:` URL: remote `http(s)://`
+  image URLs (never fetched), `file_id`/file references, and unsupported media
+  types (including SVG). Inline `input_image` (`data:` PNG/JPEG/WebP) **is**
+  supported on image-capable aliases; see `docs/contracts/vision.md`;
 - structured output / JSON-schema `text.format`;
 - `reasoning` controls and reasoning items;
 - `previous_response_id` and `conversation` state;

@@ -1575,11 +1575,18 @@ export interface components {
         };
         /**
          * ChatMessage
-         * @description A single chat message. Multimodal/tool payloads are unsupported and rejected.
+         * @description A single Chat Completions message.
+         *
+         *     ``content`` is either a plain string (text-only) or the pinned multimodal
+         *     content-parts union: an ordered list of ``{"type": "text", "text": ...}`` and
+         *     ``{"type": "image_url", "image_url": {"url": "data:..."}}`` parts. Only inline
+         *     ``data:`` image sources are accepted; remote URLs, ``file_id``/file inputs,
+         *     and other part types are explicitly rejected. Tool/function payloads remain
+         *     unsupported and are rejected.
          */
         ChatMessage: {
             /** Content */
-            content: string;
+            content: string | unknown[];
             /** Role */
             role: string;
         };
