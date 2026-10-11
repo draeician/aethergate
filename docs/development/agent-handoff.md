@@ -108,18 +108,23 @@ tokens. Request-priced accounting, UsageRecord, signed `usage_debit`, leases/fen
   `git diff --check` clean; secret/content/image-data scans clean; no-legacy guard + self-test clean.
 
 ### Final remote CI (AGV2-028)
-All four required workflows are `completed/success` on `origin/v2`:
-- final v2 SHA `8d67f95af8a935b745905f76e5ffedbc0d65b652` (handoff commit; docs-only):
-  push-event runs `backend 38175608201`, `frontend 38175608114`, `schema-secret-gate
-  38175608306`, `alpha-golden-path 38175608163`; pull-request-event runs
-  `backend 38175613843`, `frontend 38175613806`, `schema-secret-gate 38175613790`,
-  `alpha-golden-path 38175613763` (this PR-event run initially hit the documented
-  transient OIDC/JWKS browser cold-start flake at `loginAs` in a non-vision test;
-  `gh run rerun --failed` then passed — the push-event run on the identical SHA was
-  green throughout).
-- substantive feature SHA `7bd9fe5ba25611da0e5e5bf0f5fbaa83f36dcf7f`: push-event runs
+All four required workflows are `completed/success` on `origin/v2` (push events):
+- final v2 SHA `6087dc880663e61bc50fccc1a372cef2d3739e12` (docs-only handoff commit):
+  `backend 38176472629`, `frontend 38176472536`, `schema-secret-gate 38176472548`,
+  `alpha-golden-path 38176472553`.
+- substantive feature SHA `7bd9fe5ba25611da0e5e5bf0f5fbaa83f36dcf7f`:
   `backend 38175168398`, `frontend 38175168385`, `schema-secret-gate 38175168307`,
   `alpha-golden-path 38175168359` (all green).
+- prior docs SHA `8d67f95af8a935b745905f76e5ffedbc0d65b652`:
+  push `backend 38175608201`, `frontend 38175608114`, `schema-secret-gate 38175608306`,
+  `alpha-golden-path 38175608163`; PR-event `backend 38175613843`, `frontend 38175613806`,
+  `schema-secret-gate 38175613790`, `alpha-golden-path 38175613763` (this PR-event run
+  initially hit the documented transient OIDC/JWKS browser cold-start flake at `loginAs`
+  in a non-vision test; `gh run rerun --failed` then passed — the push-event run on the
+  identical SHA was green throughout).
+
+Every commit after the substantive feature SHA is documentation-only and is verified green
+with the same four deterministic, offline workflows.
 
 ### Known limitations
 - Inline-only; no remote fetch, files/`file_id`, object storage, image generation, audio, video,
