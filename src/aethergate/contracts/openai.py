@@ -20,6 +20,7 @@ from aethergate.inference.images import (
     ImageLimits,
     enforce_request_image_limits,
     parse_inline_image,
+    validate_image_detail,
 )
 
 _TRANSPORT_CONTROL_FIELDS = (
@@ -92,10 +93,16 @@ class ChatMessage(ContractModel):
                 image_url = part.get("image_url")
                 if isinstance(image_url, dict):
                     url = image_url.get("url")
+                    detail = image_url.get("detail")
                 else:
                     url = image_url
+                    detail = None
                 if not isinstance(url, str):
                     raise UnsupportedFeature("image_source", param=param)
+                # Never silently ignore the semantic detail selector: the pinned
+                # Chat contract is `detail: auto|low|high` (JS also `original`);
+                # only the neutral `auto`/omitted mode is supported.
+                validate_image_detail(detail, param=f"{param}.image_url.detail")
                 image = parse_inline_image(
                     url, max_image_bytes=limits.max_image_bytes, param=param
                 )

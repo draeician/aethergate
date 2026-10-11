@@ -50,12 +50,18 @@ class ImageLimits:
 # safe/supported by the pinned provider path).
 _ALLOWED_MEDIA_TYPES = ("image/png", "image/jpeg", "image/webp")
 
-# Magic-byte signatures for the allowed media types.
-_SIGNATURES: dict[str, tuple[tuple[bytes, ...], ...]] = {
-    "image/png": ((b"\x89PNG\r\n\x1a\n",),),
-    "image/jpeg": ((b"\xff\xd8\xff",),),
-    "image/webp": ((b"RIFF",), (b"WEBP",)),
-}
+# Image `detail` values recognized by the pinned OpenAI contracts.
+# - Chat `image_url.detail`: Python `openai==2.54.0` `ImageURL` =
+#   ``Literal['auto', 'low', 'high']``; JS `openai@7.32.0`
+#   `ChatCompletionContentPartImage.ImageURL` adds ``'original'``.
+# - Responses `input_image.detail`: Python `ResponseInputImageParam` =
+#   ``Literal['low', 'high', 'auto', 'original']`` ("Defaults to `auto`"); JS
+#   `ResponseInputImageContent.detail?: ImageDetail | null`.
+# ``auto`` is the neutral/default mode. Every other pinned value
+# (``low``/``high``/``original``) is a non-default semantic fidelity mode the
+# current LiteLLM/Ollama path cannot faithfully implement, so it is explicitly
+# rejected (never silently dropped). Any unrecognized value is rejected too.
+_NEUTRAL_IMAGE_DETAILS = ("auto",)
 
 _DATA_URL_RE = re.compile(r"^data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,(.+)$", re.DOTALL)
 
@@ -69,14 +75,59 @@ def _is_base64(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value))
 
 
-def _decoded_signature_matches(media_type: str, data: bytes) -> bool:
-    signatures = _SIGNATURES.get(media_type)
-    if signatures is None:
+def _is_png(data: bytes) -> bool:
+    return data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def _is_jpeg(data: bytes) -> bool:
+    return data.startswith(b"\xff\xd8\xff")
+
+
+def _is_webp(data: bytes) -> bool:
+    """Strict WebP container signature: RIFF header + WEBP fourcc.
+
+    A WebP file is a RIFF container whose form type (bytes 8:12) is ``WEBP``.
+    RIFF alone is insufficient (RIFF/WAVE, RIFF/AVI, and arbitrary RIFF payloads
+    are not WebP), so both the ``RIFF`` marker at bytes 0:4 and the ``WEBP``
+    fourcc at bytes 8:12 must be present with a sufficient header length.
+    """
+    if len(data) < 12:
         return False
-    for group in signatures:
-        if all(data.startswith(sig) for sig in group):
-            return True
+    return data[0:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def _decoded_signature_matches(media_type: str, data: bytes) -> bool:
+    """Per-format magic-byte validation (no generic abstraction to mis-apply)."""
+    if media_type == "image/png":
+        return _is_png(data)
+    if media_type == "image/jpeg":
+        return _is_jpeg(data)
+    if media_type == "image/webp":
+        return _is_webp(data)
     return False
+
+
+def validate_image_detail(detail: object, *, param: str) -> None:
+    """Validate an image ``detail`` selector against the pinned contract.
+
+    ``None``/omitted is permitted (the pinned contracts defaulting to ``auto``).
+    The neutral ``auto`` mode is permitted. Any other *recognized* semantic mode
+    (``low``/``high``/``original``) is explicitly rejected — the pinned
+    LiteLLM/Ollama path has no faithful non-default detail control, so accepting
+    it would silently drop a semantic field. Unrecognized values are rejected as
+    contract violations. Error text never contains image bytes or base64.
+    """
+    if detail is None:
+        return
+    if not isinstance(detail, str):
+        raise UnsupportedFeature("image_detail", param=param)
+    if detail in _NEUTRAL_IMAGE_DETAILS:
+        return
+    # Recognized non-default semantic modes (low/high/original) and any
+    # unrecognized value are both explicit rejections; a recognized mode is
+    # rejected because it is not faithfully implementable, an unrecognized one
+    # because it violates the pinned contract.
+    raise UnsupportedFeature(f"image_detail:{detail}", param=param)
 
 
 def parse_inline_image(
@@ -155,4 +206,5 @@ __all__ = [
     "ImageLimitExceeded",
     "parse_inline_image",
     "enforce_request_image_limits",
+    "validate_image_detail",
 ]

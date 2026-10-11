@@ -1,4 +1,4 @@
-"""OpenAI-compatible Responses API request/response DTOs (text subset).
+"""OpenAI-compatible Responses API request/response DTOs (text + inline-image subset).
 
 These shapes are pinned to the OpenAI compatibility baseline
 (``docs/contracts/openai-compatibility-baseline.md``) and verified against the
@@ -7,10 +7,13 @@ unknown *additive* fields but explicitly rejects transport/provider-control fiel
 and every known semantic feature this milestone does not faithfully implement
 (never silently dropping a semantic field).
 
-The implemented surface is the text-generation subset: string or text
-message/input-item ``input``, ``instructions``, ``max_output_tokens``,
-``temperature``, ``top_p``, and ``stream``. Everything else in the pinned request
-schema is explicitly unsupported until a shared internal model exists.
+The implemented surface is the text + inline-image input subset that produces
+text output: string or text message/input-item ``input`` (``input_text``/
+``output_text``) plus inline ``input_image`` (``data:`` PNG/JPEG/WebP),
+``instructions``, ``max_output_tokens``, ``temperature``, ``top_p``, and
+``stream``. Everything else in the pinned request schema — including image
+*output*, remote/``file_id`` image sources, and non-default image detail modes —
+is explicitly unsupported (`docs/contracts/vision.md`).
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from aethergate.inference.images import (
     ImageLimits,
     enforce_request_image_limits,
     parse_inline_image,
+    validate_image_detail,
 )
 
 # Reused from the Chat Completions surface: transport/provider-control fields may
@@ -98,6 +102,12 @@ def _content_parts(
             url = part.get("image_url")
             if not isinstance(url, str):
                 raise UnsupportedFeature("image_source", param=part_param)
+            # Never silently ignore the semantic detail selector: the pinned
+            # Responses contract is `detail: low|high|auto|original` (defaults
+            # to `auto`); only the neutral `auto`/omitted mode is supported.
+            validate_image_detail(
+                part.get("detail"), param=f"{part_param}.detail"
+            )
             image = parse_inline_image(
                 url, max_image_bytes=limits.max_image_bytes, param=part_param
             )
@@ -117,7 +127,7 @@ def _content_parts(
 
 
 class ResponsesRequest(ContractModel):
-    """Pinned Responses API request surface (text-generation subset)."""
+    """Pinned Responses API request surface (text + inline-image subset)."""
 
     model_config = ConfigDict(extra="ignore")
 
