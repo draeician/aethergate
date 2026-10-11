@@ -1,61 +1,78 @@
-# AetherGate v1 -> v2 Migration
+# AetherGate v1 -> v2 Cutover
 
-Living document. Derived from the audit. Distinguish **settled** / **direction** / **deferred**.
+This document records the supported transition from the retired v1 implementation to the current
+AetherGate architecture.
 
-## Direction
+## Current operator decision
 
-- Move from SQLModel/SQLite + `create_all()` + ad-hoc scripts to PostgreSQL with versioned,
-  framework-managed migrations. (Direction)
-- Migrations are explicit and reversible where practical. (Settled)
-- Alembic is the migration framework. The v2 schema baseline lives under
-  `src/aethergate/migrations/` (revision `0001`, deterministic from an empty PostgreSQL database,
-  with a downgrade). Application startup does not mutate schema. (Direction)
+The v1 deployment was never used for production and contains no important state. As of 2026-10-11,
+the supported cutover is therefore **clean/destructive**:
 
-### v2 migration command
+- do not import the v1 SQLite database;
+- do not preserve v1 users, API keys, balances, request logs, model rows, endpoint rows, or plaintext
+  provider credentials;
+- bootstrap a fresh v2 PostgreSQL deployment through the supported v2 APIs and operator workflow;
+- preserve the dated v1 architecture audit only as historical evidence.
 
-```text
-scripts/dev/v2 migrate
-# equivalent: docker compose (project aethergate-v2) run --rm --no-deps api \
-#   alembic -c src/aethergate/migrations/alembic.ini upgrade head
-```
+This decision supersedes the earlier plan to build a general SQLite -> PostgreSQL data converter for
+the current deployment.
 
-## What the v1 schema holds today (audit evidence)
+## Supported schema migration model
 
-- `User` (balance, org free-text, `is_active`), `APIKey` (hash-verified `key_hash`, `log_content`
-  default true, per-key rate limit string), `LLMEndpoint` (plaintext `api_key`, rpm/day limits),
-  `LLMModel` (public `id` = PK, `litellm_name`, prices, fallback, rpm/day overrides), `RequestLog`.
-- v1 has no project, provider-account, quota-group, reservation, ledger, or audit-event entities.
+The active product uses PostgreSQL and Alembic:
 
-## Identity preservation (settled)
+- PostgreSQL is authoritative for identity, catalog/routing, queue state, quotas, budgets, accounting,
+  audit, sessions, and observability metadata.
+- Alembic revisions under `src/aethergate/migrations/` are the only supported application schema
+  migration path.
+- Application startup does not mutate schema automatically.
+- Upgrades run explicitly and fail clearly if the database revision is incompatible with the code.
+- Backup/restore uses the supported PostgreSQL operator tooling, not v1 SQLite scripts.
 
-- Preserve account identity and historical usage attribution across migration.
-- Never infer provider-account identity from URL alone. (Settled — AG-026: endpoint migration
-  deduplicated only by base URL, potentially merging different accounts.)
-- Key rotation / deletion must not orphan or erase spend history. (Settled — AG-021.)
+The current migration head is recorded by the release/handoff documents and must be verified during
+cutover.
 
-## Migration procedure (direction)
+## Clean cutover procedure
 
-1. Run against a copy of the real old schema (never the live DB directly).
-2. Map v1 `User`/`APIKey`/`LLMModel`/`LLMEndpoint`/`RequestLog` into the v2 domain model with
-   explicit, recorded mappings (identity, ownership, and usage references).
-3. Preserve secrets via the new secret-reference mechanism rather than plaintext columns.
-4. Convert floating-point balances/costs to decimal/fixed-point; preserve spend history.
-5. Test rollback and cutover controls before production.
+1. Stop the legacy v1 containers/processes.
+2. Confirm there is no production state that needs preservation. For this deployment that decision has
+   already been made by the operator.
+3. Remove/retire the v1 runtime and its SQLite volume/database.
+4. Build the canonical current AetherGate image from the current repository.
+5. Start a fresh PostgreSQL authority.
+6. Run Alembic `upgrade head`.
+7. Run configuration preflight and readiness checks.
+8. Perform the one-use bootstrap flow.
+9. Configure OIDC, projects/principals, providers/accounts/endpoints/model aliases/routes, quotas,
+   budgets/pricing, and inference credentials through supported v2 surfaces.
+10. Run the official-SDK golden path and browser/operator checks.
+11. Back up the fresh PostgreSQL authority.
+12. Keep the legacy v1 service disabled/removed; do not run the old and new gateways against the same
+    public endpoint during normal operation.
 
-## Known v1 traps to carry into the mapping
+## Legacy artifacts
 
-- Deletion of users/keys cascade-deletes `RequestLog` (audit AG-021); v2 must use revocation/
-  tombstones or key-secret versions with stable identity.
-- Migration scripts `scripts/migrate_endpoints.py`, `scripts/add_model_config_columns.py`,
-  `scripts/add_rate_limit_column.py` open local `aethergate.db` paths rather than the configured
-  deployed DB (AG-026); they are superseded by versioned migrations.
-- `init_db.py` prints errors without a failing exit; fresh deployment must run a one-shot migration
-  stage with a nonzero failure status. (AG-027.)
+The v1 implementation used:
+- FastAPI + SQLModel/SQLite under `app/`;
+- a root legacy `docker-compose.yml` / `Dockerfile`;
+- root `requirements.txt`;
+- direct SQLite initialization/management scripts;
+- ad-hoc SQLite schema migration scripts;
+- old admin/API/runbook/agent instructions.
 
-## Deferred
+The cutover task removes these from the active product tree so operators and coding agents cannot
+mistake them for supported paths.
 
-- Revision-graph ownership conventions (the revision graph is a shared area; changes go through the
-  integrator).
-- The v1 SQLite -> v2 data conversion (this task only establishes the empty-schema baseline).
-- Reconciliation strategy for v1 rows that cannot be mapped unambiguously (e.g., accounts merged
-  by URL in old data).
+The immutable dated architecture audit under `docs/audits/` is retained.
+
+## Future legacy-data requirement
+
+If real legacy state ever needs preservation in another deployment, treat that as a new migration
+project. It must:
+- run against a copy, never the live legacy DB;
+- preserve identity and attribution intentionally;
+- never infer provider-account identity from URL alone;
+- never copy plaintext provider credentials into normal v2 database columns;
+- use fixed-point accounting conversions and explicit reconciliation rules.
+
+Do not revive the retired ad-hoc v1 scripts.
