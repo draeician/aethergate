@@ -1,10 +1,10 @@
 # AetherGate v2 — Current Task
 
 ## Task ID
-AGV2-025
+AGV2-026
 
 ## Title
-Alpha 2 — OpenAI Responses API (text generation, durable queue, official SDK)
+Alpha 2 — OpenAI Embeddings API through the durable scheduler
 
 ## WIP Marker — FIRST LOCAL ACTION
 
@@ -13,11 +13,11 @@ Immediately after entering the repository, before pull/read/implementation work,
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-025
+- task ID: AGV2-026
 - branch: v2
 - UTC start timestamp
 
-It is gitignored.
+The marker is gitignored.
 Never stage, commit, or push it.
 Keep it present for the entire incomplete task.
 If context is compacted/restarted and the task is incomplete, recreate it if missing.
@@ -31,663 +31,805 @@ Remove it only after:
 
 ## Starting Point
 
-Alpha 1 is closed.
+AGV2-025 is complete and reviewed PASS.
 
-Final verified Alpha 1 SHA:
-`4cb82a96de23bd535e87829dcf0a5a06937f5c5a`
+Final verified Responses SHA:
+`07ae618ff95503f765ae2f4ad45f531292921b3a`
 
-Remote GitHub Actions on that exact SHA are all green:
-- backend — run `38095230150`
-- frontend — run `38095230181`
-- schema-secret-gate — run `38095230193`
-- alpha-golden-path — run `38095230225`
+Remote workflows on that exact SHA:
+- backend — run `38107167919` — completed/success
+- frontend — run `38107167870` — completed/success
+- schema-secret-gate — run `38107167910` — completed/success
+- alpha-golden-path — run `38107167873` — completed/success
 
 Green baseline:
-- backend: **561 collected**
-- frontend unit/component: **87 passed**
-- full Playwright: **32 passed** (+ CI-only skips)
+- backend: **613 collected**
+- frontend: **87 passed**
+- full Playwright: **32 passed** (+ 3 CI-only skips)
 - migration head: **0017**
-- official OpenAI Python SDK pinned: **2.54.0**
-- LiteLLM pinned: **1.104.0**
-- Pydantic pinned: **2.13.5**
-- dependency graph pinned by `constraints.txt`.
+- Python SDK: `openai==2.54.0`
+- JS SDK: `openai@7.32.0`
+- LiteLLM: `1.104.0`
+- pinned dependency graph: `constraints.txt`.
 
-Do not regress Alpha 1 hardening.
+Core OpenAI target status:
+- Models — implemented
+- Chat Completions — implemented
+- Responses text subset — implemented
+- Embeddings — this task
 
 ## Why This Task Exists
 
-The pinned compatibility baseline declares the v2 core target:
-- Models;
-- Chat Completions;
-- Responses;
-- Embeddings.
+`POST /v1/embeddings` is the remaining core v2 OpenAI endpoint in the pinned compatibility target.
 
-Models + Chat Completions are implemented. Responses is the preferred modern OpenAI text-generation
-surface and is the next Alpha 2 feature.
+Embeddings are not chat generation, but they must use the same AetherGate authority:
 
-The existing provider-neutral path is currently text-chat oriented:
-- `Message(role, content: str)`;
-- `GenerationParams`;
-- durable encrypted scheduler payload;
-- one provider dispatch per execution attempt;
-- accounting/quota/budget settlement;
-- encrypted stream events.
+- inference credential authentication;
+- public model aliases;
+- approved route/egress resolution;
+- durable queue;
+- endpoint concurrency reservations;
+- shared quota/cooldown authority;
+- project budgets;
+- immutable price snapshots;
+- usage/ledger settlement;
+- worker leases/fencing/cancellation/recovery;
+- passive upstream health/retry observability;
+- encrypted queued payload/result storage.
 
-AGV2-025 must reuse that authority.
+Do NOT implement embeddings as a direct synchronous adapter call that bypasses the scheduler.
 
-It must **not** build a parallel Responses scheduler/provider/accounting path.
-
-This first Responses milestone intentionally supports the text-generation subset that can be represented
-faithfully by the existing provider path. Rich tools/multimodal/background/conversation state are
-explicitly rejected until their shared internal model exists.
+The scheduler currently assumes a chat payload/result. This task must generalize that internal boundary
+carefully while preserving all existing Chat + Responses behavior.
 
 ## Compatibility Authority
 
 Before implementation, read:
 
 - `docs/contracts/openai-compatibility-baseline.md`
-- pinned upstream OpenAI reference identified there
-- the installed/locked official `openai==2.54.0` Python SDK types/behavior
-- `project_spec.md` OpenAI compatibility requirements
-- current `contracts/openai.py`
-- current Chat Completions router/tests.
+- pinned upstream OpenAI reference named there
+- locked `openai==2.54.0` Python Embeddings request/response types
+- locked `openai@7.32.0` JS SDK behavior
+- LiteLLM `1.104.0` embedding API behavior for provider kind `ollama`
+- current fake Ollama implementation
+- current scheduler payload/result serializers
+- accounting/quota reservation code.
 
-Do not guess Responses field/event shapes from memory.
-
-Where this task names a semantic requirement but not every DTO field, use the pinned reference +
-official SDK as the source of truth.
-
-Update the compatibility baseline with exactly what is implemented.
+Do not guess the embedding wire schema, base64 encoding, or Ollama endpoint from memory.
 
 ## Recovery
 
 If context is compacted/restarted/uncertain:
+
 1. ensure `.aethergate-wip` exists if task incomplete;
 2. re-read AGENTS.md;
 3. re-read project_spec.md;
 4. re-read this file;
 5. re-read docs/development/agent-handoff.md;
-6. inspect git status/history and current GitHub Actions state;
+6. inspect git status/history and GitHub Actions state;
 7. continue from repository state.
 
 ## 1. Endpoint
 
 Implement:
 
-`POST /v1/responses`
+`POST /v1/embeddings`
 
-under a dedicated router, e.g.:
+in a dedicated router, e.g.:
 
-`src/aethergate/api/openai_responses.py`
+`src/aethergate/api/openai_embeddings.py`
 
 Register it in `aethergate.main`.
 
-Do not add custom queue-status protocol.
+Semantics:
+- validate/authenticate;
+- durably enqueue;
+- hold the normal synchronous HTTP request open while queued/executing;
+- return the standard Embeddings response when terminally successful.
 
-Standard synchronous semantics remain:
-- request accepted internally into durable queue;
-- HTTP call remains open;
-- returns a standard Responses API result when completed.
+Embeddings are non-streaming.
+Do not invent an embedding stream endpoint or proprietary queue events.
 
-Streaming:
-- standard Responses SSE semantic events;
-- no proprietary queue events.
+## 2. Supported request subset
 
-Do not add:
-- `GET /v1/responses/{id}`;
-- delete/cancel Responses resource endpoints;
-- background response polling;
-unless they are separately required by this task (they are currently deferred).
+Use the pinned OpenAI contract/SDK as authority.
 
-## 2. Supported text input subset
+At minimum support official SDK calls for:
 
-Support the pinned Responses text-generation request forms that can be mapped faithfully to the current
-generation authority.
+- a single text string input;
+- a list of text strings preserving input order;
+- `model` as public AetherGate alias.
 
-At minimum support official SDK calls equivalent to:
+### encoding_format
 
-### Simple string input
-`client.responses.create(model="...", input="Hello")`
+Support the pinned default float representation.
 
-Map to one user message.
+If the pinned API/SDK defines `encoding_format="base64"`, implement it if the encoding can be
+performed faithfully at the protocol translation layer.
 
-### Text message input
-Support the pinned SDK's text-only message/input-item representation for:
-- system/developer instruction semantics where representable;
-- user text;
-- assistant text where valid as prior context.
+Before implementing base64:
+- inspect the pinned official SDK/reference for exact byte representation/endian/float width;
+- add byte-level deterministic vectors;
+- do not guess.
 
-The exact accepted wire union must match the pinned reference/SDK.
+If faithful base64 cannot be established from the pinned reference, reject it explicitly with
+`unsupported_feature` rather than silently returning floats.
 
-### `instructions`
-Support the pinned `instructions` string field.
+### dimensions
 
-Preserve its ordering/precedence semantics when mapping to the canonical message list.
+Inspect the pinned contract + LiteLLM/Ollama behavior.
 
-If the existing upstream provider path cannot distinguish a Responses `developer` role from system
-semantics safely for the current Ollama adapter:
-- document the canonical mapping;
-- preserve the instruction before user input;
-- do not silently drop it.
+If `dimensions` can be passed faithfully through the existing provider adapter for the tested
+embedding route, support it and test exact output dimension.
 
-### Generation controls
-Support where present in the pinned Responses schema and faithfully mappable:
-- `max_output_tokens` -> internal max output token bound;
-- `temperature`;
-- `top_p`;
-- `stream`.
+Otherwise:
+- explicitly reject non-null `dimensions` with 400 `unsupported_feature`;
+- never silently ignore it.
 
-Do not invent support for Chat-only fields that Responses does not expose.
+### token-array input
 
-## 3. Explicit unsupported semantic features
+If the pinned endpoint accepts token-ID arrays but the current Ollama/LiteLLM path cannot faithfully
+represent them:
+- explicitly reject those input variants;
+- do not stringify token IDs;
+- do not reinterpret them as text.
 
-Known semantic fields/features that are not implemented in this milestone MUST be rejected explicitly,
-not ignored.
+### other semantic fields
 
-At minimum evaluate and reject when requested/non-default:
+Known semantic fields such as `user` or future embedding controls must be either:
+- implemented faithfully; or
+- explicitly rejected.
 
-- tools;
-- tool_choice;
-- function/custom tool calls;
-- MCP/tool resources;
-- computer use;
-- multimodal image/audio/file input;
-- output audio;
-- structured output / JSON-schema formatting if not faithfully supported;
-- reasoning controls/items if not faithfully supported;
-- `previous_response_id`;
-- conversation/thread state;
-- background mode;
-- response storage/retrieval semantics (`store=true` if storage semantics are implied);
-- truncation modes not supported by the scheduler/provider path;
-- provider/transport overrides;
-- arbitrary upstream URL/headers/secrets;
-- multiple candidate outputs if exposed;
-- any other pinned semantic field whose effect would otherwise be silently lost.
+Purely additive unknown fields may follow the documented tolerance policy.
 
-Use a stable OpenAI-compatible structured error, ideally:
-- HTTP 400;
-- safe message;
-- stable code such as `unsupported_feature`;
-- field/param when appropriate;
-- gateway request_id.
+## 3. Transport/routing override rejection
 
-Purely additive unknown fields may follow the repository's documented additive-field tolerance policy,
-but **known semantic fields may never be silently dropped**.
+As with Chat/Responses, inference callers may never choose transport/routing internals.
 
-## 4. Shared internal generation path
+Reject:
+- base_url/api_base;
+- provider/provider account;
+- endpoint;
+- upstream model;
+- arbitrary headers;
+- api_key/api_token;
+- deployment/custom_api_base;
+- equivalent transport-control fields.
 
-Responses must translate into the existing internal generation/scheduler model before admission.
+Use the existing safe structured OpenAI error envelope.
 
-Do not duplicate:
-- route resolution;
-- destination validation;
-- authentication;
-- queue admission;
-- endpoint concurrency;
-- quota reservation;
-- budget reservation;
-- price snapshot;
-- worker dispatch;
-- cancellation;
-- settlement;
-- provider error mapping.
+## 4. Capability enforcement
 
-Preferred shape:
-- protocol-specific request DTO -> canonical `Message[] + GenerationParams`;
-- call existing `SchedulingService.admit_and_enqueue`;
-- translate terminal scheduler result -> protocol-specific Responses object;
-- translate generic encrypted stream events -> protocol-specific Responses SSE events.
+The domain already defines:
 
-If a small shared helper is needed to remove duplicated Chat/Responses scheduling boilerplate, add one
-at the API/protocol orchestration layer.
+`Capability.EMBEDDING = "embedding"`
 
-Do not create a second scheduler service.
+Embedding dispatch must require the configured public route to be intentionally embedding-capable.
 
-## 5. Durable payload compatibility
+At minimum:
+- ModelAlias must advertise `embedding`;
+- Provider must advertise `embedding`;
+- registered provider adapter must implement embedding.
 
-The current durable scheduler payload stores canonical messages + generation params encrypted.
+If any requirement is absent:
+- fail before upstream dispatch;
+- return a stable safe model/capability-unavailable error;
+- no hidden fallback to a text model.
 
-Responses text requests should use the same encrypted payload representation when possible.
+Do not infer embedding capability merely because an Ollama endpoint exists.
 
-Requirements:
-- no plaintext prompt/input in scheduler metadata;
-- queue encryption unchanged;
-- no migration solely to label a request as Chat vs Responses unless truly necessary;
-- worker should not need protocol-specific knowledge to generate text;
-- API-side protocol translation happens outside provider dispatch authority.
+Existing text aliases and Chat/Responses must remain backward compatible.
 
-If a protocol discriminator is required for safe replay/stream translation:
-- justify it;
-- keep it non-content;
-- prefer encrypted payload metadata over new plaintext DB columns;
-- add migration only if unavoidable.
+Do not retroactively require every existing text provider record to add capabilities unless the
+existing text path already enforces them.
+
+## 5. Generalize the encrypted scheduler payload — no DB operation column
 
 Expected migration decision: **no migration; head remains 0017**.
 
-## 6. Response object compatibility
+Introduce a versioned/canonical encrypted payload envelope, e.g.:
 
-Build typed Responses DTOs in the OpenAI contracts module (or a focused Responses contracts module).
-
-For a completed text response, match the pinned official Responses schema sufficiently for
-`openai==2.54.0` to parse/use it naturally.
-
-At minimum the response must correctly represent:
-- gateway response id;
-- object/type discriminator;
-- created timestamp;
-- model = public AetherGate alias, never upstream model;
-- completed status;
-- output message item;
-- output text content item;
-- usage with input/output/total token counts;
-- error/incomplete fields per pinned schema where required;
-- no provider routing internals.
-
-The convenience SDK property / helper for output text must work if the official SDK exposes one.
-
-Do not return a Chat Completions-shaped object from `/v1/responses`.
-
-Gateway and upstream request IDs remain distinct:
-- gateway ID in standard response/request ID fields;
-- `X-Upstream-Request-Id` only where already safe/established.
-
-## 7. Responses streaming
-
-Implement pinned Responses streaming semantics over existing durable `StreamEvent` records.
-
-Do not reuse Chat Completions chunk JSON.
-
-Use the exact event names/shapes required by the pinned reference / `openai==2.54.0`.
-
-The event sequence must include the appropriate lifecycle/text events for a normal successful text
-response, such as the pinned equivalents of:
-- response created/in-progress;
-- output item/content part added;
-- text delta events;
-- text/content/output completion;
-- response completed.
-
-Do not assume a terminal `[DONE]` marker if the pinned Responses surface does not use one.
+- operation = `chat`; chat messages + generation params
+- operation = `embedding`; ordered text inputs + supported embedding params
 
 Requirements:
-- content deltas preserve order;
-- response/output/content indices/IDs are stable across the stream;
-- usage is represented at the correct terminal event;
-- a successful empty-content response follows the pinned behavior;
-- no synthetic success event after failed/cancelled/expired/outcome_unknown execution;
-- client disconnect triggers the same durable cancellation semantics as Chat;
-- once SSE headers are sent, failures terminate according to pinned stream semantics without pretending
-  success.
+- operation discriminator remains inside `payload_encrypted`;
+- no plaintext prompt/input;
+- no new DB column solely for operation kind;
+- legacy chat payloads already queued/stored without an operation discriminator must deserialize as
+  `chat`;
+- new Chat/Responses behavior must remain wire-compatible;
+- queue max encrypted/plain payload bounds still apply.
 
-## 8. Authentication / authorization
+Add explicit backward-compatibility tests for a pre-AGV2-026 chat payload.
 
-Responses uses the exact inference credential path as Chat:
+Do not make workers infer operation from request content heuristics.
 
-- Bearer `agk_...`;
-- audience = inference;
-- scope = `inference:invoke`;
-- project/principal attribution persisted;
-- revalidate credential immediately before dispatch;
-- revoked/deactivated queued credential never reaches upstream.
+## 6. Provider-neutral adapter model
 
-`AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false` in all acceptance proofs.
+Extend `src/aethergate/adapters/base.py` with embedding-specific types.
 
-No Responses-specific authentication bypass.
+Recommended concepts:
 
-## 9. Routing / capabilities
+- `EmbeddingRequest`
+  - provider_kind
+  - base_destination
+  - upstream_model
+  - ordered tuple/list of text inputs
+  - supported embedding parameters
+  - timeout
 
-Responses model name is always the public `ModelAlias.name`.
+- `EmbeddingResult`
+  - ordered vectors
+  - `Usage`
+  - upstream_request_id
 
-No client-supplied:
-- provider;
-- provider account;
+- an `EmbeddingAdapter` protocol or a unified provider adapter protocol with explicit
+  `embed(...)`.
+
+Do not pretend an embedding is a ChatRequest/CompletionResult.
+
+The existing Chat adapter protocol remains valid.
+
+## 7. LiteLLM embedding adapter
+
+Implement the embedding operation through pinned LiteLLM `1.104.0`.
+
+Requirements:
+- provider kind remains `ollama`;
+- use the admin-configured base destination;
+- use the route's admin-configured upstream model;
+- `num_retries/max_retries=0` or equivalent — no hidden SDK retry;
+- provider errors map through the existing sanitized `ProviderError`;
+- safe numeric status/retry-after feedback preserved where available;
+- no raw body/header/URL/secret leakage;
+- input order preserved;
+- vector order preserved;
+- reject malformed/non-finite embedding values.
+
+No new production provider kind.
+
+## 8. Deterministic fake Ollama embedding surface
+
+Extend `src/aethergate/testing/fake_ollama.py` to implement the exact Ollama HTTP embedding endpoint
+that the pinned LiteLLM adapter actually calls.
+
+Discover/verify it from the real pinned adapter behavior; do not assume whether the path is
+`/api/embed`, `/api/embeddings`, or another form.
+
+Provide deterministic:
+- single-input vector;
+- multi-input vectors;
+- stable dimensions;
+- usage/token metadata as available through the real LiteLLM mapping;
+- configurable delay;
+- 404;
+- 429;
+- 5xx.
+
+Use canned deterministic numeric vectors.
+Never log or persist submitted input text.
+
+Tests must exercise the **real LiteLLM adapter transport** against the fake server.
+
+## 9. Inference service
+
+Extend `InferenceService` with embedding preparation/estimation that reuses:
+
+- route resolution;
+- egress destination policy;
+- SecretRef resolution;
+- adapter registry.
+
+Recommended:
+- `prepare_embedding_from_resolved`;
+- `estimate_embedding_input_tokens`.
+
+Do not duplicate destination/secret logic.
+
+Provider/model-specific input-token estimation rules remain fail-closed when token quota/budget
+enforcement requires an estimate.
+
+## 10. Scheduler admission refactor
+
+Generalize the minimum necessary scheduler boundary so chat and embedding workloads share the same
+state machine.
+
+Keep one:
+- queue;
+- claim path;
+- lease/fence model;
+- reservation table;
+- cancellation/recovery path;
+- worker.
+
+Do not copy `claim_and_reserve` into an embedding scheduler.
+
+At claim time:
+1. decrypt canonical payload;
+2. identify operation;
+3. revalidate auth;
+4. re-resolve alias/route;
+5. revalidate embedding capability for embedding work;
+6. evaluate budget/quota using operation-specific input/output reservation units;
+7. reserve quota/budget/slot transactionally;
+8. prepare the correct provider operation.
+
+A `ClaimedWork` may carry an explicit operation + operation-specific prepared dispatch union.
+
+## 11. Embedding quota semantics
+
+Request quotas:
+- identical to Chat/Responses: one gateway embedding request consumes one request unit, regardless of
+  number of input strings.
+
+Token quotas:
+- count/estimate the total input-token units across all embedding inputs;
+- embedding output vectors consume **zero output tokens**;
+- no `default_output_tokens` or generation-token reserve for embeddings;
+- if an enforced token quota exists and no defensible provider/model estimator is available, fail
+  closed using the established estimator-unavailable behavior.
+
+Do not count vector dimensions as output tokens.
+
+Add tests proving a multi-input request aggregates input-token usage correctly.
+
+## 12. Embedding budget/accounting semantics
+
+Use the existing PricePolicy/PriceSnapshot/Budget/UsageRecord/Ledger authority.
+
+### request-priced route
+- one embedding API request = request_units 1;
+- vector count does not multiply request price.
+
+### token-priced route
+- amount is based on measured/estimated **input tokens**;
+- output_units = 0;
+- output-price contribution = 0;
+- no made-up charge for vector dimensions.
+
+At dispatch:
+- capture immutable PriceSnapshot exactly like other inference work;
+- reserve project budget transactionally.
+
+At settlement:
+- UsageRecord input_units = measured embedding input tokens;
+- output_units = 0;
+- one UsageRecord per successful gateway request;
+- one signed negative usage_debit;
+- exactly-once semantics unchanged.
+
+If provider usage is insufficient for trustworthy token-priced settlement:
+- do not invent units;
+- fail closed or follow the established accounting invariant appropriate to the current scheduler;
+- document/test the behavior.
+
+## 13. Encrypted result representation
+
+Extend the encrypted terminal result envelope to distinguish:
+- chat completion result;
+- embedding result.
+
+Embedding result contains:
+- ordered vectors;
+- trustworthy usage;
+- upstream_request_id.
+
+Requirements:
+- vectors are encrypted at rest in `result_encrypted`;
+- vectors are never copied into plaintext scheduler metadata/logs;
+- old encrypted chat results remain readable;
+- API protocol translation performs float/base64 formatting only after decrypting the terminal result
+  for the authorized waiting request.
+
+No schema migration solely for embedding result shape.
+
+## 14. Worker dispatch
+
+The worker's non-stream path must branch by canonical operation:
+
+### chat
+Preserve existing:
+- adapter.complete
+- result serializer
+- accounting
+- errors.
+
+### embedding
+Use:
+- adapter.embed
+- embedding result serializer
+- same cancellation check;
+- same fenced terminal settlement;
+- same provider failure classification;
+- same cooldown application for 429;
+- same endpoint reservation release;
+- same accounting settlement.
+
+Embeddings never enter `run_stream`.
+No TTFT/first_token_at sample should be fabricated.
+
+## 15. Terminal result/API translation
+
+Generalize `wait_for_terminal` / terminal-result decryption enough for the Embeddings router to
+obtain the embedding vectors and usage without breaking Chat/Responses callers.
+
+Prefer an explicit typed/operation-aware terminal payload instead of adding unrelated nullable fields
+until the result object becomes ambiguous.
+
+Chat + Responses current callers must continue to work unchanged or through a narrow compatibility
+wrapper.
+
+## 16. OpenAI Embeddings response
+
+Return the exact pinned response shape.
+
+At minimum:
+- `object = "list"`;
+- `data` in input order;
+- each item has:
+  - `object = "embedding"`;
+  - correct `index`;
+  - embedding vector in requested supported encoding;
+- `model` = public AetherGate alias, never upstream model;
+- usage:
+  - prompt/input tokens according to pinned field names;
+  - total tokens;
+- gateway request ID remains available through established response headers/correlation.
+
+Do not leak:
 - endpoint;
+- provider account;
 - upstream model;
-- base URL.
+- upstream URL.
 
-No hidden fallback.
+## 17. Authentication / queued revalidation
 
-If alias/provider capabilities are already enforced elsewhere, preserve them.
-Do not invent a second capability registry merely for this task.
+Use the exact same inference auth path:
+- inference-audience `agk_`;
+- `inference:invoke`;
+- project/principal attribution;
+- bypass=false in acceptance.
 
-If a capability flag is needed to distinguish text-generation aliases that may serve Responses:
-- use the existing model-alias capability representation;
-- document/admin-manage it consistently;
-- preserve backwards compatibility for existing Chat-capable aliases.
+Dispatch-time credential revalidation is mandatory:
+- revoke a queued embedding credential;
+- prove it never reaches upstream;
+- reservations are not incorrectly retained.
 
-## 10. Quotas / budgets / accounting
+## 18. Cancellation / ambiguous outcomes
 
-Responses must use the existing transactional scheduler path.
+Client disconnect while queued/reserved:
+- same durable cancellation/release path.
 
-Prove:
-- request quota reservation same as Chat;
-- token quota behavior same canonical estimate path;
-- endpoint slot reservation same;
-- project budget reservation same;
-- immutable PriceSnapshot same;
-- UsageRecord attribution correct;
-- signed `usage_debit` ledger correct;
-- no duplicate accounting.
+Disconnect/worker loss after durable dispatch:
+- preserve the existing conservative ambiguity semantics;
+- never assume an embedding did not run just because the client disconnected;
+- no duplicate automatic execution.
 
-Responses `max_output_tokens` participates in output reservation exactly as the canonical generation
-bound does for Chat.
+Add deterministic scheduler/fault tests for embedding work.
 
-If no defensible tokenizer estimate exists under an enforced token/budget policy, preserve current
-fail-closed behavior.
+## 19. Observability
 
-## 11. Errors
+Existing metrics should naturally include embeddings where semantically correct:
 
-Responses endpoint uses the existing OpenAI structured error envelope.
+- queue wait — yes;
+- retry rate — yes;
+- upstream passive health — yes;
+- TTFT — **no** (embeddings are non-streaming; no first-token sample).
 
-Prove at minimum:
-- no auth -> 401;
-- invalid credential -> 401;
-- admin-audience credential -> 401/established inference auth error;
-- unknown alias -> established model-not-found response;
-- inactive/unrouted alias -> model-unavailable/established response;
-- unsupported semantic field -> 400 `unsupported_feature`;
-- invalid request shape -> 400;
-- queue timeout -> established timeout mapping;
-- provider 404/429/5xx -> safe upstream/gateway error behavior;
-- no raw provider body/URL/credential/content.
+Prove embedding provider success/failure contributes to endpoint upstream health.
 
-Do not leak validation internals beyond the established safe contract.
+Do not fabricate TTFT=0.
 
-## 12. Contract tests
+## 20. Contract/API tests
 
-Add a dedicated Responses contract suite.
+Add a dedicated Embeddings suite covering at least:
 
-Cover:
-1. simple string input;
-2. text input-item/message form from the pinned SDK;
-3. instructions;
-4. max_output_tokens;
-5. temperature/top_p;
-6. stream flag;
-7. transport-control rejection;
-8. each unsupported semantic family;
-9. exact response object discriminators;
-10. output message/content item shape;
-11. usage shape;
-12. error shape.
+1. single text input;
+2. list of text inputs;
+3. empty/invalid input;
+4. input order preserved;
+5. default float encoding;
+6. base64 encoding if implemented;
+7. dimensions if implemented;
+8. token-array form explicit rejection if unsupported;
+9. known unsupported semantic fields explicit rejection;
+10. transport override rejection;
+11. public model alias in response;
+12. exact response discriminators/item indices;
+13. usage shape;
+14. capability rejection;
+15. unknown alias;
+16. inactive/unrouted alias;
+17. provider 404;
+18. provider 429/cooldown;
+19. safe 5xx;
+20. inference auth audience/scope behavior.
 
-Use fixtures derived from the pinned reference/locked SDK behavior, not memory.
+## 21. Scheduler/accounting tests
 
-## 13. Scheduler/integration tests
+Add deterministic coverage proving:
 
-Prove Responses uses the real durable scheduler path:
-
-- queued request lifecycle;
-- six requests / two slots through Responses;
-- worker claims/dispatches;
-- non-stream terminal translation;
-- stream event translation;
-- queued credential revocation prevents dispatch;
+- embeddings use durable enqueue/claim/dispatch;
+- six embedding requests / two endpoint slots;
+- same endpoint reservation rules;
+- no streaming state/TTFT;
+- request quota reservation;
+- aggregate input token quota across multi-input request;
+- no output-token reservation;
+- token estimator unavailable fails closed when required;
+- request-priced budget;
+- token-priced budget with output_units=0;
+- exact PriceSnapshot;
+- UsageRecord + signed usage_debit;
+- no duplicate settlement;
 - cancellation before dispatch;
-- cancellation after dispatch flags owning worker;
+- queued credential revocation;
 - provider failure;
-- outcome_unknown does not pretend success;
-- quota/budget reservation + settlement;
-- exactly-once usage/ledger settlement.
+- ambiguous worker loss does not auto-retry.
 
-Reuse existing scheduler tests/helpers rather than duplicating the state machine.
+Preserve all Chat/Responses scheduler tests.
 
-## 14. Official Python SDK tests
+## 22. Official Python SDK
 
-Using locked `openai==2.54.0`, prove:
+Using locked `openai==2.54.0`, prove against deterministic fake Ollama and live gateway:
 
-### Non-stream
-`client.responses.create(...)`
-returns a parsed official SDK Response object with expected text and usage.
+`client.embeddings.create(...)`
 
-### Stream
-Use the official SDK's pinned Responses streaming API form.
-Iterate typed events and reconstruct the expected text.
+At minimum:
+- single text;
+- list of texts;
+- parsed official SDK CreateEmbeddingResponse;
+- input order/indexes;
+- vector values/dimensions;
+- usage;
+- public alias.
 
-Prove:
-- expected event types are parsed;
-- text deltas reconstruct exactly;
-- terminal completed event is parsed;
-- usage is available where the SDK/pinned schema defines it.
+If base64 is supported:
+- prove the official SDK parses/returns the pinned base64 representation.
 
 Also prove:
-- unsupported tool request returns the expected SDK error, not silent downgrade;
-- bypass=false;
-- public alias is used.
+- unsupported dimensions/token-array/user/etc. surfaces return SDK-visible 400 when not supported;
+- inference bypass=false.
 
-Do not use raw `requests`/fetch as a substitute for the official SDK proof.
+Do not substitute raw HTTP for the official SDK acceptance.
 
-## 15. Optional JavaScript SDK contract smoke
+## 23. Official JavaScript SDK
 
-The project spec requires official Python **and JavaScript** SDK black-box compatibility for core
-surfaces.
+Extend the locked `openai@7.32.0` smoke to prove:
 
-If the repository does not yet pin the official OpenAI JS SDK, add a narrow dev/CI dependency under
-the frontend or a dedicated SDK test directory and lock it with npm.
+- embeddings single input;
+- embeddings multi-input;
+- ordering;
+- vector shape/usage;
+- explicit 400 for one unsupported semantic feature.
 
-At minimum add a deterministic offline Node smoke for:
-- Responses non-stream;
-- Responses stream event parsing.
+Do not import the SDK into the React web application.
 
-Do not make browser UI import the OpenAI SDK.
+## 24. Offline Alpha golden path
 
-If this creates disproportionate dependency/runtime complexity, document it explicitly and queue a
-verification closure task; however, AGV2-025 should prefer closing the project-spec requirement now.
+Extend deterministic CI to create an embedding-capable route to fake Ollama.
 
-## 16. Fake Ollama / offline CI
+Prefer:
+- one provider/account/endpoint can advertise both `text` + `embedding` if semantically valid;
+- use a separate public embedding alias and separate route/upstream model.
 
-Extend the existing deterministic fake Ollama only as needed.
+Prove after fresh install:
+- Chat non-stream + stream;
+- Responses non-stream + stream;
+- Embeddings single + multi;
+- Python SDK;
+- JS SDK.
 
-Do not add a new provider kind.
+Backup/restore phase must prove:
+- embedding route survives;
+- same credential still authenticates;
+- post-restore embedding call succeeds;
+- accounting/history counts remain consistent.
 
-The Alpha golden-path CI must now additionally prove:
-- Chat non-stream still works;
-- Chat stream still works;
-- Responses non-stream works via official Python SDK;
-- Responses stream works via official Python SDK;
-- if JS SDK smoke is implemented, it also runs offline.
+No Internet/model downloads/provider credentials.
 
-No Internet/model download/provider credentials.
+## 25. Live nomnom verification
 
-Keep the fake upstream content-free in logs.
+First inspect the real internal Ollama installation for an **already installed embedding-capable model**.
 
-## 17. Live nomnom verification
+Do not silently treat an arbitrary generation model as embedding-capable.
 
-Use a clean/disposable route/project where practical and real internal Ollama.
+If an installed embedding model exists:
+1. create/activate a disposable embedding provider/alias/route via supported admin path;
+2. provider + alias capabilities include `embedding`;
+3. official Python SDK single input succeeds;
+4. multi-input succeeds;
+5. official JS smoke succeeds if practical against the live route;
+6. six requests / two slots visibly queue;
+7. queue-wait appears;
+8. TTFT sample count does not increase from embeddings alone;
+9. passive upstream health records successes;
+10. deliberate invalid upstream model records safe failure;
+11. restore valid model and succeed;
+12. request-priced accounting exactly once;
+13. token-priced accounting input-only if the provider reports trustworthy token usage;
+14. queued credential revoke prevents upstream dispatch;
+15. deactivate route -> safe no-fallback failure; restore -> success.
 
-With inference auth bypass=false:
+If **no embedding-capable model is installed**, do not silently download a large model and do not fake a
+real-provider proof. Document the exact limitation in the handoff and make the deterministic fake
+Ollama + real LiteLLM transport the authoritative provider-contract proof. A small model download may
+only be performed if repository/operator policy already explicitly permits it.
 
-1. official Python SDK Chat non-stream still succeeds;
-2. Chat stream still succeeds;
-3. official Python SDK Responses non-stream succeeds;
-4. Responses stream succeeds;
-5. `instructions` affects the canonical request path and is not silently dropped;
-6. Responses request can visibly queue behind capacity;
-7. observability records queue wait and streaming TTFT for Responses too;
-8. accounting records one UsageRecord/ledger settlement per successful Responses request;
-9. deactivate route -> Responses fails safely with no fallback;
-10. restore route -> Responses succeeds;
-11. revoke queued credential -> it never reaches Ollama;
-12. unsupported tool request returns explicit 400 without upstream dispatch.
+Never record embedding input text or vector contents in handoff/logs.
 
-Never record prompt/completion content in handoff/logs.
+## 26. Catalog/admin UI
 
-## 18. OpenAPI / generated client
+Do not build a new embeddings-specific UI.
 
-Regenerate:
+Existing Provider/ModelAlias capability fields must be able to configure `embedding`.
+
+If the existing web capability selector cannot represent the already-defined `embedding` enum:
+- fix that narrow catalog UI gap;
+- add component/E2E coverage.
+
+Do not redesign catalog pages.
+
+## 27. OpenAPI/generated client
+
+Add typed Embeddings contracts.
+
+Regenerate under `constraints.txt`:
 - backend OpenAPI;
-- frontend generated schema/types.
+- frontend schema/types.
 
-Use the locked dependency environment.
+Do not manually edit generated files.
 
-Drift must be zero after committed generation.
+Two consecutive generation runs must produce zero additional diff.
 
-Do not hand-edit generated files.
-
-Even though the web console need not call `/v1/responses`, the shared generated schema must remain
-canonical.
-
-## 19. Compatibility documentation
+## 28. Compatibility docs
 
 Update:
 - `docs/contracts/openai-compatibility-baseline.md`;
-- add `docs/contracts/responses.md` if useful;
+- add `docs/contracts/embeddings.md`;
 - README endpoint list;
-- Alpha readiness docs;
-- developer docs;
-- `docs/development/agent-handoff.md`.
+- Alpha readiness status;
+- development docs;
+- handoff.
 
 Document exactly:
+- supported input forms;
+- supported encodings;
+- dimensions support/rejection;
+- token-array support/rejection;
+- capability requirements;
+- quota semantics;
+- accounting semantics;
+- no TTFT;
+- explicit unsupported fields.
 
-### Supported in AGV2-025
-- text input forms;
-- instructions;
-- generation controls;
-- non-stream;
-- stream;
-- usage;
-- public model alias routing;
-- durable queue/accounting behavior.
+After AGV2-026, core v2 OpenAI endpoint status should truthfully be:
+- Models implemented;
+- Chat Completions implemented;
+- Responses text subset implemented;
+- Embeddings implemented for the documented subset.
 
-### Explicitly unsupported/deferred
-- tool/function/MCP/computer-use semantics;
-- image/audio/file input;
-- structured outputs if not implemented;
-- reasoning controls if not implemented;
-- previous_response_id/conversation state;
-- background mode;
-- stored response retrieval;
-- all other unimplemented Responses semantics.
+Do not claim unsupported embedding features.
 
-Do not claim "full Responses API compatibility."
+## 29. Migration
 
-## 20. Existing Chat compatibility must not regress
-
-Run all existing Chat contract/SDK/browser tests.
-
-Do not alter Chat wire shapes just to simplify Responses.
-
-If shared internal refactoring is necessary:
-- preserve current Chat JSON/SSE behavior;
-- preserve current queue/cancellation/accounting behavior;
-- add regression tests first.
-
-## 21. Migration
-
-Expected: **no schema migration**.
+Expected: **no migration**.
 
 Head remains `0017`.
 
 Do not modify migrations 0001-0017.
 
-If a migration becomes unavoidable, stop and document the exact invariant that cannot be achieved with
-the existing encrypted payload/result/event model before adding a linear 0018.
+If a new plaintext operation column appears necessary, do not add it casually: first prove why the
+encrypted payload discriminator cannot satisfy correctness/recovery/observability requirements.
 
-## 22. Local regression gate
+## 30. Local regression gate
 
 Run:
-- full backend suite; baseline **561**;
+- backend full suite; baseline **613**;
 - frontend unit/component; baseline **87**;
 - full Playwright; baseline **32**;
 - npm build;
 - npm lint;
 - `npx tsc -b --noEmit`;
-- OpenAPI/client drift under `constraints.txt`;
+- OpenAPI/client drift under locked dependencies;
 - ruff check src tests;
 - git diff --check;
-- secret/token/content scan;
+- secret/token/content/vector canary scan;
 - migration empty -> 0017;
 - populated 0016 -> 0017;
 - config_check;
-- fake Ollama tests;
+- fake Ollama Chat/Responses/Embeddings provider-contract tests;
 - official Python SDK:
   - Models;
-  - Chat non-stream;
-  - Chat stream;
-  - Responses non-stream;
-  - Responses stream;
-- official JS Responses smoke if implemented.
+  - Chat non-stream/stream;
+  - Responses non-stream/stream;
+  - Embeddings single/multi;
+- official JS SDK equivalent smoke.
 
 Every red test must be root-caused.
 
-## 23. Remote CI gate
+## 31. Remote CI gate
 
 Push completed work to origin/v2.
 
-On the FINAL task SHA, require remotely observed GitHub Actions:
-
+On the FINAL task SHA require:
 - backend = completed/success;
 - frontend = completed/success;
 - schema-secret-gate = completed/success;
 - alpha-golden-path = completed/success.
 
-If any is red:
+If any run is red:
 - inspect logs;
-- fix root cause;
-- push new SHA;
-- require all four green on that new final SHA.
+- fix the root cause;
+- push;
+- require all four green on the new final SHA.
 
-Do not declare completion based only on local runs.
+Do not declare completion from local evidence alone.
 
-## 24. No New Scope
+## 32. No New Scope
 
-Do not implement in this task:
-- embeddings;
+Do not implement:
 - v1 -> v2 migration;
-- tools/function execution engine;
-- MCP;
-- computer use;
-- multimodal/image/audio/file inference;
-- background Responses jobs;
-- Responses persistence/retrieval;
-- external vector stores;
-- unrelated admin UI changes.
+- Responses tools/MCP/computer use;
+- multimodal generation;
+- vector database/storage/search;
+- RAG;
+- batch embeddings API;
+- async/background jobs;
+- arbitrary provider additions;
+- unrelated web redesign.
 
-## 25. Handoff
+## 33. Handoff
 
 Record:
 - implementation commits;
-- exact pinned Responses contract/SDK source used;
-- supported request fields/input forms;
-- explicit unsupported fields;
-- canonical Responses -> scheduler mapping;
-- streaming event sequence;
-- cancellation behavior;
-- quota/budget/accounting proof;
-- official Python SDK version/results;
-- JS SDK version/results if implemented;
-- fake-Ollama CI proof;
-- live Ollama proof;
+- pinned OpenAI SDK/reference behavior used;
+- supported embedding input/encoding/dimension subset;
+- explicit unsupported semantics;
+- capability enforcement;
+- encrypted operation payload format + legacy Chat compatibility;
+- provider adapter behavior;
+- fake Ollama endpoint behavior;
+- scheduler/quota/budget mapping;
+- request/token accounting proof;
+- usage/ledger proof;
+- cancellation/revocation/ambiguity proof;
+- observability behavior including no TTFT sample;
+- Python SDK version/results;
+- JS SDK version/results;
+- live Ollama embedding model/proof, or truthful no-installed-model limitation;
 - OpenAPI drift;
-- migration/no-migration decision;
+- migration decision;
 - backend/frontend/Playwright counts;
-- final remote CI SHA + four run IDs/conclusions;
+- final remote SHA + four workflow run IDs/conclusions;
 - known limitations;
-- WIP marker lifecycle;
+- WIP lifecycle;
 - exactly one recommended next step.
 
-Never include prompt/input/output content, raw credentials/session/OIDC/provider secrets, encrypted bytes,
-or provider response bodies in the handoff.
+Never include embedding input text, vector contents, credentials/session/OIDC/provider secrets,
+encrypted payload/result bytes, raw provider response bodies, or large logs.
 
 ## Commit and Push
 
 Suggested primary commit:
-`feat(api): add durable Responses text API`
 
-Additional scoped commits for contracts/CI/docs are fine.
+`feat(api): add durable embeddings endpoint`
+
+Additional scoped scheduler/adapter/test/docs commits are fine.
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to continue/commit/push.
 
 The task is complete only when:
-- official SDK Responses non-stream + stream are green;
-- Responses uses the existing durable scheduler/accounting authority;
-- unsupported semantics fail explicitly;
-- Chat remains green;
+- official Python + JS SDK Embeddings proofs are green;
+- embeddings use the existing durable scheduler/accounting authority;
+- capability checks prevent accidental text-route use;
+- quota/budget/accounting semantics are correct with output_units=0;
+- Chat + Responses remain green;
 - migration head remains 0017 unless narrowly justified otherwise;
-- local full regressions are green;
-- all four GitHub Actions are green on the final origin/v2 SHA;
+- local regressions are green;
+- all four remote workflows are green on the final origin/v2 SHA;
 - handoff is updated;
 - local `.aethergate-wip` is removed only after final remote verification.
