@@ -29,6 +29,7 @@ from aethergate.adapters.base import GenerationParams, Message, Usage
 from aethergate.api.deps import (
     RequestContext,
     get_gateway_request_id,
+    get_image_limits,
     request_context,
     scheduler_service,
 )
@@ -269,7 +270,7 @@ async def create_response(
     gateway_id = get_gateway_request_id(request)
     response_id = f"resp_{gateway_id}"
 
-    messages: list[Message] = body.to_canonical_messages()
+    messages: list[Message] = body.to_canonical_messages(get_image_limits())
     params = GenerationParams(
         temperature=body.temperature,
         top_p=body.top_p,

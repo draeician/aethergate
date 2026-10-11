@@ -25,6 +25,8 @@ The fixture supports:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import threading
 import time
@@ -53,12 +55,18 @@ class FakeOllamaConfig:
     # Model that returns 404 when the client requests it (model-not-found path).
     missing_models: tuple[str, ...] = field(default_factory=tuple)
 
-    # Introspection (safe: counts only, no prompt/content).
+    # Introspection (safe: counts/metadata only, never prompt/content or image
+    # bytes/base64).
     request_count: int = 0
     last_model: str | None = None
     last_path: str | None = None
     last_stream: bool | None = None
     last_mode: str | None = None
+    # Number of images in the most recent image-bearing upstream request, and
+    # the decoded byte length of each, in order. Only lengths are recorded.
+    last_image_count: int = 0
+    last_image_byte_lengths: tuple[int, ...] = field(default_factory=tuple)
+    image_request_count: int = 0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -121,6 +129,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
             return
         config.last_mode = mode
+        self._record_images(body)
         if isinstance(model, str) and model in config.missing_models:
             self._send_json(
                 404, {"error": f"model {model!r} not found"}
@@ -134,6 +143,38 @@ class _Handler(BaseHTTPRequestHandler):
             self._stream_response(mode)
         else:
             self._non_stream_response(mode)
+
+    def _record_images(self, body: dict[str, Any]) -> None:
+        """Record only safe image metadata (count + decoded byte lengths).
+
+        Never stores or logs raw image bytes/base64. Supports both the
+        ``/api/chat`` message-``images`` shape and the ``/api/generate``
+        top-level ``images`` shape emitted by the pinned LiteLLM ollama adapter.
+        """
+        raw_images: list[Any] = []
+        for message in body.get("messages") or []:
+            if isinstance(message, dict):
+                images = message.get("images")
+                if isinstance(images, list):
+                    raw_images.extend(images)
+        top_level = body.get("images")
+        if isinstance(top_level, list):
+            raw_images.extend(top_level)
+
+        lengths: list[int] = []
+        for image in raw_images:
+            if not isinstance(image, str):
+                continue
+            try:
+                lengths.append(len(base64.b64decode(image, validate=False)))
+            except (ValueError, binascii.Error):
+                lengths.append(-1)
+
+        config = self.config
+        config.last_image_count = len(lengths)
+        config.last_image_byte_lengths = tuple(lengths)
+        if lengths:
+            config.image_request_count += 1
 
     def _base_fields(self) -> dict[str, Any]:
         return {

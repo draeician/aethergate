@@ -14,11 +14,12 @@ import uuid
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aethergate.config import get_settings
+from aethergate.config import Settings, get_settings
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain.entities import RequestContext
 from aethergate.errors import AuthenticationRequired
 from aethergate.identity import service as identity_service
+from aethergate.inference.images import ImageLimits
 from aethergate.persistence.db import get_session_factory
 from aethergate.scheduler.runtime import build_scheduling_service
 from aethergate.scheduler.service import SchedulingService
@@ -76,11 +77,23 @@ def scheduler_service() -> SchedulingService:
     return build_scheduling_service()
 
 
+def get_image_limits(settings: Settings | None = None) -> ImageLimits:
+    """Return the configured inline-image limits for request validation."""
+    current = settings or get_settings()
+    return ImageLimits(
+        max_images_per_request=current.max_images_per_request,
+        max_image_bytes=current.max_image_bytes,
+        max_total_image_bytes=current.max_total_image_bytes,
+        max_queue_payload_bytes=current.max_queue_payload_bytes,
+    )
+
+
 __all__ = [
     "AsyncSession",
     "RequestContext",
     "build_scheduler",
     "get_gateway_request_id",
+    "get_image_limits",
     "request_context",
     "require_inference_access",
     "scheduler_service",

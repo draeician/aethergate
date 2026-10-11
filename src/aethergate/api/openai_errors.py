@@ -15,7 +15,9 @@ from aethergate.errors import (
     AuthenticationRequired,
     DestinationDenied,
     DomainError,
+    ImageLimitExceeded,
     ModelAliasNotFound,
+    PayloadTooLarge,
     ProviderError,
     QueueFull,
     QueueTimeout,
@@ -57,6 +59,23 @@ def to_openai_error(exc: DomainError, request_id: str | None) -> JSONResponse:
             "invalid_request_error",
             code="unsupported_feature",
             param=exc.param,
+            request_id=request_id,
+        )
+    if isinstance(exc, ImageLimitExceeded):
+        return _error(
+            400,
+            f"The request's image input exceeds the configured limit ({exc.limit}).",
+            "invalid_request_error",
+            code="image_limit_exceeded",
+            param=exc.param,
+            request_id=request_id,
+        )
+    if isinstance(exc, PayloadTooLarge):
+        return _error(
+            400,
+            "The request payload exceeds the configured size limit.",
+            "invalid_request_error",
+            code="payload_too_large",
             request_id=request_id,
         )
     if isinstance(exc, ModelAliasNotFound):
