@@ -8,6 +8,7 @@ orchestration are later phases.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import uuid
@@ -19,7 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aethergate.accounting import repository as accounting_repository
 from aethergate.accounting import service as accounting_service
-from aethergate.adapters.base import GenerationParams, Message, Usage
+from aethergate.adapters.base import (
+    GenerationParams,
+    ImageContentPart,
+    Message,
+    TextContentPart,
+    Usage,
+)
 from aethergate.catalog.service import (
     ResolvedRoute,
     resolve_model_alias,
@@ -29,6 +36,7 @@ from aethergate.config import Settings
 from aethergate.domain.entities import RequestContext
 from aethergate.domain.enums import (
     BillingUnit,
+    Capability,
     EndpointOperationalState,
     QuotaMetric,
     RequestState,
@@ -49,6 +57,7 @@ from aethergate.errors import (
     DestinationDenied,
     DomainError,
     ModelAliasNotFound,
+    PayloadTooLarge,
     ProviderError,
     QueueFull,
     ResourceInactive,
@@ -58,6 +67,7 @@ from aethergate.errors import (
     UnsupportedProvider,
 )
 from aethergate.identity import service as identity_service
+from aethergate.inference.images import enforce_request_image_limits
 from aethergate.inference.service import InferenceService, PreparedDispatch
 from aethergate.logging_config import log_event
 from aethergate.persistence import models
@@ -100,9 +110,46 @@ def _sanitize_error_code(message: str) -> str:
 # --- payload (de)serialization ----------------------------------------------
 
 
+def _serialize_part(part: TextContentPart | ImageContentPart) -> dict:
+    if isinstance(part, ImageContentPart):
+        # Image bytes live inside the (encrypted) scheduler payload only, as
+        # base64 within the JSON envelope; they are never written to plaintext
+        # metadata, logs, or a DB column.
+        return {
+            "type": "image",
+            "media_type": part.media_type,
+            "data": base64.b64encode(part.data).decode("ascii"),
+        }
+    return {"type": "text", "text": part.text}
+
+
+def _deserialize_part(raw: dict) -> TextContentPart | ImageContentPart:
+    part_type = raw.get("type")
+    if part_type == "image":
+        media_type = raw.get("media_type")
+        data = raw.get("data")
+        if not isinstance(media_type, str) or not isinstance(data, str):
+            raise ValueError("malformed image content part in scheduler payload")
+        return ImageContentPart(
+            media_type=media_type, data=base64.b64decode(data)
+        )
+    if part_type == "text":
+        text = raw.get("text")
+        if not isinstance(text, str):
+            raise ValueError("malformed text content part in scheduler payload")
+        return TextContentPart(text=text)
+    raise ValueError(f"unknown content part type {part_type!r}")
+
+
 def serialize_chat_payload(messages: list[Message], params: GenerationParams) -> bytes:
+    serialized_messages: list[dict] = []
+    for m in messages:
+        entry: dict = {"role": m.role, "content": m.content}
+        if m.parts is not None:
+            entry["parts"] = [_serialize_part(p) for p in m.parts]
+        serialized_messages.append(entry)
     data = {
-        "messages": [{"role": m.role, "content": m.content} for m in messages],
+        "messages": serialized_messages,
         "params": {
             "temperature": params.temperature,
             "top_p": params.top_p,
@@ -117,10 +164,23 @@ def serialize_chat_payload(messages: list[Message], params: GenerationParams) ->
 
 
 def deserialize_chat_payload(data: bytes) -> tuple[list[Message], GenerationParams]:
+    """Deserialize a chat payload, including pre-AGV2-028 legacy text payloads.
+
+    Legacy text-only payloads have message entries with only ``role``/``content``
+    and no ``parts`` key; they deserialize to ``Message(role, content)`` exactly
+    as before. A ``parts`` key (image-bearing payloads) deserializes to ordered
+    canonical content parts.
+    """
     obj = json.loads(data.decode("utf-8"))
-    messages = [
-        Message(role=m["role"], content=m["content"]) for m in obj["messages"]
-    ]
+    messages: list[Message] = []
+    for m in obj["messages"]:
+        raw_parts = m.get("parts")
+        parts = (
+            tuple(_deserialize_part(p) for p in raw_parts)
+            if raw_parts is not None
+            else None
+        )
+        messages.append(Message(role=m["role"], content=m["content"], parts=parts))
     p = obj.get("params", {})
     params = GenerationParams(
         temperature=p.get("temperature"),
@@ -252,6 +312,41 @@ class _BudgetEvaluation:
     output_units: int | None = None
     blocking_policy: models.ProjectBudgetPolicy | None = None
     next_eligible_at: datetime | None = None
+
+
+def _messages_have_images(messages: list[Message]) -> bool:
+    return any(m.has_images for m in messages)
+
+
+def _enforce_image_capability(resolved: ResolvedRoute, messages: list[Message]) -> None:
+    """Require image capability on the alias and provider for image requests.
+
+    A request carrying at least one image must be routed to a public ModelAlias
+    and Provider that both advertise ``Capability.IMAGE``. There is no fallback
+    to a text-only route and images are never silently removed.
+    """
+    if not _messages_have_images(messages):
+        return
+    if Capability.IMAGE not in resolved.alias.capabilities:
+        raise ResourceInactive(
+            "model alias image capability", resolved.alias.name
+        )
+    if Capability.IMAGE not in resolved.provider.capabilities:
+        raise ResourceInactive(
+            "provider image capability", str(resolved.provider.id)
+        )
+
+
+def _enforce_image_payload_limits(messages: list[Message], settings: Settings) -> None:
+    """Enforce per-request image count and total-byte limits before enqueue."""
+    images = [image for m in messages if m.parts for image in m.images]
+    if not images:
+        return
+    enforce_request_image_limits(
+        images,
+        max_images_per_request=settings.max_images_per_request,
+        max_total_image_bytes=settings.max_total_image_bytes,
+    )
 
 
 def _error_hint(exc: BaseException) -> str:
@@ -408,9 +503,11 @@ class SchedulingService:
         project_id = context.project_id
         principal_id = context.principal_id
         api_credential_id = context.api_credential_id
+        _enforce_image_payload_limits(messages, self._settings)
         async with self._session_factory() as session:
             resolved = await resolve_model_alias(session, alias_name)
             self._inference.validate_destination(resolved)
+            _enforce_image_capability(resolved, messages)
             request_id, queue_wait_until, expires_at = await self._enqueue(
                 session,
                 resolved=resolved,
@@ -712,6 +809,23 @@ class SchedulingService:
                 messages, params = deserialize_chat_payload(
                     self._encryptor.decrypt(request.payload_encrypted)
                 )
+                # Re-enforce image capability at dispatch time: capability may
+                # have been revoked while the request was queued, and an image
+                # request must never reach a text-only route.
+                try:
+                    _enforce_image_capability(resolved, messages)
+                except DomainError:
+                    await scheduler_repository.fail_request_direct(
+                        session,
+                        request_id=request_id,
+                        state=RequestState.FAILED,
+                        error_code="model_unavailable",
+                        finished_at=now,
+                    )
+                    logger.info(
+                        "request=%s failed image capability revalidation", request_id
+                    )
+                    return "processed"
                 effective_group_id = (
                     str(resolved.route_binding.quota_group_id)
                     if resolved.route_binding.quota_group_id is not None
@@ -1510,7 +1624,10 @@ class SchedulingService:
         if queued >= self._settings.queue_max_requests:
             raise QueueFull("the inference queue is at capacity")
 
-        payload = self._encryptor.encrypt(serialize_chat_payload(messages, params))
+        serialized = serialize_chat_payload(messages, params)
+        if len(serialized) > self._settings.max_queue_payload_bytes:
+            raise PayloadTooLarge()
+        payload = self._encryptor.encrypt(serialized)
         now = utcnow()
         request_id = RequestId(_new_id())
         queue_wait_until = now + timedelta(seconds=self._settings.queue_max_wait_seconds)

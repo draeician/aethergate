@@ -239,6 +239,32 @@ class UnsupportedFeature(DomainError):
         self.param = param
 
 
+class ImageLimitExceeded(DomainError):
+    """A client inline image input violates a configured image resource limit.
+
+    A safe, explicit 400: the request is rejected before durable enqueue and
+    before any provider dispatch. ``limit`` is a stable machine keyword; neither
+    ``limit`` nor the message ever contains image bytes or base64.
+    """
+
+    def __init__(self, limit: str, *, param: str | None = None) -> None:
+        super().__init__(f"image input exceeds {limit}")
+        self.limit = limit
+        self.param = param
+
+
+class PayloadTooLarge(DomainError):
+    """A request's serialized scheduler payload exceeds the configured bound.
+
+    Applies to both text-only and image-bearing payloads: a request that cannot
+    fit the durable queue payload bound is rejected before enqueue. The message
+    never contains payload content.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("the request payload exceeds the configured size limit")
+
+
 class QueueKeyError(DomainError):
     """The scheduler queue encryption key is absent or invalid."""
 
