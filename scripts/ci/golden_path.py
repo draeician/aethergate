@@ -251,6 +251,45 @@ def _sdk_inference(base_url: str, key: str, model: str, *, stream: bool) -> str:
     return "ok"
 
 
+def _sdk_responses_inference(
+    base_url: str, key: str, model: str, *, stream: bool
+) -> str:
+    """Prove the official SDK Responses text surface (non-stream + stream)."""
+    from openai import OpenAI
+    from openai.types.responses import ResponseCompletedEvent, ResponseTextDeltaEvent
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    if stream:
+        events = client.responses.create(
+            model=model, input="golden path responses prompt", stream=True
+        )
+        parts: list[str] = []
+        completed = False
+        for event in events:
+            if isinstance(event, ResponseTextDeltaEvent):
+                parts.append(event.delta)
+            if isinstance(event, ResponseCompletedEvent):
+                if event.response.status != "completed":
+                    _fail("responses stream completed status was not completed")
+                completed = True
+        if not parts or not "".join(parts):
+            _fail("responses stream produced no output text")
+        if not completed:
+            _fail("responses stream did not emit response.completed")
+        return "ok_responses_stream"
+
+    response = client.responses.create(
+        model=model, input="golden path responses prompt"
+    )
+    if response.object != "response" or response.status != "completed":
+        _fail("responses non-stream had unexpected object/status")
+    if not response.output_text:
+        _fail("responses non-stream produced empty output_text")
+    if response.usage is None:
+        _fail("responses non-stream did not report usage")
+    return "ok_responses"
+
+
 def _write_secrets(path: Path, values: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in values.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -307,6 +346,18 @@ def phase_main(args: argparse.Namespace) -> int:
     _log("official SDK stream")
     if _sdk_inference(args.base_url, key, "golden-model", stream=True) != "ok_stream":
         _fail("stream inference did not return ok_stream")
+    _log("official SDK Responses non-stream")
+    if (
+        _sdk_responses_inference(args.base_url, key, "golden-model", stream=False)
+        != "ok_responses"
+    ):
+        _fail("Responses non-stream inference did not return ok_responses")
+    _log("official SDK Responses stream")
+    if (
+        _sdk_responses_inference(args.base_url, key, "golden-model", stream=True)
+        != "ok_responses_stream"
+    ):
+        _fail("Responses stream inference did not return ok_responses_stream")
 
     # Record safe state (IDs/counts only; no secrets).
     with _admin_client(args.base_url, admin_key) as client:
@@ -321,6 +372,8 @@ def phase_main(args: argparse.Namespace) -> int:
         "ledger_entries": ledger.get("total", 0),
         "sdk_non_stream": "ok",
         "sdk_stream": "ok_stream",
+        "sdk_responses_non_stream": "ok_responses",
+        "sdk_responses_stream": "ok_responses_stream",
     }
     (workdir / STATE_FILE).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     _write_secrets(

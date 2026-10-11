@@ -182,6 +182,19 @@ jobs:
             --base-url "$WEB_BASE_URL" \
             --workdir /tmp/ag-golden
 
+      - name: Official JS SDK smoke (Models + Chat + Responses, offline)
+        # Runs AFTER the post-restore count assertions (it performs live SDK
+        # inference, which appends usage records). Uses the locked official
+        # OpenAI Node SDK in sdk/js; the web UI never imports the SDK.
+        run: |
+          cd sdk/js
+          npm ci
+          AETHERGATE_SDK_BASE_URL="$WEB_BASE_URL/v1" \
+            AETHERGATE_SDK_API_KEY="$GOLDEN_INFERENCE_KEY" \
+            AETHERGATE_SDK_MODEL="golden-model" \
+            AETHERGATE_SDK_STREAMING=1 \
+            npm run smoke
+
       - name: Install Chromium
         run: (cd frontend && npx playwright install --with-deps chromium)
 
