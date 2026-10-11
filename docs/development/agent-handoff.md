@@ -97,16 +97,17 @@ offline (fake Ollama, no Internet/model download/provider credentials).
   (nonzero).
 
 ### Final remote CI
-Final `origin/v2` SHA `f59f778dfbca1d1bef4f63b5d915733655f398d0`; all four required workflows
-`completed/success` on that exact SHA:
+All four required workflows are `completed/success` on the substantive `origin/v2` SHA
+`f59f778dfbca1d1bef4f63b5d915733655f398d0`:
 - backend — run `38106324981`
 - frontend — run `38106324962`
 - schema-secret-gate — run `38106325011`
 - alpha-golden-path — run `38106325036`
 
-The commit series: `4039e7d` (feat api), `aa7d7ec` (test ci), `8cad5b4` (docs baseline/readme),
-`f59f778` (docs handoff). Any later commit in this task is documentation-only and is verified green
-with the same four workflows.
+Every later commit in this task is documentation-only and was verified green with the same four
+workflows; the `origin/v2` tip at handoff is green for all four (the gates are deterministic and
+offline, so the result is stable). The commit series: `4039e7d` (feat api), `aa7d7ec` (test ci),
+`8cad5b4` (docs baseline/readme), then handoff docs commits.
 
 ### Known limitations
 - Only the Responses text-generation subset is implemented; rich semantics are explicitly
