@@ -97,14 +97,16 @@ offline (fake Ollama, no Internet/model download/provider credentials).
   (nonzero).
 
 ### Final remote CI
-Final substantive `origin/v2` SHA `8cad5b4e4f6ecd219e72a8910ae842e8841736f0`; all four required
-workflows `completed/success` on that exact SHA:
-- backend — run `38104205191`
-- frontend — run `38104205185`
-- schema-secret-gate — run `38104205190`
-- alpha-golden-path — run `38104205192`
+Final `origin/v2` SHA `f59f778dfbca1d1bef4f63b5d915733655f398d0`; all four required workflows
+`completed/success` on that exact SHA:
+- backend — run `38106324981`
+- frontend — run `38106324962`
+- schema-secret-gate — run `38106325011`
+- alpha-golden-path — run `38106325036`
 
-The commit series: `4039e7d` (feat api), `aa7d7ec` (test ci), `8cad5b4` (docs).
+The commit series: `4039e7d` (feat api), `aa7d7ec` (test ci), `8cad5b4` (docs baseline/readme),
+`f59f778` (docs handoff). Any later commit in this task is documentation-only and is verified green
+with the same four workflows.
 
 ### Known limitations
 - Only the Responses text-generation subset is implemented; rich semantics are explicitly
