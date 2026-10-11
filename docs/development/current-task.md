@@ -1,10 +1,21 @@
-# AetherGate v2 — Current Task
+# AetherGate — Current Task
 
 ## Task ID
-AGV2-026
+AGV2-027
 
 ## Title
-Alpha 2 — OpenAI Embeddings API through the durable scheduler
+Canonical v2 cutover — retire v1 and make the current architecture the only supported runtime
+
+## Superseded Task
+
+AGV2-026 (Embeddings) was queued but **not started**.
+
+It is intentionally deferred by operator direction. Do not implement embeddings in this task.
+
+New sequence:
+1. AGV2-027 — clean v2 cutover / v1 retirement;
+2. Vision / multimodal inference;
+3. Embeddings may be resumed later.
 
 ## WIP Marker — FIRST LOCAL ACTION
 
@@ -13,7 +24,7 @@ Immediately after entering the repository, before pull/read/implementation work,
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-026
+- task ID: AGV2-027
 - branch: v2
 - UTC start timestamp
 
@@ -26,76 +37,57 @@ If blocked/incomplete, leave it present.
 Remove it only after:
 1. every local/live criterion below is green;
 2. every task commit is pushed to origin/v2;
-3. the final origin/v2 SHA has all required GitHub Actions green;
-4. the handoff is committed/pushed and remote verified.
+3. final origin/v2 remote CI is green;
+4. handoff is committed/pushed and remote verified.
+
+## Operator Cutover Decision
+
+The v1 deployment was never used for production and contains no important state.
+
+The authoritative requirements have already been updated:
+
+- `project_spec.md` — current cutover is clean/destructive; no v1 SQLite data import;
+- `AGENTS.md` — agents must not resurrect a legacy data importer;
+- `docs/migrations/v1-to-v2.md` — clean-cutover procedure replaces the prior preservation plan.
+
+Therefore:
+
+- **do not build a v1 SQLite -> v2 PostgreSQL data importer;**
+- **do not preserve v1 users, keys, balances, request logs, endpoints, models, or plaintext provider
+  credentials;**
+- v2 starts with a fresh PostgreSQL authority;
+- the dated architecture audit remains immutable historical evidence.
 
 ## Starting Point
 
-AGV2-025 is complete and reviewed PASS.
+Last completed feature milestone:
 
-Final verified Responses SHA:
+AGV2-025 — Responses text subset.
+
+Verified final SHA:
 `07ae618ff95503f765ae2f4ad45f531292921b3a`
-
-Remote workflows on that exact SHA:
-- backend — run `38107167919` — completed/success
-- frontend — run `38107167870` — completed/success
-- schema-secret-gate — run `38107167910` — completed/success
-- alpha-golden-path — run `38107167873` — completed/success
 
 Green baseline:
 - backend: **613 collected**
 - frontend: **87 passed**
-- full Playwright: **32 passed** (+ 3 CI-only skips)
+- Playwright: **32 passed** (+ 3 CI-only skips)
 - migration head: **0017**
-- Python SDK: `openai==2.54.0`
-- JS SDK: `openai@7.32.0`
-- LiteLLM: `1.104.0`
-- pinned dependency graph: `constraints.txt`.
+- Python SDK `openai==2.54.0`
+- JS SDK `openai@7.32.0`
+- remote CI 4/4 green.
 
-Core OpenAI target status:
-- Models — implemented
-- Chat Completions — implemented
-- Responses text subset — implemented
-- Embeddings — this task
+The branch also contains the requirement-update commits immediately after the superseded AGV2-026
+queue commit. Pull latest `origin/v2` before doing anything beyond the WIP marker.
 
-## Why This Task Exists
+## Goal
 
-`POST /v1/embeddings` is the remaining core v2 OpenAI endpoint in the pinned compatibility target.
+After this task, the repository must have **one supported AetherGate implementation**: the current
+PostgreSQL/Alembic/scheduler architecture under `src/aethergate`.
 
-Embeddings are not chat generation, but they must use the same AetherGate authority:
+No active source file, root runtime entrypoint, operator document, agent instruction, or CI path may
+suggest that the old SQLModel/SQLite implementation is still supported.
 
-- inference credential authentication;
-- public model aliases;
-- approved route/egress resolution;
-- durable queue;
-- endpoint concurrency reservations;
-- shared quota/cooldown authority;
-- project budgets;
-- immutable price snapshots;
-- usage/ledger settlement;
-- worker leases/fencing/cancellation/recovery;
-- passive upstream health/retry observability;
-- encrypted queued payload/result storage.
-
-Do NOT implement embeddings as a direct synchronous adapter call that bypasses the scheduler.
-
-The scheduler currently assumes a chat payload/result. This task must generalize that internal boundary
-carefully while preserving all existing Chat + Responses behavior.
-
-## Compatibility Authority
-
-Before implementation, read:
-
-- `docs/contracts/openai-compatibility-baseline.md`
-- pinned upstream OpenAI reference named there
-- locked `openai==2.54.0` Python Embeddings request/response types
-- locked `openai@7.32.0` JS SDK behavior
-- LiteLLM `1.104.0` embedding API behavior for provider kind `ollama`
-- current fake Ollama implementation
-- current scheduler payload/result serializers
-- accounting/quota reservation code.
-
-Do not guess the embedding wire schema, base64 encoding, or Ollama endpoint from memory.
+This is a codebase/runtime cutover, not a historical-data conversion.
 
 ## Recovery
 
@@ -106,730 +98,458 @@ If context is compacted/restarted/uncertain:
 3. re-read project_spec.md;
 4. re-read this file;
 5. re-read docs/development/agent-handoff.md;
-6. inspect git status/history and GitHub Actions state;
-7. continue from repository state.
+6. re-read docs/migrations/v1-to-v2.md;
+7. inspect git status/history;
+8. continue from repository state.
+
+## 1. Inventory legacy v1 artifacts before deletion
+
+Before changing files, inventory every v1-only artifact.
 
-## 1. Endpoint
+Known legacy candidates include:
+
+- `app/`
+- root `Dockerfile`
+- root `docker-compose.yml`
+- root `requirements.txt`
+- `init_db.py`
+- `manage.py`
+- `debug_inference.py`
+- `scripts/add_model_config_columns.py`
+- `scripts/add_rate_limit_column.py`
+- `scripts/migrate_endpoints.py`
+- `API_REFERENCE.md`
+- `OPS_RUNBOOK.md`
+- `AETHERGATE_RULES.md`
+- `.context-resume.md`
+- stale `.cursorrules`
+- stale `CLAUDE.md`.
 
-Implement:
+Search the whole tracked tree for additional:
+- imports from `app`;
+- SQLModel/aiosqlite runtime references;
+- v1 `MASTER_API_KEY` / `x-admin-key` instructions;
+- `sk-` v1 credential examples;
+- balance-as-authorization language;
+- direct SQLite paths;
+- obsolete v1 container names;
+- v1-only admin URLs;
+- old migration scripts.
 
-`POST /v1/embeddings`
+Do not delete the immutable dated audit:
+`docs/audits/v2-architecture-audit-2026-10-03.md`.
 
-in a dedicated router, e.g.:
+Do not delete historical references inside the audit merely because they describe v1.
 
-`src/aethergate/api/openai_embeddings.py`
+## 2. Remove the legacy runtime
 
-Register it in `aethergate.main`.
+Delete the unsupported v1 application/runtime code.
 
-Semantics:
-- validate/authenticate;
-- durably enqueue;
-- hold the normal synchronous HTTP request open while queued/executing;
-- return the standard Embeddings response when terminally successful.
+Expected removals:
+- entire `app/`;
+- root legacy Dockerfile;
+- root legacy docker-compose.yml;
+- root legacy requirements.txt;
+- v1 DB/admin/debug scripts;
+- v1 ad-hoc SQLite schema migration scripts.
 
-Embeddings are non-streaming.
-Do not invent an embedding stream endpoint or proprietary queue events.
+No compatibility shim is required.
 
-## 2. Supported request subset
+Do not leave a dead import path that can accidentally start the old FastAPI app.
 
-Use the pinned OpenAI contract/SDK as authority.
+After removal, searches such as:
+- `from app.`
+- `import app.`
+- `sqlmodel`
+- `aiosqlite`
+- `sqlite+aiosqlite`
 
-At minimum support official SDK calls for:
+must not appear in active runtime/build/test/operator code unless a historical document explicitly
+describes the retired system.
 
-- a single text string input;
-- a list of text strings preserving input order;
-- `model` as public AetherGate alias.
+## 3. Retire stale v1 operator documentation
 
-### encoding_format
+Remove or replace stale root documents that describe the old runtime.
 
-Support the pinned default float representation.
+### API_REFERENCE.md
+The old document describes:
+- `sk-` keys;
+- balance authorization;
+- `x-admin-key`;
+- old `/admin/*` routes.
 
-If the pinned API/SDK defines `encoding_format="base64"`, implement it if the encoding can be
-performed faithfully at the protocol translation layer.
+It must not remain as an apparent current API reference.
 
-Before implementing base64:
-- inspect the pinned official SDK/reference for exact byte representation/endian/float width;
-- add byte-level deterministic vectors;
-- do not guess.
+Preferred:
+- remove it and point README/docs to generated OpenAPI + current contract docs;
+or
+- replace it with a very small canonical pointer explicitly stating the old reference was retired.
 
-If faithful base64 cannot be established from the pinned reference, reject it explicitly with
-`unsupported_feature` rather than silently returning floats.
+Do not duplicate the generated API documentation manually.
 
-### dimensions
+### OPS_RUNBOOK.md
+The old docker02/Streamlit/NPM runbook is historical and unsafe as a current operator guide.
 
-Inspect the pinned contract + LiteLLM/Ollama behavior.
+Remove it or replace it with a pointer to:
+`docs/operations/alpha-runbook.md`.
 
-If `dimensions` can be passed faithfully through the existing provider adapter for the tested
-embedding route, support it and test exact output dimension.
+No stale host IPs, old container names, Streamlit instructions, or MASTER_API_KEY instructions should
+remain in active operator docs.
 
-Otherwise:
-- explicitly reject non-null `dimensions` with 400 `unsupported_feature`;
-- never silently ignore it.
+## 4. Retire stale agent instructions
 
-### token-array input
+Old agent files currently instruct:
+- SQLModel;
+- prepaid balance as universal authorization;
+- old v1 architecture.
 
-If the pinned endpoint accepts token-ID arrays but the current Ollama/LiteLLM path cannot faithfully
-represent them:
-- explicitly reject those input variants;
-- do not stringify token IDs;
-- do not reinterpret them as text.
+That directly conflicts with `project_spec.md`.
 
-### other semantic fields
+Required:
+- remove `AETHERGATE_RULES.md` if nothing current depends on it;
+- remove `.context-resume.md`;
+- update or replace `.cursorrules` so it points to `AGENTS.md` + `project_spec.md`, with no v1
+  architecture rules;
+- update `CLAUDE.md` similarly if it is retained.
 
-Known semantic fields such as `user` or future embedding controls must be either:
-- implemented faithfully; or
-- explicitly rejected.
+The rule hierarchy must be unambiguous:
+1. AGENTS.md
+2. project_spec.md
+3. current task/handoff
+4. architecture docs.
 
-Purely additive unknown fields may follow the documented tolerance policy.
+No agent bootstrap file may tell a model to use SQLModel or prepaid-balance gating.
 
-## 3. Transport/routing override rejection
+## 5. Canonical runtime remains the proven v2 stack
 
-As with Chat/Responses, inference callers may never choose transport/routing internals.
+Do **not** gratuitously rename the stable current deployment tree during this cutover.
 
-Reject:
-- base_url/api_base;
-- provider/provider account;
-- endpoint;
-- upstream model;
-- arbitrary headers;
-- api_key/api_token;
-- deployment/custom_api_base;
-- equivalent transport-control fields.
+The canonical implementation may continue to live at:
+- `src/aethergate/`
+- `deploy/v2/`
+- `scripts/dev/v2`
+- `scripts/ops/v2`
 
-Use the existing safe structured OpenAI error envelope.
+Those paths are already deeply verified and the internal `v2` path name does not imply v1 remains
+supported.
 
-## 4. Capability enforcement
+The goal is one supported implementation, not a cosmetic path-renaming project.
 
-The domain already defines:
+README/docs must clearly say that these are the canonical current AetherGate paths.
 
-`Capability.EMBEDDING = "embedding"`
+Do not create duplicate root Compose/Docker definitions merely to remove the string "v2".
 
-Embedding dispatch must require the configured public route to be intentionally embedding-capable.
+## 6. Root build/runtime ambiguity
 
-At minimum:
-- ModelAlias must advertise `embedding`;
-- Provider must advertise `embedding`;
-- registered provider adapter must implement embedding.
+After deleting the legacy root Dockerfile/Compose:
 
-If any requirement is absent:
-- fail before upstream dispatch;
-- return a stable safe model/capability-unavailable error;
-- no hidden fallback to a text model.
+- README quick-start must exclusively use the supported current commands;
+- no documentation may suggest `docker compose up` at repo root unless that is actually supported;
+- `deploy/v2/Dockerfile` is the canonical image;
+- `deploy/v2/compose*.yaml` is the canonical Compose stack;
+- `scripts/dev/v2` and `scripts/ops/v2` are canonical wrappers.
 
-Do not infer embedding capability merely because an Ollama endpoint exists.
+If any tooling assumes a root Dockerfile, update that tooling to the canonical path.
 
-Existing text aliases and Chat/Responses must remain backward compatible.
+Do not add a root Dockerfile just as a compatibility alias unless a real supported workflow requires it.
 
-Do not retroactively require every existing text provider record to add capabilities unless the
-existing text path already enforces them.
+## 7. CI must be ready for main cutover
 
-## 5. Generalize the encrypted scheduler payload — no DB operation column
+Current workflows run on pushes to `v2`.
 
-Expected migration decision: **no migration; head remains 0017**.
+Update all four GitHub Actions so push triggers include:
+- `v2`;
+- `main`.
 
-Introduce a versioned/canonical encrypted payload envelope, e.g.:
+Pull-request behavior remains.
 
-- operation = `chat`; chat messages + generation params
-- operation = `embedding`; ordered text inputs + supported embedding params
+Required workflows:
+- backend;
+- frontend;
+- schema-secret-gate;
+- alpha-golden-path.
 
-Requirements:
-- operation discriminator remains inside `payload_encrypted`;
-- no plaintext prompt/input;
-- no new DB column solely for operation kind;
-- legacy chat payloads already queued/stored without an operation discriminator must deserialize as
-  `chat`;
-- new Chat/Responses behavior must remain wire-compatible;
-- queue max encrypted/plain payload bounds still apply.
+Preserve:
+- least privilege;
+- concurrency;
+- locked dependencies;
+- fully offline golden path.
 
-Add explicit backward-compatibility tests for a pre-AGV2-026 chat payload.
+This ensures the same gates protect the repository after v2 is merged into main.
 
-Do not make workers infer operation from request content heuristics.
+## 8. Add a legacy-reintroduction CI guard
 
-## 6. Provider-neutral adapter model
-
-Extend `src/aethergate/adapters/base.py` with embedding-specific types.
-
-Recommended concepts:
-
-- `EmbeddingRequest`
-  - provider_kind
-  - base_destination
-  - upstream_model
-  - ordered tuple/list of text inputs
-  - supported embedding parameters
-  - timeout
-
-- `EmbeddingResult`
-  - ordered vectors
-  - `Usage`
-  - upstream_request_id
-
-- an `EmbeddingAdapter` protocol or a unified provider adapter protocol with explicit
-  `embed(...)`.
-
-Do not pretend an embedding is a ChatRequest/CompletionResult.
-
-The existing Chat adapter protocol remains valid.
-
-## 7. LiteLLM embedding adapter
-
-Implement the embedding operation through pinned LiteLLM `1.104.0`.
-
-Requirements:
-- provider kind remains `ollama`;
-- use the admin-configured base destination;
-- use the route's admin-configured upstream model;
-- `num_retries/max_retries=0` or equivalent — no hidden SDK retry;
-- provider errors map through the existing sanitized `ProviderError`;
-- safe numeric status/retry-after feedback preserved where available;
-- no raw body/header/URL/secret leakage;
-- input order preserved;
-- vector order preserved;
-- reject malformed/non-finite embedding values.
-
-No new production provider kind.
-
-## 8. Deterministic fake Ollama embedding surface
-
-Extend `src/aethergate/testing/fake_ollama.py` to implement the exact Ollama HTTP embedding endpoint
-that the pinned LiteLLM adapter actually calls.
-
-Discover/verify it from the real pinned adapter behavior; do not assume whether the path is
-`/api/embed`, `/api/embeddings`, or another form.
-
-Provide deterministic:
-- single-input vector;
-- multi-input vectors;
-- stable dimensions;
-- usage/token metadata as available through the real LiteLLM mapping;
-- configurable delay;
-- 404;
-- 429;
-- 5xx.
-
-Use canned deterministic numeric vectors.
-Never log or persist submitted input text.
-
-Tests must exercise the **real LiteLLM adapter transport** against the fake server.
-
-## 9. Inference service
-
-Extend `InferenceService` with embedding preparation/estimation that reuses:
-
-- route resolution;
-- egress destination policy;
-- SecretRef resolution;
-- adapter registry.
+Add a small deterministic CI script/check that fails if forbidden v1 runtime artifacts are reintroduced.
 
 Recommended:
-- `prepare_embedding_from_resolved`;
-- `estimate_embedding_input_tokens`.
+`scripts/ci/no_legacy_v1.sh`
+
+At minimum fail if tracked active files include:
+- `app/`;
+- root legacy `docker-compose.yml`;
+- root legacy `requirements.txt`;
+- retired v1 migration scripts;
+- active imports of `app.*`;
+- active SQLModel/aiosqlite dependencies outside historical audit text.
+
+Do not make the check so broad that the immutable v1 audit or migration-retirement document fails for
+describing history.
 
-Do not duplicate destination/secret logic.
+Wire this guard into `schema-secret-gate` or backend CI.
+
+Add a test or self-check proving the guard itself catches a synthetic forbidden path/reference.
+
+## 9. Dependency cleanup
+
+After v1 removal, verify no current dependency exists solely for v1.
 
-Provider/model-specific input-token estimation rules remain fail-closed when token quota/budget
-enforcement requires an estimate.
+Specifically audit:
+- sqlmodel;
+- aiosqlite;
+- passlib/bcrypt v1 usage;
+- typer v1 management usage;
+- numpy v1 pin rationale.
 
-## 10. Scheduler admission refactor
+Do not remove a package merely because v1 used it if the current stack still needs it transitively or
+directly.
+
+The committed `constraints.txt` must remain reproducible.
+
+If dependency files legitimately change:
+- refresh the lock through the documented locking workflow;
+- regenerate OpenAPI if dependency versions change;
+- run all regression gates.
+
+Avoid dependency churn unrelated to the legacy removal.
+
+## 10. Current documentation canonicalization
+
+Update at minimum:
+- README.md
+- docs/development/README.md
+- docs/operations/alpha-runbook.md
+- docs/releases/alpha1-readiness.md
+- docs/migrations/v1-to-v2.md if implementation discoveries refine it
+- AGENTS.md if any now-deleted file is still mandatory reading
+- docs/development/agent-handoff.md.
+
+README should present:
+- **AetherGate**, not “old v1 plus v2”;
+- the current architecture as the only supported runtime;
+- Models + Chat Completions + Responses text subset;
+- embeddings still deferred;
+- vision planned next after cutover;
+- canonical dev/operator commands.
+
+Historical documentation may say "v1" and "v2" where needed to explain history.
 
-Generalize the minimum necessary scheduler boundary so chat and embedding workloads share the same
-state machine.
+## 11. Architecture/reference scan
 
-Keep one:
-- queue;
-- claim path;
-- lease/fence model;
-- reservation table;
-- cancellation/recovery path;
-- worker.
-
-Do not copy `claim_and_reserve` into an embedding scheduler.
-
-At claim time:
-1. decrypt canonical payload;
-2. identify operation;
-3. revalidate auth;
-4. re-resolve alias/route;
-5. revalidate embedding capability for embedding work;
-6. evaluate budget/quota using operation-specific input/output reservation units;
-7. reserve quota/budget/slot transactionally;
-8. prepare the correct provider operation.
+Search current non-audit docs for statements that are now false, especially:
+- "v1 migration still required";
+- "legacy app retained for reference";
+- SQLite as an active runtime;
+- identity/history preservation as a current cutover requirement;
+- old admin key model;
+- balance/prepaid as universal authorization;
+- Streamlit dashboard/current NPM setup.
 
-A `ClaimedWork` may carry an explicit operation + operation-specific prepared dispatch union.
-
-## 11. Embedding quota semantics
+Correct current docs.
 
-Request quotas:
-- identical to Chat/Responses: one gateway embedding request consumes one request unit, regardless of
-  number of input strings.
+Do not rewrite the dated audit.
 
-Token quotas:
-- count/estimate the total input-token units across all embedding inputs;
-- embedding output vectors consume **zero output tokens**;
-- no `default_output_tokens` or generation-token reserve for embeddings;
-- if an enforced token quota exists and no defensible provider/model estimator is available, fail
-  closed using the established estimator-unavailable behavior.
+Do not erase useful historical context; label it clearly as retired/historical.
 
-Do not count vector dimensions as output tokens.
-
-Add tests proving a multi-input request aggregates input-token usage correctly.
-
-## 12. Embedding budget/accounting semantics
-
-Use the existing PricePolicy/PriceSnapshot/Budget/UsageRecord/Ledger authority.
-
-### request-priced route
-- one embedding API request = request_units 1;
-- vector count does not multiply request price.
-
-### token-priced route
-- amount is based on measured/estimated **input tokens**;
-- output_units = 0;
-- output-price contribution = 0;
-- no made-up charge for vector dimensions.
-
-At dispatch:
-- capture immutable PriceSnapshot exactly like other inference work;
-- reserve project budget transactionally.
-
-At settlement:
-- UsageRecord input_units = measured embedding input tokens;
-- output_units = 0;
-- one UsageRecord per successful gateway request;
-- one signed negative usage_debit;
-- exactly-once semantics unchanged.
-
-If provider usage is insufficient for trustworthy token-priced settlement:
-- do not invent units;
-- fail closed or follow the established accounting invariant appropriate to the current scheduler;
-- document/test the behavior.
-
-## 13. Encrypted result representation
-
-Extend the encrypted terminal result envelope to distinguish:
-- chat completion result;
-- embedding result.
-
-Embedding result contains:
-- ordered vectors;
-- trustworthy usage;
-- upstream_request_id.
+## 12. Clean-install cutover proof
 
-Requirements:
-- vectors are encrypted at rest in `result_encrypted`;
-- vectors are never copied into plaintext scheduler metadata/logs;
-- old encrypted chat results remain readable;
-- API protocol translation performs float/base64 formatting only after decrypting the terminal result
-  for the authorized waiting request.
+Use a fresh disposable environment, not the accumulated dev DB.
 
-No schema migration solely for embedding result shape.
+Prove the actual supported transition is:
 
-## 14. Worker dispatch
+1. no v1 database imported;
+2. fresh PostgreSQL database;
+3. Alembic empty -> head;
+4. config preflight;
+5. API/worker readiness;
+6. one-use bootstrap;
+7. deterministic OIDC login;
+8. create project/principal/catalog/provider account/endpoint/alias/route;
+9. create inference credential;
+10. official Python SDK Models;
+11. Chat non-stream;
+12. Chat stream;
+13. Responses non-stream;
+14. Responses stream;
+15. dashboard/operator console loads;
+16. accounting/observability state appears;
+17. backup succeeds;
+18. restart succeeds;
+19. post-restart SDK request succeeds.
 
-The worker's non-stream path must branch by canonical operation:
+This is the replacement for a v1 data-import test.
 
-### chat
-Preserve existing:
-- adapter.complete
-- result serializer
-- accounting
-- errors.
+Migration head should remain `0017`.
 
-### embedding
-Use:
-- adapter.embed
-- embedding result serializer
-- same cancellation check;
-- same fenced terminal settlement;
-- same provider failure classification;
-- same cooldown application for 429;
-- same endpoint reservation release;
-- same accounting settlement.
-
-Embeddings never enter `run_stream`.
-No TTFT/first_token_at sample should be fabricated.
-
-## 15. Terminal result/API translation
-
-Generalize `wait_for_terminal` / terminal-result decryption enough for the Embeddings router to
-obtain the embedding vectors and usage without breaking Chat/Responses callers.
-
-Prefer an explicit typed/operation-aware terminal payload instead of adding unrelated nullable fields
-until the result object becomes ambiguous.
-
-Chat + Responses current callers must continue to work unchanged or through a narrow compatibility
-wrapper.
-
-## 16. OpenAI Embeddings response
-
-Return the exact pinned response shape.
-
-At minimum:
-- `object = "list"`;
-- `data` in input order;
-- each item has:
-  - `object = "embedding"`;
-  - correct `index`;
-  - embedding vector in requested supported encoding;
-- `model` = public AetherGate alias, never upstream model;
-- usage:
-  - prompt/input tokens according to pinned field names;
-  - total tokens;
-- gateway request ID remains available through established response headers/correlation.
-
-Do not leak:
-- endpoint;
-- provider account;
-- upstream model;
-- upstream URL.
-
-## 17. Authentication / queued revalidation
-
-Use the exact same inference auth path:
-- inference-audience `agk_`;
-- `inference:invoke`;
-- project/principal attribution;
-- bypass=false in acceptance.
-
-Dispatch-time credential revalidation is mandatory:
-- revoke a queued embedding credential;
-- prove it never reaches upstream;
-- reservations are not incorrectly retained.
-
-## 18. Cancellation / ambiguous outcomes
-
-Client disconnect while queued/reserved:
-- same durable cancellation/release path.
-
-Disconnect/worker loss after durable dispatch:
-- preserve the existing conservative ambiguity semantics;
-- never assume an embedding did not run just because the client disconnected;
-- no duplicate automatic execution.
-
-Add deterministic scheduler/fault tests for embedding work.
-
-## 19. Observability
-
-Existing metrics should naturally include embeddings where semantically correct:
-
-- queue wait — yes;
-- retry rate — yes;
-- upstream passive health — yes;
-- TTFT — **no** (embeddings are non-streaming; no first-token sample).
-
-Prove embedding provider success/failure contributes to endpoint upstream health.
-
-Do not fabricate TTFT=0.
-
-## 20. Contract/API tests
-
-Add a dedicated Embeddings suite covering at least:
-
-1. single text input;
-2. list of text inputs;
-3. empty/invalid input;
-4. input order preserved;
-5. default float encoding;
-6. base64 encoding if implemented;
-7. dimensions if implemented;
-8. token-array form explicit rejection if unsupported;
-9. known unsupported semantic fields explicit rejection;
-10. transport override rejection;
-11. public model alias in response;
-12. exact response discriminators/item indices;
-13. usage shape;
-14. capability rejection;
-15. unknown alias;
-16. inactive/unrouted alias;
-17. provider 404;
-18. provider 429/cooldown;
-19. safe 5xx;
-20. inference auth audience/scope behavior.
-
-## 21. Scheduler/accounting tests
-
-Add deterministic coverage proving:
-
-- embeddings use durable enqueue/claim/dispatch;
-- six embedding requests / two endpoint slots;
-- same endpoint reservation rules;
-- no streaming state/TTFT;
-- request quota reservation;
-- aggregate input token quota across multi-input request;
-- no output-token reservation;
-- token estimator unavailable fails closed when required;
-- request-priced budget;
-- token-priced budget with output_units=0;
-- exact PriceSnapshot;
-- UsageRecord + signed usage_debit;
-- no duplicate settlement;
-- cancellation before dispatch;
-- queued credential revocation;
-- provider failure;
-- ambiguous worker loss does not auto-retry.
-
-Preserve all Chat/Responses scheduler tests.
-
-## 22. Official Python SDK
-
-Using locked `openai==2.54.0`, prove against deterministic fake Ollama and live gateway:
-
-`client.embeddings.create(...)`
-
-At minimum:
-- single text;
-- list of texts;
-- parsed official SDK CreateEmbeddingResponse;
-- input order/indexes;
-- vector values/dimensions;
-- usage;
-- public alias.
+## 13. Legacy runtime negative proof
 
-If base64 is supported:
-- prove the official SDK parses/returns the pinned base64 representation.
+Prove:
+- old `uvicorn app.main:app` cannot be started from the repository because `app/` is gone;
+- old root Compose definition is gone;
+- old SQLite DB initialization/management commands are gone;
+- no CI/build path imports them;
+- no web/frontend code still targets old `/admin/*` or `x-admin-key` contracts.
 
-Also prove:
-- unsupported dimensions/token-array/user/etc. surfaces return SDK-visible 400 when not supported;
-- inference bypass=false.
-
-Do not substitute raw HTTP for the official SDK acceptance.
+A historical audit mention does not count as active code.
 
-## 23. Official JavaScript SDK
-
-Extend the locked `openai@7.32.0` smoke to prove:
-
-- embeddings single input;
-- embeddings multi-input;
-- ordering;
-- vector shape/usage;
-- explicit 400 for one unsupported semantic feature.
-
-Do not import the SDK into the React web application.
-
-## 24. Offline Alpha golden path
-
-Extend deterministic CI to create an embedding-capable route to fake Ollama.
-
-Prefer:
-- one provider/account/endpoint can advertise both `text` + `embedding` if semantically valid;
-- use a separate public embedding alias and separate route/upstream model.
-
-Prove after fresh install:
-- Chat non-stream + stream;
-- Responses non-stream + stream;
-- Embeddings single + multi;
-- Python SDK;
-- JS SDK.
+## 14. Nomnom cutover rehearsal
 
-Backup/restore phase must prove:
-- embedding route survives;
-- same credential still authenticates;
-- post-restore embedding call succeeds;
-- accounting/history counts remain consistent.
+On the internal dev/test environment:
 
-No Internet/model downloads/provider credentials.
+1. inspect whether legacy v1 containers/processes exist;
+2. if they are clearly the obsolete AetherGate v1 stack, stop/remove them safely;
+3. do not touch unrelated containers/services;
+4. do not depend on or import the legacy SQLite database;
+5. start a **fresh disposable current AetherGate PostgreSQL stack**;
+6. migrate to 0017;
+7. execute bootstrap/OIDC/catalog/credential flow;
+8. official SDK Chat + Responses green with bypass=false;
+9. queue/scheduler behavior green;
+10. web console green;
+11. backup/restore or restart proof remains green;
+12. tear down only the disposable rehearsal resources.
 
-## 25. Live nomnom verification
+Do not perform destructive actions on an unknown host/path merely because a filename resembles
+`aethergate.db`.
 
-First inspect the real internal Ollama installation for an **already installed embedding-capable model**.
-
-Do not silently treat an arbitrary generation model as embedding-capable.
-
-If an installed embedding model exists:
-1. create/activate a disposable embedding provider/alias/route via supported admin path;
-2. provider + alias capabilities include `embedding`;
-3. official Python SDK single input succeeds;
-4. multi-input succeeds;
-5. official JS smoke succeeds if practical against the live route;
-6. six requests / two slots visibly queue;
-7. queue-wait appears;
-8. TTFT sample count does not increase from embeddings alone;
-9. passive upstream health records successes;
-10. deliberate invalid upstream model records safe failure;
-11. restore valid model and succeed;
-12. request-priced accounting exactly once;
-13. token-priced accounting input-only if the provider reports trustworthy token usage;
-14. queued credential revoke prevents upstream dispatch;
-15. deactivate route -> safe no-fallback failure; restore -> success.
-
-If **no embedding-capable model is installed**, do not silently download a large model and do not fake a
-real-provider proof. Document the exact limitation in the handoff and make the deterministic fake
-Ollama + real LiteLLM transport the authoritative provider-contract proof. A small model download may
-only be performed if repository/operator policy already explicitly permits it.
-
-Never record embedding input text or vector contents in handoff/logs.
-
-## 26. Catalog/admin UI
-
-Do not build a new embeddings-specific UI.
-
-Existing Provider/ModelAlias capability fields must be able to configure `embedding`.
-
-If the existing web capability selector cannot represent the already-defined `embedding` enum:
-- fix that narrow catalog UI gap;
-- add component/E2E coverage.
-
-Do not redesign catalog pages.
-
-## 27. OpenAPI/generated client
-
-Add typed Embeddings contracts.
-
-Regenerate under `constraints.txt`:
-- backend OpenAPI;
-- frontend schema/types.
-
-Do not manually edit generated files.
-
-Two consecutive generation runs must produce zero additional diff.
-
-## 28. Compatibility docs
-
-Update:
-- `docs/contracts/openai-compatibility-baseline.md`;
-- add `docs/contracts/embeddings.md`;
-- README endpoint list;
-- Alpha readiness status;
-- development docs;
-- handoff.
-
-Document exactly:
-- supported input forms;
-- supported encodings;
-- dimensions support/rejection;
-- token-array support/rejection;
-- capability requirements;
-- quota semantics;
-- accounting semantics;
-- no TTFT;
-- explicit unsupported fields.
-
-After AGV2-026, core v2 OpenAI endpoint status should truthfully be:
-- Models implemented;
-- Chat Completions implemented;
-- Responses text subset implemented;
-- Embeddings implemented for the documented subset.
-
-Do not claim unsupported embedding features.
-
-## 29. Migration
-
-Expected: **no migration**.
-
-Head remains `0017`.
-
-Do not modify migrations 0001-0017.
-
-If a new plaintext operation column appears necessary, do not add it casually: first prove why the
-encrypted payload discriminator cannot satisfy correctness/recovery/observability requirements.
-
-## 30. Local regression gate
-
-Run:
-- backend full suite; baseline **613**;
-- frontend unit/component; baseline **87**;
-- full Playwright; baseline **32**;
-- npm build;
-- npm lint;
-- `npx tsc -b --noEmit`;
-- OpenAPI/client drift under locked dependencies;
-- ruff check src tests;
-- git diff --check;
-- secret/token/content/vector canary scan;
-- migration empty -> 0017;
-- populated 0016 -> 0017;
-- config_check;
-- fake Ollama Chat/Responses/Embeddings provider-contract tests;
+The operator has stated the known v1 deployment data is disposable, but still positively identify a
+resource as the old AetherGate stack before deleting it.
+
+## 15. Main-branch readiness
+
+Do **not** push directly to main.
+
+At task completion:
+- `origin/v2` must contain the canonical clean-cutover state;
+- all four CI workflows must be green on the final v2 SHA;
+- CI push triggers must include main;
+- handoff must state that v2 is ready to become the repository's main line.
+
+If GitHub CLI/auth is already available and repository policy permits creating PRs:
+- create or update a PR from `v2` -> `main`;
+- do **not** merge it unless a later explicit instruction authorizes the merge.
+
+If PR creation is not available, record the exact final SHA and recommend one next step:
+**merge v2 into main through the repository's normal reviewed PR process**.
+
+Never force-push main.
+
+## 16. Embeddings status
+
+AGV2-026 Embeddings was superseded before implementation.
+
+Do not accidentally implement it during cutover.
+
+After cutover, operator direction is:
+**vision next**.
+
+Record embeddings as deferred, not cancelled forever.
+
+## 17. Regression gate
+
+Run the complete current gate:
+
+- backend full suite; baseline **613**
+- frontend unit/component; baseline **87**
+- full Playwright; baseline **32**
+- npm build
+- npm lint
+- `npx tsc -b --noEmit`
+- OpenAPI/client drift under locked dependencies
+- ruff check src tests
+- git diff --check
+- secret/token/content scan
+- new no-legacy-v1 guard
+- migration empty -> 0017
+- populated 0016 -> 0017
+- config_check
+- fake Ollama provider tests
 - official Python SDK:
-  - Models;
-  - Chat non-stream/stream;
-  - Responses non-stream/stream;
-  - Embeddings single/multi;
-- official JS SDK equivalent smoke.
+  - Models
+  - Chat non-stream/stream
+  - Responses non-stream/stream
+- official JS SDK current smoke
+- fresh clean-install cutover rehearsal.
+
+No migration revision is expected.
+Do not modify migrations 0001-0017.
 
 Every red test must be root-caused.
 
-## 31. Remote CI gate
+## 18. Remote CI gate
 
 Push completed work to origin/v2.
 
-On the FINAL task SHA require:
-- backend = completed/success;
-- frontend = completed/success;
-- schema-secret-gate = completed/success;
-- alpha-golden-path = completed/success.
+On the FINAL SHA require:
+- backend = completed/success
+- frontend = completed/success
+- schema-secret-gate = completed/success
+- alpha-golden-path = completed/success
 
-If any run is red:
+All must be for that exact final SHA.
+
+If red:
 - inspect logs;
-- fix the root cause;
+- root-cause;
+- fix;
 - push;
-- require all four green on the new final SHA.
+- require green on the new final SHA.
 
-Do not declare completion from local evidence alone.
-
-## 32. No New Scope
-
-Do not implement:
-- v1 -> v2 migration;
-- Responses tools/MCP/computer use;
-- multimodal generation;
-- vector database/storage/search;
-- RAG;
-- batch embeddings API;
-- async/background jobs;
-- arbitrary provider additions;
-- unrelated web redesign.
-
-## 33. Handoff
+## 19. Handoff
 
 Record:
-- implementation commits;
-- pinned OpenAI SDK/reference behavior used;
-- supported embedding input/encoding/dimension subset;
-- explicit unsupported semantics;
-- capability enforcement;
-- encrypted operation payload format + legacy Chat compatibility;
-- provider adapter behavior;
-- fake Ollama endpoint behavior;
-- scheduler/quota/budget mapping;
-- request/token accounting proof;
-- usage/ledger proof;
-- cancellation/revocation/ambiguity proof;
-- observability behavior including no TTFT sample;
-- Python SDK version/results;
-- JS SDK version/results;
-- live Ollama embedding model/proof, or truthful no-installed-model limitation;
-- OpenAPI drift;
-- migration decision;
+- operator decision that v1 data was disposable;
+- AGV2-026 embeddings superseded/deferred before implementation;
+- exact legacy files removed/replaced;
+- stale agent/operator docs removed or redirected;
+- dependency cleanup decisions;
+- no-legacy guard behavior;
+- clean-install cutover proof;
+- nomnom v1 retirement/rehearsal result;
+- migration head 0017;
 - backend/frontend/Playwright counts;
-- final remote SHA + four workflow run IDs/conclusions;
+- SDK results;
+- OpenAPI drift;
+- final SHA and four remote workflow run IDs/conclusions;
+- PR v2 -> main status if created;
 - known limitations;
 - WIP lifecycle;
-- exactly one recommended next step.
+- exactly one recommended next step:
+  **merge v2 into main through reviewed PR, or if already merged by an authorized later action,
+  begin vision/multimodal inference.**
 
-Never include embedding input text, vector contents, credentials/session/OIDC/provider secrets,
-encrypted payload/result bytes, raw provider response bodies, or large logs.
+Never include credentials, session/OIDC/provider secrets, prompt/completion content, encrypted bytes,
+or large logs.
 
 ## Commit and Push
 
-Suggested primary commit:
+Suggested commits:
+- `chore: retire legacy v1 runtime`
+- `ci: guard canonical aethergate runtime`
+- `docs: complete clean v2 cutover`
 
-`feat(api): add durable embeddings endpoint`
-
-Additional scoped scheduler/adapter/test/docs commits are fine.
+Use fewer/more scoped conventional commits if cleaner.
 
 Push all completed commits to origin/v2.
 Never push directly to main.
 Do not ask whether to continue/commit/push.
 
 The task is complete only when:
-- official Python + JS SDK Embeddings proofs are green;
-- embeddings use the existing durable scheduler/accounting authority;
-- capability checks prevent accidental text-route use;
-- quota/budget/accounting semantics are correct with output_units=0;
-- Chat + Responses remain green;
-- migration head remains 0017 unless narrowly justified otherwise;
-- local regressions are green;
-- all four remote workflows are green on the final origin/v2 SHA;
-- handoff is updated;
+- the v1 runtime and misleading active v1 instructions are gone;
+- the current PostgreSQL/scheduler implementation is the only supported runtime;
+- a fresh install from no v1 state is proven;
+- migration head remains 0017;
+- all current regressions are green;
+- all four GitHub Actions are green on the final origin/v2 SHA;
+- main branch CI triggers are ready;
+- the handoff is complete;
 - local `.aethergate-wip` is removed only after final remote verification.
