@@ -29,8 +29,7 @@ These override any generic boilerplate below when they conflict.
 - Provider limits must never be bypassed for throughput. Hidden adapter/SDK retries are disabled
   or routed back through admission.
 - OpenAI compatibility behavior is tested with official SDK clients, not assumed.
-- Migrations are explicit and reversible where practical; they run against a copy of the real
-  old schema and preserve account identity and usage attribution.
+- PostgreSQL migrations are explicit and reversible where practical. The current v1 -> v2 cutover is intentionally clean/destructive because v1 has no production state worth preserving; do not build or resurrect a SQLite data importer unless a future task explicitly changes that decision.
 - No direct production database manipulation by normal administrative tooling. The CLI and web
   console share the same `/admin/v1` API/service contracts.
 - Do not commit credentials, provider secrets, `.env`, or private keys. Run the secret scan
