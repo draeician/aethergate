@@ -1,21 +1,10 @@
 # AetherGate — Current Task
 
 ## Task ID
-AGV2-027
+AGV2-028
 
 ## Title
-Canonical v2 cutover — retire v1 and make the current architecture the only supported runtime
-
-## Superseded Task
-
-AGV2-026 (Embeddings) was queued but **not started**.
-
-It is intentionally deferred by operator direction. Do not implement embeddings in this task.
-
-New sequence:
-1. AGV2-027 — clean v2 cutover / v1 retirement;
-2. Vision / multimodal inference;
-3. Embeddings may be resumed later.
+Vision / multimodal image input for Chat Completions + Responses
 
 ## WIP Marker — FIRST LOCAL ACTION
 
@@ -24,7 +13,7 @@ Immediately after entering the repository, before pull/read/implementation work,
 `.aethergate-wip`
 
 Safe contents:
-- task ID: AGV2-027
+- task ID: AGV2-028
 - branch: v2
 - UTC start timestamp
 
@@ -37,505 +26,710 @@ If blocked/incomplete, leave it present.
 Remove it only after:
 1. every local/live criterion below is green;
 2. every task commit is pushed to origin/v2;
-3. final origin/v2 remote CI is green;
-4. handoff is committed/pushed and remote verified.
-
-## Operator Cutover Decision
-
-The v1 deployment was never used for production and contains no important state.
-
-The authoritative requirements have already been updated:
-
-- `project_spec.md` — current cutover is clean/destructive; no v1 SQLite data import;
-- `AGENTS.md` — agents must not resurrect a legacy data importer;
-- `docs/migrations/v1-to-v2.md` — clean-cutover procedure replaces the prior preservation plan.
-
-Therefore:
-
-- **do not build a v1 SQLite -> v2 PostgreSQL data importer;**
-- **do not preserve v1 users, keys, balances, request logs, endpoints, models, or plaintext provider
-  credentials;**
-- v2 starts with a fresh PostgreSQL authority;
-- the dated architecture audit remains immutable historical evidence.
+3. the final origin/v2 SHA has all required GitHub Actions green;
+4. the handoff is committed/pushed and remote verified;
+5. the feature PR to main is created/updated if repository tooling permits.
 
 ## Starting Point
 
-Last completed feature milestone:
+The canonical v2 cutover is complete and merged into `main`.
 
-AGV2-025 — Responses text subset.
+Main merge commit:
+`af216e730c3e2c0d84c63cb641dc6be5b2037e45`
 
-Verified final SHA:
-`07ae618ff95503f765ae2f4ad45f531292921b3a`
+PR #1:
+- v2 -> main
+- merged
+- merge commit above.
 
-Green baseline:
-- backend: **613 collected**
+All four post-merge workflows are green on that exact `main` commit:
+- backend — run `38166139408`
+- frontend — run `38166139425`
+- schema-secret-gate — run `38166139401`
+- alpha-golden-path — run `38166139352`
+
+Current green baseline:
+- backend: **613 passed**
 - frontend: **87 passed**
-- Playwright: **32 passed** (+ 3 CI-only skips)
+- Playwright: **32 passed / 3 skipped**
 - migration head: **0017**
-- Python SDK `openai==2.54.0`
-- JS SDK `openai@7.32.0`
-- remote CI 4/4 green.
+- Python OpenAI SDK: `openai==2.54.0`
+- JS OpenAI SDK: `openai@7.32.0`
+- LiteLLM: `1.104.0`.
 
-The branch also contains the requirement-update commits immediately after the superseded AGV2-026
-queue commit. Pull latest `origin/v2` before doing anything beyond the WIP marker.
+The current supported inference surfaces are:
+- Models
+- Chat Completions (text)
+- Responses text subset.
+
+Embeddings remain deferred.
+
+This task adds **vision input -> text output**. It does NOT add image generation.
 
 ## Goal
 
-After this task, the repository must have **one supported AetherGate implementation**: the current
-PostgreSQL/Alembic/scheduler architecture under `src/aethergate`.
+AetherGate must accept image-bearing multimodal requests through the existing OpenAI-compatible
+Chat Completions and Responses surfaces, route them only to explicitly image-capable aliases/providers,
+queue them through the same durable scheduler, and return text output through the same accounting,
+auth, cancellation, recovery, and observability authority already proven for text.
 
-No active source file, root runtime entrypoint, operator document, agent instruction, or CI path may
-suggest that the old SQLModel/SQLite implementation is still supported.
+Vision is an additive data-plane feature, not a second inference system.
 
-This is a codebase/runtime cutover, not a historical-data conversion.
+Do NOT create:
+- a second scheduler;
+- a second worker;
+- a vision-only accounting path;
+- an image-fetching proxy;
+- a new provider kind merely for vision.
+
+## Compatibility Authority
+
+Before implementation, read:
+- `project_spec.md`
+- `docs/contracts/openai-compatibility-baseline.md`
+- locked `openai==2.54.0` Python SDK types
+- locked `openai@7.32.0` JS SDK types/behavior
+- pinned upstream OpenAI reference named in the compatibility baseline
+- current Chat contracts/router
+- current Responses contracts/router
+- current LiteLLM adapter
+- scheduler payload serialization
+- fake Ollama implementation.
+
+Do not guess multimodal wire shapes from memory.
 
 ## Recovery
 
 If context is compacted/restarted/uncertain:
-
 1. ensure `.aethergate-wip` exists if task incomplete;
 2. re-read AGENTS.md;
 3. re-read project_spec.md;
 4. re-read this file;
 5. re-read docs/development/agent-handoff.md;
-6. re-read docs/migrations/v1-to-v2.md;
-7. inspect git status/history;
-8. continue from repository state.
-
-## 1. Inventory legacy v1 artifacts before deletion
-
-Before changing files, inventory every v1-only artifact.
+6. inspect git status/history;
+7. continue from repository state.
 
-Known legacy candidates include:
-
-- `app/`
-- root `Dockerfile`
-- root `docker-compose.yml`
-- root `requirements.txt`
-- `init_db.py`
-- `manage.py`
-- `debug_inference.py`
-- `scripts/add_model_config_columns.py`
-- `scripts/add_rate_limit_column.py`
-- `scripts/migrate_endpoints.py`
-- `API_REFERENCE.md`
-- `OPS_RUNBOOK.md`
-- `AETHERGATE_RULES.md`
-- `.context-resume.md`
-- stale `.cursorrules`
-- stale `CLAUDE.md`.
+## 1. Supported vision scope
 
-Search the whole tracked tree for additional:
-- imports from `app`;
-- SQLModel/aiosqlite runtime references;
-- v1 `MASTER_API_KEY` / `x-admin-key` instructions;
-- `sk-` v1 credential examples;
-- balance-as-authorization language;
-- direct SQLite paths;
-- obsolete v1 container names;
-- v1-only admin URLs;
-- old migration scripts.
+Implement text-output vision inference on BOTH:
 
-Do not delete the immutable dated audit:
-`docs/audits/v2-architecture-audit-2026-10-03.md`.
+### Chat Completions
+`POST /v1/chat/completions`
 
-Do not delete historical references inside the audit merely because they describe v1.
+Support the pinned official multimodal message/content-parts form for:
+- text parts;
+- image input parts;
+- existing system/user/assistant text behavior.
 
-## 2. Remove the legacy runtime
+### Responses
+`POST /v1/responses`
 
-Delete the unsupported v1 application/runtime code.
+Support the pinned official Responses input-item/content-part form for:
+- `input_text`;
+- `input_image`;
+- existing `instructions`;
+- existing text input forms.
 
-Expected removals:
-- entire `app/`;
-- root legacy Dockerfile;
-- root legacy docker-compose.yml;
-- root legacy requirements.txt;
-- v1 DB/admin/debug scripts;
-- v1 ad-hoc SQLite schema migration scripts.
+Non-stream and stream must both work.
 
-No compatibility shim is required.
+Text-only requests must remain wire-compatible.
 
-Do not leave a dead import path that can accidentally start the old FastAPI app.
+## 2. Initial image source policy — inline data only
 
-After removal, searches such as:
-- `from app.`
-- `import app.`
-- `sqlmodel`
-- `aiosqlite`
-- `sqlite+aiosqlite`
+For this milestone, support image bytes supplied inline through the pinned OpenAI-compatible data form,
+typically a `data:` URL where that is the official contract representation.
 
-must not appear in active runtime/build/test/operator code unless a historical document explicitly
-describes the retired system.
+Support at least:
+- PNG;
+- JPEG;
+- WebP;
 
-## 3. Retire stale v1 operator documentation
+provided the real Ollama/LiteLLM path supports them.
 
-Remove or replace stale root documents that describe the old runtime.
+Do NOT fetch arbitrary client-supplied HTTP/HTTPS image URLs in AetherGate.
 
-### API_REFERENCE.md
-The old document describes:
-- `sk-` keys;
-- balance authorization;
-- `x-admin-key`;
-- old `/admin/*` routes.
+Reject explicitly:
+- remote `http://` / `https://` image URLs;
+- provider-local file paths;
+- `file_id` / uploaded-file references;
+- arbitrary URI schemes;
+- SVG unless the provider contract is explicitly proven safe and supported.
 
-It must not remain as an apparent current API reference.
+Reason:
+AetherGate must not introduce an SSRF/egress bypass through vision input.
 
-Preferred:
-- remove it and point README/docs to generated OpenAPI + current contract docs;
-or
-- replace it with a very small canonical pointer explicitly stating the old reference was retired.
+Do not silently drop or rewrite unsupported image sources.
 
-Do not duplicate the generated API documentation manually.
+Use structured HTTP 400 `unsupported_feature` or an established safe validation error.
 
-### OPS_RUNBOOK.md
-The old docker02/Streamlit/NPM runbook is historical and unsafe as a current operator guide.
+## 3. Strict image decoding + validation
 
-Remove it or replace it with a pointer to:
-`docs/operations/alpha-runbook.md`.
+Normalize image inputs before scheduler admission.
 
-No stale host IPs, old container names, Streamlit instructions, or MASTER_API_KEY instructions should
-remain in active operator docs.
+Requirements:
+- strict base64 decoding;
+- MIME allowlist;
+- reject malformed data URLs;
+- reject empty image payloads;
+- reject non-image media types;
+- verify obvious format/magic-byte coherence where practical without a heavyweight parser;
+- no decompression/decoding library should be invoked merely to estimate image dimensions unless
+  justified and bounded;
+- no image bytes in error messages/logs.
 
-## 4. Retire stale agent instructions
+Add deterministic invalid fixtures:
+- bad base64;
+- mismatched MIME/signature;
+- unsupported MIME;
+- empty image;
+- oversized image.
 
-Old agent files currently instruct:
-- SQLModel;
-- prepaid balance as universal authorization;
-- old v1 architecture.
+## 4. Explicit resource limits
 
-That directly conflicts with `project_spec.md`.
+Vision cannot turn PostgreSQL into an unbounded blob store.
 
-Required:
-- remove `AETHERGATE_RULES.md` if nothing current depends on it;
-- remove `.context-resume.md`;
-- update or replace `.cursorrules` so it points to `AGENTS.md` + `project_spec.md`, with no v1
-  architecture rules;
-- update `CLAUDE.md` similarly if it is retained.
+Add explicit configurable Alpha limits.
 
-The rule hierarchy must be unambiguous:
-1. AGENTS.md
-2. project_spec.md
-3. current task/handoff
-4. architecture docs.
+At minimum define and enforce:
+- maximum images per request;
+- maximum decoded bytes per image;
+- maximum decoded image bytes per request;
+- maximum serialized/encrypted scheduler payload bytes.
 
-No agent bootstrap file may tell a model to use SQLModel or prepaid-balance gating.
+Choose conservative defaults suitable for internal Alpha use and document the exact values.
 
-## 5. Canonical runtime remains the proven v2 stack
+Requirements:
+- limits are checked before durable enqueue where possible;
+- encoded/base64 expansion is accounted for;
+- text-only behavior remains unaffected at normal sizes;
+- oversized requests fail safely before provider dispatch;
+- limits apply consistently through direct API and web reverse-proxy paths where relevant;
+- do not rely only on nginx to protect the API.
 
-Do **not** gratuitously rename the stable current deployment tree during this cutover.
+If a general queue payload-byte bound required by the architecture spec is currently missing, implement
+it as part of this task and apply it to text and vision payloads.
 
-The canonical implementation may continue to live at:
-- `src/aethergate/`
-- `deploy/v2/`
-- `scripts/dev/v2`
-- `scripts/ops/v2`
+Do not add an object store in this milestone.
 
-Those paths are already deeply verified and the internal `v2` path name does not imply v1 remains
-supported.
+## 5. Canonical multimodal internal model
 
-The goal is one supported implementation, not a cosmetic path-renaming project.
+Generalize the provider-neutral message representation instead of passing protocol-specific JSON
+through the worker.
 
-README/docs must clearly say that these are the canonical current AetherGate paths.
+Recommended concepts:
+- text content part;
+- image content part containing normalized media type + bytes (or an equivalently safe immutable
+  representation);
+- message with either legacy text content or ordered canonical parts.
 
-Do not create duplicate root Compose/Docker definitions merely to remove the string "v2".
+Requirements:
+- Chat and Responses both map into the SAME canonical multimodal message representation;
+- provider adapters receive canonical content parts, not Chat/Responses DTOs;
+- text-only legacy `Message(role, content: str)` behavior remains easy and compatible;
+- ordering of interleaved text/image parts is preserved.
 
-## 6. Root build/runtime ambiguity
+Do not encode image meaning into a text placeholder.
 
-After deleting the legacy root Dockerfile/Compose:
+## 6. Encrypted scheduler payload compatibility
 
-- README quick-start must exclusively use the supported current commands;
-- no documentation may suggest `docker compose up` at repo root unless that is actually supported;
-- `deploy/v2/Dockerfile` is the canonical image;
-- `deploy/v2/compose*.yaml` is the canonical Compose stack;
-- `scripts/dev/v2` and `scripts/ops/v2` are canonical wrappers.
+Vision requests must use the existing durable scheduler.
 
-If any tooling assumes a root Dockerfile, update that tooling to the canonical path.
+Extend the encrypted chat-generation payload serializer to support canonical multimodal message parts.
 
-Do not add a root Dockerfile just as a compatibility alias unless a real supported workflow requires it.
+Requirements:
+- image bytes/content remain inside `payload_encrypted`;
+- no plaintext image/base64 data in request metadata, logs, wait metadata, audit metadata, or DB
+  columns;
+- legacy text-only encrypted payloads remain readable;
+- old string-content message payloads deserialize exactly as before;
+- no new plaintext DB content column;
+- no migration expected.
 
-## 7. CI must be ready for main cutover
+Add backward-compatibility tests using pre-AGV2-028 text payload fixtures.
 
-Current workflows run on pushes to `v2`.
+The worker must not need to know whether the public protocol was Chat vs Responses.
 
-Update all four GitHub Actions so push triggers include:
-- `v2`;
-- `main`.
+## 7. Capability enforcement
 
-Pull-request behavior remains.
+The domain already defines:
+`Capability.IMAGE = "image"`.
 
-Required workflows:
-- backend;
-- frontend;
-- schema-secret-gate;
-- alpha-golden-path.
+For any request containing at least one image:
+- public ModelAlias must advertise `image`;
+- Provider must advertise `image`;
+- route/adapter must be able to dispatch image content.
 
-Preserve:
-- least privilege;
-- concurrency;
-- locked dependencies;
-- fully offline golden path.
+Because this is image-input -> text-output generation, configure/test vision routes with both
+`text` and `image` capabilities unless the existing capability semantics establish a better exact
+rule.
 
-This ensures the same gates protect the repository after v2 is merged into main.
+If image capability is absent:
+- reject before upstream dispatch;
+- no fallback to a text-only route/model;
+- no silent image removal.
 
-## 8. Add a legacy-reintroduction CI guard
+Text-only requests must not regress because an existing provider/alias predates image capability.
 
-Add a small deterministic CI script/check that fails if forbidden v1 runtime artifacts are reintroduced.
+## 8. Provider-neutral adapter behavior
 
-Recommended:
-`scripts/ci/no_legacy_v1.sh`
+Extend the current ChatRequest/LiteLLM adapter path to preserve multimodal content parts.
 
-At minimum fail if tracked active files include:
-- `app/`;
-- root legacy `docker-compose.yml`;
-- root legacy `requirements.txt`;
-- retired v1 migration scripts;
-- active imports of `app.*`;
-- active SQLModel/aiosqlite dependencies outside historical audit text.
+Requirements:
+- no new provider kind;
+- provider kind remains `ollama` for the current real path;
+- admin-configured base destination/upstream model remain authoritative;
+- hidden retries/fallback remain disabled;
+- safe ProviderError mapping unchanged;
+- images are passed only through the provider adapter;
+- adapter must never write image bytes/base64 to logs.
 
-Do not make the check so broad that the immutable v1 audit or migration-retirement document fails for
-describing history.
+Inspect pinned LiteLLM behavior to determine the exact message representation it accepts and the exact
+Ollama HTTP request it emits.
 
-Wire this guard into `schema-secret-gate` or backend CI.
+Do not assume the outgoing Ollama schema.
 
-Add a test or self-check proving the guard itself catches a synthetic forbidden path/reference.
+## 9. Fake Ollama vision contract
 
-## 9. Dependency cleanup
+Extend the deterministic fake Ollama to support the exact image-bearing request shape emitted by the
+pinned LiteLLM Ollama adapter.
 
-After v1 removal, verify no current dependency exists solely for v1.
+The fake must:
+- verify an image-bearing request actually reaches the upstream transport;
+- preserve image count/order metadata for assertions;
+- optionally record safe byte counts/media types;
+- NEVER persist/log raw image bytes or base64;
+- return deterministic text;
+- support non-stream;
+- support multi-chunk stream;
+- support delay;
+- support 404/429/5xx;
+- remain test/CI-only;
+- introduce no provider kind.
 
-Specifically audit:
-- sqlmodel;
-- aiosqlite;
-- passlib/bcrypt v1 usage;
-- typer v1 management usage;
-- numpy v1 pin rationale.
+Add real adapter contract tests against the fake transport.
 
-Do not remove a package merely because v1 used it if the current stack still needs it transitively or
-directly.
+## 10. Chat Completions contract
 
-The committed `constraints.txt` must remain reproducible.
+Update typed Chat message contracts to match the pinned multimodal input union.
 
-If dependency files legitimately change:
-- refresh the lock through the documented locking workflow;
-- regenerate OpenAPI if dependency versions change;
-- run all regression gates.
+At minimum prove official SDK-compatible requests with:
+- user text + one image;
+- user text + multiple images;
+- interleaved text/image parts where supported;
+- prior text context + image-bearing user message.
 
-Avoid dependency churn unrelated to the legacy removal.
+Preserve existing:
+- generation controls;
+- stream options;
+- public alias behavior;
+- structured errors.
 
-## 10. Current documentation canonicalization
+Unsupported Chat semantic features still reject explicitly.
 
-Update at minimum:
-- README.md
-- docs/development/README.md
-- docs/operations/alpha-runbook.md
-- docs/releases/alpha1-readiness.md
-- docs/migrations/v1-to-v2.md if implementation discoveries refine it
-- AGENTS.md if any now-deleted file is still mandatory reading
-- docs/development/agent-handoff.md.
+Do not add tools/function calling in this task.
 
-README should present:
-- **AetherGate**, not “old v1 plus v2”;
-- the current architecture as the only supported runtime;
-- Models + Chat Completions + Responses text subset;
-- embeddings still deferred;
-- vision planned next after cutover;
-- canonical dev/operator commands.
+## 11. Responses contract
 
-Historical documentation may say "v1" and "v2" where needed to explain history.
+Extend Responses input parsing for the pinned `input_image` shape.
 
-## 11. Architecture/reference scan
+Support:
+- text + image in the same input message;
+- one/multiple image parts;
+- `instructions`;
+- non-stream;
+- stream.
 
-Search current non-audit docs for statements that are now false, especially:
-- "v1 migration still required";
-- "legacy app retained for reference";
-- SQLite as an active runtime;
-- identity/history preservation as a current cutover requirement;
-- old admin key model;
-- balance/prepaid as universal authorization;
-- Streamlit dashboard/current NPM setup.
+Existing Responses output stays text-only:
+- output message item;
+- output_text;
+- existing SSE event sequence.
 
-Correct current docs.
+Do NOT add:
+- image output;
+- files API;
+- stored response retrieval;
+- background mode;
+- tools/MCP/computer use.
 
-Do not rewrite the dated audit.
+Remote image URLs/file IDs remain explicit unsupported features.
 
-Do not erase useful historical context; label it clearly as retired/historical.
+## 12. Scheduler behavior
 
-## 12. Clean-install cutover proof
+Vision uses the exact existing scheduler authority:
+- durable queue;
+- FIFO/scheduling-scope behavior;
+- endpoint max_concurrency;
+- provider/shared quota;
+- budgets;
+- worker lease/fence;
+- cancellation;
+- outcome_unknown;
+- cooldown;
+- retry authority.
 
-Use a fresh disposable environment, not the accumulated dev DB.
+No vision-specific queue.
 
-Prove the actual supported transition is:
+Prove six image-bearing requests / two endpoint slots:
+- first two execute;
+- excess requests remain durably queued;
+- queue drains as capacity frees.
 
-1. no v1 database imported;
-2. fresh PostgreSQL database;
-3. Alembic empty -> head;
-4. config preflight;
-5. API/worker readiness;
-6. one-use bootstrap;
-7. deterministic OIDC login;
-8. create project/principal/catalog/provider account/endpoint/alias/route;
-9. create inference credential;
-10. official Python SDK Models;
-11. Chat non-stream;
-12. Chat stream;
-13. Responses non-stream;
-14. Responses stream;
-15. dashboard/operator console loads;
-16. accounting/observability state appears;
-17. backup succeeds;
-18. restart succeeds;
-19. post-restart SDK request succeeds.
+Images must remain encrypted while queued.
 
-This is the replacement for a v1 data-import test.
+## 13. Token quota / budget behavior
 
-Migration head should remain `0017`.
+Request quotas:
+- same as text; one gateway request is one request unit.
 
-## 13. Legacy runtime negative proof
+Output reservation:
+- use the existing generation max-output-token behavior.
+
+Input token estimation for image-bearing requests:
+- inspect pinned LiteLLM/provider capabilities;
+- use a provider/model-specific conservative estimator only if defensible;
+- if no defensible image token estimator exists and an enforced token quota or token-priced budget
+  requires a pre-dispatch estimate, fail closed using the existing estimator-unavailable family;
+- NEVER count raw bytes, base64 characters, or image dimensions as fake token units.
+
+Request-priced accounting must work normally.
+
+At settlement:
+- trust measured upstream usage only where the provider/LiteLLM reports it through the existing usage
+  contract;
+- do not fabricate image tokens;
+- UsageRecord/ledger exactly-once behavior remains unchanged.
+
+Do not implement `BillingUnit.IMAGE` for vision-input pricing unless the existing accounting model and
+provider usage make it genuinely correct. Vision input can remain request-priced or token-priced under
+the established rules.
+
+## 14. Streaming / TTFT
+
+Vision text output streams through the existing generation stream path.
 
 Prove:
-- old `uvicorn app.main:app` cannot be started from the repository because `app/` is gone;
-- old root Compose definition is gone;
-- old SQLite DB initialization/management commands are gone;
-- no CI/build path imports them;
-- no web/frontend code still targets old `/admin/*` or `x-admin-key` contracts.
+- Chat streaming chunks are unchanged in shape;
+- Responses streaming events are unchanged in shape;
+- first non-empty text chunk records TTFT exactly once;
+- no image bytes appear in stream events;
+- client disconnect follows existing durable cancellation semantics.
 
-A historical audit mention does not count as active code.
+## 15. Authentication / authorization
 
-## 14. Nomnom cutover rehearsal
+Same inference auth as current text:
+- Bearer `agk_...`;
+- audience = inference;
+- scope = `inference:invoke`;
+- project/principal attribution;
+- dispatch-time credential revalidation;
+- bypass=false in all acceptance proofs.
 
-On the internal dev/test environment:
+Queued credential revocation must prevent an image-bearing request from reaching upstream.
 
-1. inspect whether legacy v1 containers/processes exist;
-2. if they are clearly the obsolete AetherGate v1 stack, stop/remove them safely;
-3. do not touch unrelated containers/services;
-4. do not depend on or import the legacy SQLite database;
-5. start a **fresh disposable current AetherGate PostgreSQL stack**;
-6. migrate to 0017;
-7. execute bootstrap/OIDC/catalog/credential flow;
-8. official SDK Chat + Responses green with bypass=false;
-9. queue/scheduler behavior green;
-10. web console green;
-11. backup/restore or restart proof remains green;
-12. tear down only the disposable rehearsal resources.
+No image-specific auth bypass.
 
-Do not perform destructive actions on an unknown host/path merely because a filename resembles
-`aethergate.db`.
+## 16. Egress / SSRF invariant
 
-The operator has stated the known v1 deployment data is disposable, but still positively identify a
-resource as the old AetherGate stack before deleting it.
+AetherGate egress policy applies only to configured upstream provider destinations.
 
-## 15. Main-branch readiness
+Client image input must NOT become a second egress mechanism.
 
-Do **not** push directly to main.
+Tests must prove:
+- remote HTTP(S) image input is rejected before provider dispatch;
+- loopback/private/network URLs cannot be used as image fetch targets;
+- no DNS/HTTP client is invoked to resolve/fetch client image URLs;
+- provider endpoint egress policy remains unchanged.
 
-At task completion:
-- `origin/v2` must contain the canonical clean-cutover state;
-- all four CI workflows must be green on the final v2 SHA;
-- CI push triggers must include main;
-- handoff must state that v2 is ready to become the repository's main line.
+Do not weaken existing allowlist/private-address protections.
 
-If GitHub CLI/auth is already available and repository policy permits creating PRs:
-- create or update a PR from `v2` -> `main`;
-- do **not** merge it unless a later explicit instruction authorizes the merge.
+## 17. Logging / diagnostics safety
 
-If PR creation is not available, record the exact final SHA and recommend one next step:
-**merge v2 into main through the repository's normal reviewed PR process**.
+Extend redaction/canary coverage so logs/diagnostics never contain:
+- full data URLs;
+- raw base64 image bytes;
+- decoded binary;
+- image content hashes if they could be used as content fingerprints, unless explicitly justified;
+- request bodies containing image content.
 
-Never force-push main.
+Safe metadata may include:
+- image_count;
+- total_image_bytes;
+- allowed media types;
+only if useful and already consistent with content-minimization policy.
 
-## 16. Embeddings status
+Do not log image dimensions/content unless needed.
 
-AGV2-026 Embeddings was superseded before implementation.
+## 18. Official Python SDK
 
-Do not accidentally implement it during cutover.
+Using locked `openai==2.54.0`, prove official SDK requests for:
 
-After cutover, operator direction is:
-**vision next**.
+### Chat
+- non-stream text + image;
+- stream text + image.
 
-Record embeddings as deferred, not cancelled forever.
+### Responses
+- non-stream input_text + input_image;
+- stream input_text + input_image.
 
-## 17. Regression gate
+Use a tiny deterministic synthetic image fixture.
 
-Run the complete current gate:
+Prove:
+- parsed official SDK output;
+- expected deterministic text;
+- public model alias;
+- usage present where expected;
+- remote URL input produces an SDK-visible 400;
+- bypass=false.
 
+Do not substitute raw requests/httpx for these compatibility proofs.
+
+## 19. Official JavaScript SDK
+
+Extend locked `openai@7.32.0` smoke with:
+- Chat vision non-stream;
+- Chat vision stream;
+- Responses vision non-stream;
+- Responses vision stream;
+- remote URL rejection.
+
+Do not import the OpenAI SDK into the React application.
+
+## 20. Offline Alpha golden path
+
+Extend fake-Ollama CI with an explicitly image-capable public alias/route.
+
+Prefer a distinct alias such as a fixture vision alias rather than pretending every text alias accepts
+images.
+
+Golden path must prove:
+- existing Models;
+- Chat text non-stream/stream;
+- Responses text non-stream/stream;
+- Chat vision non-stream/stream;
+- Responses vision non-stream/stream;
+- official Python SDK;
+- official JS SDK;
+- image capability rejection on text-only alias;
+- remote URL rejection;
+- backup/restore preserves the vision catalog route;
+- post-restore vision inference succeeds.
+
+No Internet image fetch.
+No model download.
+No provider credentials.
+
+## 21. Live nomnom proof
+
+First inspect installed Ollama models and identify an actually vision-capable model.
+
+Do not guess from model name alone if capability can be verified through metadata/provider behavior.
+
+Do not silently download a model.
+
+If an installed vision-capable model exists:
+1. create a disposable image-capable alias/route through supported admin surfaces;
+2. alias/provider advertise image capability;
+3. official Python Chat vision non-stream;
+4. Chat vision stream;
+5. official Python Responses vision non-stream;
+6. Responses vision stream;
+7. official JS vision smoke if practical;
+8. six requests / two slots visibly queue;
+9. queue wait + TTFT observable;
+10. request-priced accounting exactly once;
+11. token-priced behavior only if provider reports/estimates trustworthy image token usage;
+12. route deactivate -> safe no-fallback failure;
+13. restore -> success;
+14. queued credential revoke -> no upstream dispatch;
+15. remote URL -> explicit 400/no fetch.
+
+If no installed vision-capable model exists:
+- do not silently download one;
+- document the exact limitation;
+- fake Ollama + real pinned LiteLLM transport remains the authoritative provider-contract proof;
+- task can still complete if every deterministic contract/scheduler/security gate is green and the
+  handoff truthfully records the missing live-model proof.
+
+Never include image bytes/base64 or prompt/output content in the handoff.
+
+## 22. Catalog / web console
+
+Existing catalog management must expose `image` capability for Provider and ModelAlias.
+
+If the current UI already supports the enum generically:
+- add/adjust tests only.
+
+If it cannot configure `image`:
+- make the narrowest UI change necessary;
+- add component + Playwright coverage.
+
+Do not build a consumer image-upload UI in this task.
+
+## 23. OpenAPI / generated client
+
+Regenerate under the committed dependency lock:
+- backend OpenAPI;
+- frontend generated OpenAPI;
+- frontend generated TypeScript schema.
+
+Do not hand-edit generated files.
+
+Two consecutive generation runs must produce zero additional diff.
+
+## 24. Documentation
+
+Update:
+- `docs/contracts/openai-compatibility-baseline.md`
+- add `docs/contracts/vision.md`
+- README endpoint/capability status
+- docs/development/README.md
+- docs/releases/alpha1-readiness.md or current release-status document
+- security docs for image URL/SSRF policy
+- handoff.
+
+Document exactly:
+
+Supported:
+- image input -> text output;
+- Chat + Responses;
+- inline/data image representation;
+- PNG/JPEG/WebP subset actually proven;
+- non-stream + stream;
+- queue/concurrency/accounting behavior;
+- capability requirements.
+
+Explicitly unsupported/deferred:
+- remote image URL fetching;
+- files/file_id input;
+- image generation;
+- audio;
+- tools/MCP/computer use;
+- video;
+- object/blob storage;
+- unsupported media types.
+
+Do not claim full multimodal/OpenAI compatibility.
+
+## 25. Migration decision
+
+Expected: **no migration**.
+
+Migration head remains `0017`.
+
+Do not modify migrations 0001-0017.
+
+A new migration is not justified merely to distinguish vision requests; the encrypted message payload
+already owns request content.
+
+## 26. Regression gate
+
+Run:
 - backend full suite; baseline **613**
 - frontend unit/component; baseline **87**
 - full Playwright; baseline **32**
 - npm build
 - npm lint
 - `npx tsc -b --noEmit`
-- OpenAPI/client drift under locked dependencies
+- OpenAPI/client drift
 - ruff check src tests
 - git diff --check
-- secret/token/content scan
-- new no-legacy-v1 guard
+- secret/content/image-data canary scan
+- no-legacy-v1 guard + self-test
 - migration empty -> 0017
 - populated 0016 -> 0017
 - config_check
-- fake Ollama provider tests
+- fake Ollama text + vision adapter tests
 - official Python SDK:
   - Models
-  - Chat non-stream/stream
-  - Responses non-stream/stream
-- official JS SDK current smoke
-- fresh clean-install cutover rehearsal.
-
-No migration revision is expected.
-Do not modify migrations 0001-0017.
+  - Chat text non-stream/stream
+  - Responses text non-stream/stream
+  - Chat vision non-stream/stream
+  - Responses vision non-stream/stream
+- official JS equivalent smoke
+- fresh offline golden path.
 
 Every red test must be root-caused.
 
-## 18. Remote CI gate
+## 27. Remote CI gate
 
-Push completed work to origin/v2.
+Push completed work to `origin/v2`.
 
-On the FINAL SHA require:
+On the FINAL v2 SHA require:
 - backend = completed/success
 - frontend = completed/success
 - schema-secret-gate = completed/success
-- alpha-golden-path = completed/success
+- alpha-golden-path = completed/success.
 
-All must be for that exact final SHA.
-
-If red:
+If any is red:
 - inspect logs;
-- root-cause;
-- fix;
+- fix root cause;
 - push;
-- require green on the new final SHA.
+- require all four green on the new final SHA.
 
-## 19. Handoff
+Do not declare completion based on local evidence alone.
+
+## 28. Feature PR to main
+
+After the final v2 SHA is green:
+- create or update a PR from `v2` -> `main`;
+- include the final SHA and verification summary;
+- do NOT merge it automatically;
+- leave merge for the reviewed user-authorized step.
+
+Never push directly to main.
+
+## 29. No New Scope
+
+Do not implement:
+- embeddings;
+- image generation endpoints;
+- audio;
+- files API/storage;
+- remote image fetcher;
+- tools/function execution;
+- MCP;
+- computer use;
+- video;
+- RAG/vector search;
+- unrelated UI redesign.
+
+## 30. Handoff
 
 Record:
-- operator decision that v1 data was disposable;
-- AGV2-026 embeddings superseded/deferred before implementation;
-- exact legacy files removed/replaced;
-- stale agent/operator docs removed or redirected;
-- dependency cleanup decisions;
-- no-legacy guard behavior;
-- clean-install cutover proof;
-- nomnom v1 retirement/rehearsal result;
-- migration head 0017;
-- backend/frontend/Playwright counts;
-- SDK results;
+- implementation commits;
+- exact pinned Chat/Responses image contract forms;
+- supported media types/source form;
+- exact image/payload limits;
+- canonical multimodal message representation;
+- legacy text payload backward compatibility;
+- capability enforcement;
+- LiteLLM/Ollama image mapping;
+- fake Ollama vision proof;
+- SSRF/remote-URL rejection proof;
+- quota/budget/accounting behavior;
+- logging/redaction behavior;
+- Python SDK results;
+- JS SDK results;
+- live Ollama model/proof or truthful lack-of-installed-model limitation;
+- queue/concurrency proof;
 - OpenAPI drift;
-- final SHA and four remote workflow run IDs/conclusions;
-- PR v2 -> main status if created;
-- known limitations;
+- migration decision;
+- backend/frontend/Playwright counts;
+- final v2 SHA + four workflow run IDs/conclusions;
+- PR-to-main number/status;
 - WIP lifecycle;
-- exactly one recommended next step:
-  **merge v2 into main through reviewed PR, or if already merged by an authorized later action,
-  begin vision/multimodal inference.**
+- exactly one recommended next step.
 
-Never include credentials, session/OIDC/provider secrets, prompt/completion content, encrypted bytes,
-or large logs.
+Never include image bytes/base64, prompt/output content, credentials/session/OIDC/provider secrets,
+encrypted payload bytes, or raw provider bodies.
 
 ## Commit and Push
 
 Suggested commits:
-- `chore: retire legacy v1 runtime`
-- `ci: guard canonical aethergate runtime`
-- `docs: complete clean v2 cutover`
+- `feat(inference): add canonical multimodal image parts`
+- `feat(api): add vision input to chat and responses`
+- `test(ci): add deterministic vision compatibility proof`
+- `docs: document vision input support`
 
 Use fewer/more scoped conventional commits if cleaner.
 
@@ -544,12 +738,16 @@ Never push directly to main.
 Do not ask whether to continue/commit/push.
 
 The task is complete only when:
-- the v1 runtime and misleading active v1 instructions are gone;
-- the current PostgreSQL/scheduler implementation is the only supported runtime;
-- a fresh install from no v1 state is proven;
+- official Python + JS Chat and Responses vision proofs are green;
+- image-bearing requests use the existing durable scheduler/accounting authority;
+- images are encrypted while queued;
+- remote image URLs cannot create SSRF/egress;
+- explicit size/count limits are enforced;
+- capability checks prevent image input reaching text-only routes;
+- text-only Chat + Responses remain green;
 - migration head remains 0017;
-- all current regressions are green;
-- all four GitHub Actions are green on the final origin/v2 SHA;
-- main branch CI triggers are ready;
-- the handoff is complete;
+- all local gates pass;
+- all four remote workflows are green on the final origin/v2 SHA;
+- a v2 -> main feature PR exists but is not merged;
+- handoff is complete;
 - local `.aethergate-wip` is removed only after final remote verification.
