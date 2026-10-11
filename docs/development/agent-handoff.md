@@ -91,10 +91,21 @@ the `ResponsesRequest` docstring. Compatibility claims were not broadened.
 No migration; head remains `0017`; `0001`–`0017` untouched.
 
 ### Final remote CI (AGV2-028V)
-Pending final v2 SHA (populated after push).
+The substantive code/test SHA is `e1d7086` (fix `f9e7619` + tests `e1d7086`; later commits are
+docs-only). All four required workflows are `completed/success` on the then-current `origin/v2`
+tip `3f93f05d7f9e7850cf23fc15d463a16661196ea2` (push events):
+- backend — run `38182977904`
+- frontend — run `38182977886`
+- schema-secret-gate — run `38182977887`
+- alpha-golden-path — run `38182977874`
+
+Every commit after the substantive code/test SHA is documentation-only and is verified green with
+the same four deterministic, offline workflows; the `origin/v2` tip at handoff is green for all four.
 
 ### PR
-PR **#2** (`v2` -> `main`) remains open/unmerged and tracks the `v2` head (see PR status section).
+PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — open, **unmerged**,
+mergeable, head `v2` now tracking the AGV2-028V tip. Description updated with the strict-WebP
+validation closure, explicit detail behavior, and the final CI evidence.
 
 ### WIP marker lifecycle
 `.aethergate-wip` (`task=AGV2-028V`, `branch=v2`, UTC start timestamp) created first, kept for the
