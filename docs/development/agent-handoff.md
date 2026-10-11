@@ -1,12 +1,147 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-027 (Canonical v2 cutover — retire v1)** complete: the current
-  PostgreSQL/Alembic/scheduler implementation under `src/aethergate/` is the only supported
-  AetherGate runtime. The retired v1 SQLModel/SQLite application and its stale operator/agent
-  instructions are removed, a legacy-reintroduction CI guard is wired in, all four workflows
-  push on `v2` + `main`, and a fresh clean-install cutover is proven end-to-end on a disposable
-  stack (real Ollama) with no v1 data imported.
+- Branch: `v2`. **AGV2-028 (Vision / multimodal image input for Chat + Responses)** complete:
+  image input -> text output is supported on `POST /v1/chat/completions` and `POST /v1/responses`
+  through the **existing** durable scheduler/accounting/worker authority. Inline `data:` images
+  (PNG/JPEG/WebP) only; remote URLs/`file_id`/files rejected and never fetched; explicit image
+  count/byte/payload limits; images stay inside the encrypted scheduler payload; image capability
+  required on alias + provider with dispatch-time revalidation; token quotas/budgets fail closed.
+  No migration (head remains `0017`). Follows the verified AGV2-027 main-merge baseline.
+- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
+
+## AGV2-028 — Vision / multimodal image input (Chat Completions + Responses)
+
+### Pinned contract / SDK baseline
+- Request/response shapes derived from the locked official **`openai==2.54.0`** Python SDK
+  (`ChatCompletionContentPartParam` = `text`/`image_url`; `ResponseInputImageParam` =
+  `input_image` with `image_url`/`file_id`) and the pinned upstream OpenAPI baseline; never from
+  memory. JS smoke uses the locked official **`openai` Node SDK `7.32.0`**.
+- Provider transport shape discovered **empirically** against pinned LiteLLM `1.104.0`: a chat
+  content list `[{type:text,text}, {type:image_url,image_url:{url:"data:<mime>;base64,..."}}]`
+  is transformed by `litellm/llms/ollama/...` into a POST to **`/api/generate`** with top-level
+  `images: ["<pure base64>"]` (and `/api/chat` message `images`). It strips the `data:` prefix.
+
+### Supported surface / source form
+- Chat Completions: `messages[].content` = string **or** ordered `text`/`image_url` parts.
+- Responses: `input[].content` = `input_text`/`output_text`/`input_image` parts.
+- Inline `data:` URLs only; media types **PNG/JPEG/WebP** (strict base64 + magic-byte signature).
+- Non-stream + stream on both surfaces; text-only forms unchanged.
+
+### Explicitly rejected (structured 400)
+Remote `http(s)://` image URLs (**never fetched / no DNS+HTTP client**), `file_id`/files,
+provider-local paths, arbitrary URI schemes, SVG/unsupported media types, malformed data URLs,
+bad/non-canonical base64, empty payloads, MIME/signature mismatch.
+
+### Canonical multimodal model + encryption
+- `adapters.base.Message(role, content:str, parts: tuple[ContentPart,...] | None)`;
+  `TextContentPart`/`ImageContentPart(media_type, data:bytes)`. Part order preserved.
+- Chat and Responses map into the **same** canonical messages; adapters receive canonical parts.
+- `serialize_chat_payload` emits a `parts` key only for multimodal messages; image bytes are
+  base64 within the JSON envelope, which is then Fernet-encrypted into `payload_encrypted`.
+  Legacy text payloads (no `parts`) deserialize byte-for-byte as before
+  (`tests/test_vision_images.py::test_legacy_text_payload_deserializes_exactly_as_before`).
+- No plaintext image column `migration`; **no migration** (head `0017`).
+
+### Configurable limits (pre-enqueue)
+`AETHERGATE_MAX_IMAGES_PER_REQUEST=4`, `AETHERGATE_MAX_IMAGE_BYTES=8 MiB`,
+`AETHERGATE_MAX_TOTAL_IMAGE_BYTES=16 MiB`, `AETHERGATE_MAX_QUEUE_PAYLOAD_BYTES=24 MiB`. The
+payload bound applies to text and vision payloads and accounts for base64 expansion. Oversize ->
+`400 image_limit_exceeded` / `400 payload_too_large`, checked in-app (not only nginx).
+
+### Capability enforcement
+Image request requires `Capability.IMAGE` on the public **ModelAlias** and the **Provider**
+(`scheduler/service._enforce_image_capability`), at admission **and** again at dispatch time
+(capability may be revoked while queued). No fallback to a text-only route; images never silently
+removed. Text-only requests are unaffected.
+
+### Adapter / provider mapping
+Pinned `LiteLLMChatAdapter._wire_message` emits the OpenAI `image_url` content union; provider kind
+stays `ollama`; base destination/upstream model remain authoritative; retries/fallback stay
+disabled; image bytes are never logged. Fake Ollama records only `last_image_count` /
+`last_image_byte_lengths` / `image_request_count` (decoded lengths) — never bytes/base64.
+
+### Quota / budget / accounting
+Request quotas unchanged (1 request = 1 unit). Image requests return `estimate_input_tokens=None`,
+so enforced **token** quota / token-priced budget fail closed
+(`quota_token_estimator_unavailable` / `budget_token_estimator_unavailable`) — no fabricated image
+tokens. Request-priced accounting, UsageRecord, signed `usage_debit`, leases/fencing, cancellation,
+`outcome_unknown`, streaming, TTFT, auth + dispatch-time credential revalidation all unchanged.
+
+### Fake-Ollama + offline golden path proof
+- `tests/test_fake_ollama.py` / `tests/test_adapter.py`: real pinned LiteLLM transport reaches the
+  image path; metadata-only capture; wire-mapping assertion.
+- `scripts/ci/golden_path.py` adds a distinct image-capable `golden-vision-model` alias/route and
+  proves: text Chat + Responses still green; Chat/Responses vision non-stream/stream; Python SDK
+  vision; remote-URL + text-only-alias 400; **backup/restore preserves the vision route**;
+  **post-restore vision inference** succeeds. `sdk/js/smoke.mjs` adds JS Chat/Responses vision
+  non-stream/stream + remote-URL 400. Full offline golden path run green locally on a disposable
+  stack (`fake-ollama`): main phase `sdk_chat_vision/…_stream`, `sdk_responses_vision/…_stream`,
+  `sdk_vision_remote_url_400`, `sdk_text_only_image_400` all `ok`; post-restore vision `ok`;
+  JS smoke all `ok`.
+
+### Live nomnom proof (real internal Ollama, bypass=false)
+- Installed vision model positively identified from `/api/tags` capabilities: **`qwen3-vl:latest`**
+  (`capabilities: [completion, vision, tools, thinking]`). Many more vision models installed; none
+  downloaded.
+- Disposable image-capable provider/account/endpoint(`max_concurrency=2`)/alias/route; official
+  Python SDK: Chat vision non-stream **ok**, Chat vision stream **ok** (TTFT ≈ 1.0 s), Responses
+  vision non-stream/stream **ok**, remote URL → **400**, text-only alias image → **400**;
+  six concurrent vision requests / two slots all succeeded (wall times 1.05–6.32 s).
+- Full harness: streaming image request settled **succeeded** with exactly **1 UsageRecord** and
+  **1 signed ledger entry** and **first_token_at recorded** (TTFT); route disabled while queued →
+  **failed** (no dispatch/fallback); queued credential revocation → **failed / authorization_failed**
+  (no upstream dispatch). Real model rejects a 1x1 PNG but accepts a small decodable PNG; fixtures
+  use a tiny deterministic 16x16 solid PNG for live parity.
+
+### OpenAPI drift / migration
+- Regenerated backend OpenAPI + frontend `schema.d.ts` from the contract change; two consecutive
+  generations md5-stable.
+- **No migration**; head remains `0017`; `0001`–`0017` untouched. Empty → `0017` and populated
+  `0016 → 0017` verified; `config_check` VALID.
+
+### Regression counts (AGV2-028)
+- backend: **657 collected, exit 0** (baseline 613 + 44 new/converted vision tests).
+- frontend unit/component: **89 passed** (baseline 87 + 2 image-capability component tests).
+- full Playwright: **32 passed, 5 skipped** (CI-only `alpha-golden.spec.ts`, now including vision).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff check src tests` clean;
+  `git diff --check` clean; secret/content/image-data scans clean; no-legacy guard + self-test clean.
+
+### Final remote CI (AGV2-028)
+All four required workflows are `completed/success` on the substantive `origin/v2` SHA
+`7bd9fe5ba25611da0e5e5bf0f5fbaa83f36dcf7f`:
+- backend — run `38175168398`
+- frontend — run `38175168385`
+- schema-secret-gate — run `38175168307`
+- alpha-golden-path — run `38175168359`
+
+### Known limitations
+- Inline-only; no remote fetch, files/`file_id`, object storage, image generation, audio, video,
+  tools/MCP/computer-use. Not full multimodal/OpenAI compatibility.
+- Image token estimation is unavailable by design; enforced token quotas/budgets fail closed.
+- `deploy/v2`/`scripts/*/v2` retain historical `v2` naming (canonical; do not rename).
+
+### Feature PR
+- PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — created, includes
+  the final SHA and verification summary, **not merged**.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-028`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria were green, the handoff committed, commits pushed to
+`origin/v2`, final remote CI verified green, and PR #2 created. Never staged/committed/pushed
+(gitignored).
+
+### Recommended next step
+Resume **embeddings** (`POST /v1/embeddings`) through the same durable scheduler/accounting
+authority (deferred, not cancelled); then proceed to the reviewed merge of PR #2 (`v2` -> `main`).
+
+## Prior — AGV2-027 (canonical v2 cutover — retire v1)
+
+- AGV2-027 complete: the current PostgreSQL/Alembic/scheduler implementation under
+  `src/aethergate/` is the only supported AetherGate runtime. The retired v1 SQLModel/SQLite
+  application and its stale operator/agent instructions are removed, a legacy-reintroduction CI
+  guard is wired in, all four workflows push on `v2` + `main`, and a fresh clean-install cutover
+  is proven end-to-end on a disposable stack (real Ollama) with no v1 data imported.
 - Follows the verified AGV2-025 baseline SHA `07ae618` (backend 613 / frontend 87 / Playwright 32).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
 
