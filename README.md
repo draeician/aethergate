@@ -13,12 +13,19 @@ Python app under `app/` is retained for reference only and is not part of v2.
 
 - `GET /v1/models`, `GET /v1/models/{model}`
 - `POST /v1/chat/completions` (non-streaming and streaming)
+- `POST /v1/responses` (Responses text-generation subset: string/text input,
+  `instructions`, `max_output_tokens`, `temperature`, `top_p`, non-streaming and
+  streaming; durable queue + accounting). Unsupported Responses semantics
+  (tools/function/MCP/computer-use, multimodal, structured outputs, reasoning,
+  `previous_response_id`/conversations, background, stored responses) are
+  rejected with a structured `400 unsupported_feature`; see
+  `docs/contracts/responses.md`.
 - `/admin/v1` management API (identity/RBAC, catalog/routing, accounting, queue,
   observability, OIDC/session, CLI/device flow)
 - Linux CLI (`aethergate`, thin client over `/admin/v1`)
 - Web console (operator + management + accounting + observability)
 
-Not yet: Responses API, embeddings, v1->v2 migration, production HA, external
+Not yet: embeddings, v1->v2 migration, production HA, external
 metrics/alerting.
 
 ## Quick start (development)

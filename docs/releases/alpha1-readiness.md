@@ -38,7 +38,12 @@ AetherGate may be called Alpha 1 because all of the following hold:
 ## Supported surfaces
 
 - OpenAI: `GET /v1/models`, `GET /v1/models/{model}`, `POST /v1/chat/completions`
-  (non-stream + stream).
+  (non-stream + stream), `POST /v1/responses` (Responses **text-generation
+  subset**: string/text input, `instructions`, `max_output_tokens`,
+  `temperature`, `top_p`, non-stream + stream; durable queue + accounting).
+  Unsupported Responses semantics are rejected with `400 unsupported_feature`
+  (see `docs/contracts/responses.md`); this is **not** full Responses
+  compatibility.
 - Admin API `/admin/v1`: identity/RBAC, catalog/routing, accounting, queue/
   operator, observability, OIDC/session, CLI/device flow.
 - Linux CLI (thin `/admin/v1` client; OAuth device flow).
@@ -46,7 +51,9 @@ AetherGate may be called Alpha 1 because all of the following hold:
 
 ## Deferred surfaces (not Alpha 1)
 
-Responses API, embeddings, v1->v2 data migration, production secret-backend
+Responses rich semantics (tools/function/MCP/computer-use, multimodal, structured
+outputs, reasoning, `previous_response_id`/conversations, background, stored
+responses), embeddings, v1->v2 data migration, production secret-backend
 selection, production-grade HA/failover, external Prometheus/OpenTelemetry/TSDB
 exporters, paging/alerting, billing/invoice/payment semantics, hosted SaaS
 tenancy, and broad visual redesign.

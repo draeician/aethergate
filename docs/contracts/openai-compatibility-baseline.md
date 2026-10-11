@@ -29,11 +29,18 @@ supported compatibility surface.
 
 - `GET /v1/models` and `GET /v1/models/{model}` — implemented; publish active public model
   aliases only (never provider-facing model names or routing internals).
-- `POST /v1/chat/completions` — implemented for non-streaming and SSE streaming, direct dispatch
-  only (no queueing). Transport/provider-control fields are rejected; unknown aliases return an
+- `POST /v1/chat/completions` — implemented for non-streaming and SSE streaming, through the
+  durable scheduler (admission, endpoint concurrency, quota/budget reservation, cancellation,
+  settlement). Transport/provider-control fields are rejected; unknown aliases return an
   OpenAI-compatible structured error.
-- `POST /v1/responses`, `POST /v1/embeddings` — **not yet implemented** (still part of the v2
-  target, after this milestone).
+- `POST /v1/responses` — implemented for the **text-generation subset** only (AGV2-025):
+  string or text message/input-item `input`, `instructions`, `max_output_tokens`, `temperature`,
+  `top_p`, `stream`. It uses the same durable scheduler/accounting/worker authority as Chat
+  Completions and never a second path. Known unsupported Responses semantics are rejected with a
+  structured HTTP 400 `unsupported_feature` (never silently dropped). See
+  `docs/contracts/responses.md` for the exact supported/deferred field matrix and the canonical
+  Responses -> scheduler mapping.
+- `POST /v1/embeddings` — **not yet implemented** (still part of the v2 target).
 
 ## Compatibility principles
 

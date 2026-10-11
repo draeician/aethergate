@@ -74,6 +74,10 @@ scripts/dev/v2 <command>
 - `GET /v1/models` — list active public model aliases.
 - `GET /v1/models/{model}` — retrieve a public model alias.
 - `POST /v1/chat/completions` — Chat Completions (non-streaming + SSE `stream=true`).
+- `POST /v1/responses` — Responses text-generation subset (string/text input, `instructions`,
+  `max_output_tokens`, `temperature`, `top_p`, non-streaming + Responses SSE). Uses the same durable
+  scheduler/accounting/worker authority as Chat. Unsupported semantic features return a structured
+  `400 unsupported_feature`; see `docs/contracts/responses.md`.
 
 Admin control-plane endpoints (AGV2-013/014):
 
