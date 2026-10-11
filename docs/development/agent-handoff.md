@@ -1,14 +1,110 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-028 (Vision / multimodal image input for Chat + Responses)** complete:
-  image input -> text output is supported on `POST /v1/chat/completions` and `POST /v1/responses`
-  through the **existing** durable scheduler/accounting/worker authority. Inline `data:` images
-  (PNG/JPEG/WebP) only; remote URLs/`file_id`/files rejected and never fetched; explicit image
-  count/byte/payload limits; images stay inside the encrypted scheduler payload; image capability
-  required on alias + provider with dispatch-time revalidation; token quotas/budgets fail closed.
-  No migration (head remains `0017`). Follows the verified AGV2-027 main-merge baseline.
+- Branch: `v2`. **AGV2-028V (Vision verification closure)** complete: the independent-review
+  gaps in AGV2-028 are closed — WebP validation now requires the real RIFF+WEBP container
+  signature (RIFF alone rejected), and the OpenAI image `detail` selector is no longer silently
+  ignored (omitted/`auto` accepted; `low`/`high`/`original` rejected with `400
+  unsupported_feature`). All AGV2-028 invariants preserved. No migration (head remains `0017`).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
+
+## AGV2-028V — Vision verification closure (strict WebP + explicit image detail)
+
+### Independent-review findings (both closed)
+1. WebP validation was too permissive: `_SIGNATURES["image/webp"] = ((b"RIFF",), (b"WEBP",))`
+   with a generic "any one group matching at offset 0" check accepted **any** RIFF payload
+   (RIFF/WAVE, RIFF/AVI, arbitrary RIFF) as `image/webp`.
+2. The OpenAI image `detail` selector was accepted but never inspected (silently dropped),
+   violating the settled rule that semantic fields are implemented faithfully or rejected.
+
+### Fix 1 — strict per-format signatures (`src/aethergate/inference/images.py`)
+Replaced the generic signature map/matcher with explicit per-format predicates:
+`_is_png` (`89 50 4E 47 0D 0A 1A 0A`), `_is_jpeg` (`FF D8 FF`), and `_is_webp`
+(header length ≥ 12 **and** `bytes 0:4 == b"RIFF"` **and** `bytes 8:12 == b"WEBP"`).
+RIFF alone is no longer accepted. PNG/JPEG strictness unchanged. No decoding library used.
+
+### Fix 2 — explicit image `detail` semantics
+Pinned contract enums inspected from the locked SDKs (not memory):
+- **Chat** `image_url.detail`: Python `openai==2.54.0` `ImageURL` = `Literal['auto','low','high']`;
+  JS `openai@7.32.0` `ChatCompletionContentPartImage.ImageURL` = `'auto'|'low'|'high'|'original'`.
+- **Responses** `input_image.detail`: Python `ResponseInputImageParam` =
+  `Literal['low','high','auto','original']` ("Defaults to `auto`"); JS
+  `ResponseInputImageContent.detail?: ImageDetail | null`.
+
+Chosen policy (identical for Chat and Responses; `validate_image_detail`):
+- **omitted** allowed (Responses defaults to `auto`; Chat `auto` is the neutral provider default);
+- **`auto`** allowed — neutral/default mode, imposes no fidelity semantics on the transport;
+- **`low`/`high`/`original`** explicitly rejected with `400 unsupported_feature`
+  (`param` = `messages[...].content[i].image_url.detail` / `input[i].content[j].detail`), because
+  the pinned LiteLLM/Ollama path has no faithful per-image detail control;
+- any non-string or unrecognized value rejected as a contract violation.
+Rejected detail never reaches the adapter/upstream (validation is pre-enqueue/pre-dispatch).
+
+### Focused regression proof
+- `tests/test_vision_images.py`: valid WebP accepted; RIFF/WAVE, RIFF/AVI, arbitrary RIFF, and
+  `WEBP`-without-`RIFF` rejected; too-short header rejected; error text contains neither the
+  base64 nor the raw `RIFF`/`WAVE` markers (verified to fail against the AGV2-028 logic). Plus
+  Chat + Responses detail matrices: omitted/`auto` succeed; `low`/`high`/`original` rejected with
+  the precise `param`; invalid enum and non-string rejected.
+- `tests/test_vision_api.py`: end-to-end — `auto` succeeds and reaches the adapter; `low`/`high`/
+  `original` return `400 unsupported_feature` with **no adapter dispatch** (Chat and Responses).
+- `scripts/ci/golden_path.py` / `sdk/js/smoke.mjs` / `frontend/e2e/`: official Python + JS SDK
+  proof of default/`auto` detail and an SDK-visible 400 for `low`.
+
+### Invariants preserved (unchanged)
+Inline `data:` only; PNG/JPEG/WebP; no remote URL/file_id; no-fetch/SSRF; image count/byte/payload
+limits; encrypted queue payload; capability enforcement (alias+provider, dispatch-time revalidation);
+same scheduler/accounting/worker; token quota/budget fail-closed; auth/cancellation/recovery;
+text behavior unchanged. **No provider-transport change** was needed, so no live nomnom rerun was
+required by the task; the local fake-Ollama offline golden path was re-run end-to-end.
+
+### Gate counts (AGV2-028V)
+- backend: **685 collected, exit 0** (baseline 657 + 28 new/expanded WebP+detail tests).
+- frontend unit/component: **89 passed**.
+- full Playwright: **32 passed, 6 skipped** (CI-only `alpha-golden.spec.ts`, now +1 detail test).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff` clean; `git diff --check`
+  clean; secret/content/image-data scans clean; no-legacy guard + self-test clean.
+- OpenAPI/client drift: two consecutive generations md5-stable.
+- Migrations empty → `0017`, populated `0016 → 0017`; `config_check` VALID.
+- Offline golden path (fake Ollama) green incl. `sdk_vision_detail_400` and JS
+  `chat_vision_detail_auto`/`chat_vision_detail_400`.
+
+### Playwright root-cause (not a product defect)
+The first full Playwright run after rebuilding the image failed two specs. Root causes, both
+environmental and documented:
+1. `catalog-inference.spec.ts` — the OIDC/JWKS browser cold start (`Sign-in failed`); passes in
+   isolation and on the subsequent full run.
+2. `accounting.spec.ts` budget-unblock — a stale `outcome_unknown` request (from the prior task's
+   live vision runs) held a shared `ollama-endpoint` slot, so its first live SDK call queued and
+   expired. Reconciled through the real operator path (`python -m aethergate.reconcile resolve …
+   --disposition failed`) which released the slot; the full `accounting.spec.ts` then passed 8/8
+   and the full suite passed 32/32. Documented live-data-accumulation defect family.
+
+### Documentation cleanup
+`docs/contracts/vision.md` now documents the exact detail semantics and the strict WebP signature.
+Stale "Responses text-generation subset" wording that AGV2-028 made materially false was corrected
+to "text + inline-image input subset" in `README.md`, `docs/contracts/openai-compatibility-baseline.md`,
+`docs/contracts/responses.md`, `docs/development/README.md`, `docs/releases/alpha1-readiness.md`, and
+the `ResponsesRequest` docstring. Compatibility claims were not broadened.
+
+### Migration
+No migration; head remains `0017`; `0001`–`0017` untouched.
+
+### Final remote CI (AGV2-028V)
+Pending final v2 SHA (populated after push).
+
+### PR
+PR **#2** (`v2` -> `main`) remains open/unmerged and tracks the `v2` head (see PR status section).
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-028V`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria green, handoff committed, commits pushed to `origin/v2`,
+final remote CI verified green, and PR #2 updated. Never staged/committed/pushed (gitignored).
+
+### Recommended next step
+**Merge PR #2 (`v2` -> `main`) through the reviewed/user-authorized process** once its head is the
+final green AGV2-028V SHA. Do **not** start embeddings before PR #2 is merged and post-merge `main`
+CI is green — otherwise PR #2 stops being a scoped vision PR.
 
 ## AGV2-028 — Vision / multimodal image input (Chat Completions + Responses)
 
@@ -141,9 +237,10 @@ whole task, removed only after all criteria were green, the handoff committed, c
 `origin/v2`, final remote CI verified green, and PR #2 created. Never staged/committed/pushed
 (gitignored).
 
-### Recommended next step
-Resume **embeddings** (`POST /v1/embeddings`) through the same durable scheduler/accounting
-authority (deferred, not cancelled); then proceed to the reviewed merge of PR #2 (`v2` -> `main`).
+### Recommended next step (superseded by AGV2-028V — see the top of this file)
+This section previously recommended resuming embeddings before merging PR #2. That ordering was
+wrong and is reversed by AGV2-028V: **merge PR #2 (`v2` -> `main`) through the reviewed process
+first**; only after that merge and post-merge `main` CI are green should embeddings be queued.
 
 ## Prior — AGV2-027 (canonical v2 cutover — retire v1)
 
