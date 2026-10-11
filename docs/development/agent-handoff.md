@@ -1,13 +1,127 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-025 (Alpha 2 — OpenAI Responses API text subset, durable queue, official
-  SDK)** implemented: `POST /v1/responses` for the text-generation subset, reusing the existing
-  durable scheduler/accounting/worker authority, with explicit rejection of every unsupported
-  Responses semantic family and official Python + JavaScript SDK proofs.
+- Branch: `v2`. **AGV2-027 (Canonical v2 cutover — retire v1)** complete: the current
+  PostgreSQL/Alembic/scheduler implementation under `src/aethergate/` is the only supported
+  AetherGate runtime. The retired v1 SQLModel/SQLite application and its stale operator/agent
+  instructions are removed, a legacy-reintroduction CI guard is wired in, all four workflows
+  push on `v2` + `main`, and a fresh clean-install cutover is proven end-to-end on a disposable
+  stack (real Ollama) with no v1 data imported.
+- Follows the verified AGV2-025 baseline SHA `07ae618` (backend 613 / frontend 87 / Playwright 32).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
 
-## AGV2-025 — OpenAI Responses API (text generation, durable queue, official SDK)
+## AGV2-027 — Canonical v2 cutover (retire legacy v1)
+
+### Operator decisions
+- **v1 data is disposable.** The v1 deployment was never production and holds no state worth
+  preserving. The supported transition is a clean/destructive cutover to a fresh PostgreSQL
+  authority. **No SQLite -> PostgreSQL importer is built** and none should be resurrected.
+- **AGV2-026 Embeddings was superseded before implementation** (queued, never started). It is
+  deferred, not cancelled. Per operator direction, **vision/multimodal inference is next** after
+  cutover; embeddings may be resumed later.
+
+### Legacy artifacts removed (exact)
+- Runtime/code: `app/` (auth, database, main, models, routers/{admin,proxy}, services/{billing,
+  limiter}), root `Dockerfile`, root `docker-compose.yml`, root `requirements.txt`, `init_db.py`,
+  `manage.py`, `debug_inference.py`.
+- Ad-hoc SQLite migration scripts: `scripts/add_model_config_columns.py`,
+  `scripts/add_rate_limit_column.py`, `scripts/migrate_endpoints.py`.
+- Stale agent instructions: `AETHERGATE_RULES.md`, `.context-resume.md`; rewrote `.cursorrules`
+  and `CLAUDE.md` to point at `AGENTS.md`/`project_spec.md` only.
+- Stale operator docs: `API_REFERENCE.md` (now a pointer to generated OpenAPI/current contracts)
+  and `OPS_RUNBOOK.md` (now a pointer to `docs/operations/alpha-runbook.md`).
+- Untracked v1-era helper scripts at the root (`aethergate_client.py`, `chat_completion.py`,
+  `diagnose.py`, `inspect_routing.py`, `list_models.py`, `ollama_direct.py`, `prompt1.md`) were
+  removed; `docs/development/agent-workstreams.md` now documents their supported v2 replacements.
+- **Not touched:** `docs/audits/v2-architecture-audit-2026-10-03.md` (immutable historical
+  evidence) and migrations `0001`–`0017`.
+
+### Canonical paths preserved
+`src/aethergate/`, `deploy/v2/`, `scripts/dev/v2`, `scripts/ops/v2` keep their historical `v2`
+path component and are the canonical current paths. No root Docker/Compose aliases were added.
+Tooling audit found no remaining assumptions on a root Dockerfile/Compose (all use `deploy/v2/`).
+
+### Dependency cleanup decisions
+None of `sqlmodel`, `aiosqlite`, `passlib`/`bcrypt`, `typer`, or `numpy` are in the current
+`pyproject.toml` or `constraints.txt` — they were v1-only and were already absent from the locked
+graph. No dependency churn; `constraints.txt` unchanged and OpenAPI drift is zero under the lock.
+
+### No-legacy CI guard
+`scripts/ci/no_legacy_v1.sh` fails if the active tree reintroduces `app/`, root legacy
+`docker-compose.yml`/`requirements.txt`, retired SQLite scripts, active `app.*` imports, or active
+SQLModel/aiosqlite/`MASTER_API_KEY`/`x-admin-key` references (code/config only). It exempts the
+immutable audit and the migration-retirement doc, and `--self-test` proves it rejects a synthetic
+legacy tree. Wired into `schema-secret-gate`. Local run: clean + self-test ok.
+
+### Clean-install cutover proof (fresh disposable stack, real Ollama `tev1:0.8b`, bypass=false)
+`scripts/ci/nomnom_acceptance.sh` against a disposable compose project/volume (never the dev DB):
+- no v1 DB imported; fresh PostgreSQL; Alembic empty -> head (**0017**); `config_check` VALID;
+- API/worker readiness; one-use bootstrap; deterministic OIDC browser login;
+- catalog chain created (provider/account/endpoint/alias/route/price-policy, project/principal);
+- inference credential created; official Python SDK Models (`golden-model`) + Chat non-stream +
+  Chat stream + Responses non-stream + Responses stream all green;
+- usage/ledger state present (4 -> 4 across restore, no duplicate settlement); observability
+  summary populated; web console root + `/auth/callback` load (HTTP 200);
+- backup succeeds; destroy + restore; API restart, worker restart, full-stack restart all recover;
+  post-restart SDK inference succeeds.
+- Official JS SDK smoke green (Models + Chat non-stream/stream + Responses non-stream/stream +
+  Responses tools 400). Disposable stack + volume torn down afterward.
+
+### Legacy negative proof
+`app/` is absent (old `uvicorn app.main:app` cannot start), root `Dockerfile`/`docker-compose.yml`
+absent, `init_db.py`/`manage.py` absent, old SQLite scripts absent, no active `app.*`/SQLModel
+imports in the build path, and the frontend does not target old `/admin/*` or `x-admin-key`.
+
+### Nomnom v1 retirement
+No obsolete AetherGate v1 containers/processes were running. One positively-identified v1 image
+(`aethergate-api:latest`, Cmd `uvicorn app.main:app`) with **no referencing containers** was
+removed. Unrelated containers/services (langfuse, matrix-comms, paperclip, etc.) were left
+untouched. The old SQLite DB was not imported. The disposable rehearsal stack was the only thing
+torn down.
+
+### Migration head
+`0017` (unchanged; `0001`–`0017` untouched).
+
+### Regression counts (AGV2-027)
+- backend: **613 passed / 613 collected** (canonical `scripts/dev/v2 test`, exit 0).
+- frontend unit/component: **87 passed** (22 files).
+- full Playwright: **32 passed, 3 skipped** (CI-only `alpha-golden.spec.ts`).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff check src tests` clean;
+  `git diff --check` clean; `scripts/ci/secret_scan.sh` clean; `no_legacy_v1.sh --self-test` clean.
+- OpenAPI/client drift: two consecutive generations identical (md5 stable); regenerated committed
+  OpenAPI/client produced zero diff.
+
+### Final remote CI (AGV2-027)
+All four required workflows `completed/success` on the final `origin/v2` SHA
+`f2c37446b25e4ac9b3545bb3ed3f2d8a32fa05e1`:
+- backend — run `38157863695`
+- frontend — run `38157863677`
+- schema-secret-gate — run `38157863609`
+- alpha-golden-path — run `38157863692`
+
+### Main-branch readiness
+- All four workflows now push on `v2` **and** `main`; pull-request + `workflow_dispatch` kept,
+  least privilege, concurrency, locked installs, and the offline golden path preserved.
+- PR **#1** (`v2` -> `main`) created: https://github.com/draeician/aethergate/pull/1 — **not
+  merged** (requires the reviewed merge process).
+
+### Known limitations
+- Migration head is `0017`; no schema change in this task.
+- `deploy/v2`/`scripts/*/v2` retain historical `v2` naming (canonical; do not rename).
+- Embeddings remain unimplemented; vision/multimodal not yet started.
+- The no-legacy guard is a deterministic structural/string check, not a full history scanner.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-027`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria were green, the handoff committed, commits pushed to
+`origin/v2`, and the final remote CI verified green. It was never staged, committed, or pushed
+(gitignored).
+
+### Recommended next step
+**Merge `v2` into `main` through the reviewed PR process (PR #1)**, or — if an authorized later
+action has already merged it — begin **vision/multimodal inference** (embeddings remain deferred).
+
+## Prior — AGV2-025 — OpenAI Responses API (text generation, durable queue, official SDK)
 
 ### Pinned contract / SDK baseline
 - Request/response/event shapes derived from the locked official **`openai==2.54.0`** Python SDK
