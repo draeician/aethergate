@@ -246,8 +246,8 @@ whole task, removed only after all criteria were green and remote verified; neve
 - Branch: `v2`. **AGV2-024 (Alpha 1 hardening — CI, fresh install, upgrade/restore, structured logs,
   operator runbook)** is complete. `.aethergate-wip` is removed only after the final remote
   verification.
-- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched. Legacy Python v1
-  `app/` and the dated architecture audit are untouched.
+- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched. (Superseded by
+  AGV2-027, which removed the retired v1 `app/` runtime; see the top of this file.)
 - Repository is at **Alpha 1** (internal/self-hosted): see `docs/releases/alpha1-readiness.md` and
   `docs/operations/alpha-runbook.md`. No SemVer bump was invented (package stays `0.1.0`).
 - New: `.github/workflows/` CI (backend/frontend/alpha-golden-path/schema-secret-gate), deterministic

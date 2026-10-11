@@ -1,13 +1,17 @@
-# AetherGate v2
+# AetherGate
 
-AetherGate v2 is a self-hosted, OpenAI-compatible inference gateway with a
-durable scheduler, quota/budget accounting, enterprise identity, a versioned
-`/admin/v1` management API, a Linux CLI, and a web operator console.
+AetherGate is a self-hosted, OpenAI-compatible inference gateway with a durable
+scheduler, quota/budget accounting, enterprise identity, a versioned `/admin/v1`
+management API, a Linux CLI, and a web operator console.
+
+This repository has **one supported AetherGate implementation**: the current
+PostgreSQL/Alembic/scheduler runtime under `src/aethergate/`. The retired v1
+SQLModel/SQLite application has been removed from the tree; there is no v1 data
+import path. See `docs/migrations/v1-to-v2.md` for the clean-cutover decision.
 
 This repository is at **Alpha 1** (internal/self-hosted). See
 `docs/releases/alpha1-readiness.md` for scope and gates, and
-`docs/operations/alpha-runbook.md` for the operator runbook. The legacy v1
-Python app under `app/` is retained for reference only and is not part of v2.
+`docs/operations/alpha-runbook.md` for the operator runbook.
 
 ## Supported today (Alpha 1)
 
@@ -25,7 +29,8 @@ Python app under `app/` is retained for reference only and is not part of v2.
 - Linux CLI (`aethergate`, thin client over `/admin/v1`)
 - Web console (operator + management + accounting + observability)
 
-Not yet: embeddings, v1->v2 migration, production HA, external
+Deferred: embeddings (`POST /v1/embeddings`); vision/multimodal input is the
+planned next inference surface. Also not yet: production HA, external
 metrics/alerting.
 
 ## Quick start (development)
@@ -54,14 +59,21 @@ backup/restore, upgrade), follow `docs/operations/alpha-runbook.md`.
 
 ## Repository layout
 
-- `src/aethergate/` — v2 application (API, worker, scheduler, accounting,
-  identity, catalog, observability, contracts, admin/CLI surfaces).
+- `src/aethergate/` — the current application (API, worker, scheduler,
+  accounting, identity, catalog, observability, contracts, admin/CLI surfaces).
 - `frontend/` — web console (React + TypeScript).
-- `deploy/v2/` — Compose files and the container image definition.
-- `scripts/dev/v2` — development helper.
-- `scripts/ops/v2` — operator recovery tooling (backup/restore/diagnostics).
-- `scripts/ci/` — offline CI/golden-path tooling.
+- `deploy/v2/` — the canonical Compose stack and container image definition
+  (`deploy/v2/Dockerfile`, `deploy/v2/compose*.yaml`). There is no root
+  Dockerfile or root Compose file.
+- `scripts/dev/v2` — canonical development helper.
+- `scripts/ops/v2` — canonical operator recovery tooling (backup/restore/
+  diagnostics).
+- `scripts/ci/` — offline CI/golden-path tooling (incl. the legacy-v1 guard).
 - `docs/` — architecture, operations, releases, and development documentation.
+
+The `v2` path component in `deploy/v2/`, `scripts/dev/v2`, and `scripts/ops/v2`
+is historical naming; these are the canonical current paths (do not rename them
+or add duplicate root Docker/Compose definitions).
 
 ## Documentation
 

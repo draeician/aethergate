@@ -1,8 +1,13 @@
-# AetherGate v2 — Alpha Operator Runbook
+# AetherGate — Operator Runbook
 
 Audience: a new operator who did not develop AetherGate. This runbook is written
 for the **internal/self-hosted Alpha 1** release. It is not a production/beta
 claim.
+
+There is one supported AetherGate runtime: the current PostgreSQL/Alembic/
+scheduler implementation under `src/aethergate/`. The retired v1 SQLModel/SQLite
+application has been removed; the supported transition is a clean cutover to a
+fresh PostgreSQL database (no v1 data import). See `docs/migrations/v1-to-v2.md`.
 
 ## Alpha 1 supported scope
 
@@ -10,6 +15,9 @@ Supported:
 
 - `GET /v1/models`, `GET /v1/models/{model}`;
 - `POST /v1/chat/completions` (non-streaming **and** streaming/SSE);
+- `POST /v1/responses` (Responses **text-generation subset**: string/text input,
+  `instructions`, `max_output_tokens`, `temperature`, `top_p`, non-streaming and
+  streaming; unsupported semantics return `400 unsupported_feature`);
 - the `/admin/v1` management API (identity, catalog, accounting, queue,
   observability, OIDC/session, CLI/device-flow);
 - the Linux CLI over `/admin/v1`;
@@ -17,9 +25,8 @@ Supported:
 
 Explicitly **not** in Alpha 1 (deferred):
 
-- the OpenAI Responses API;
-- embeddings;
-- v1 -> v2 data migration;
+- embeddings (`POST /v1/embeddings`);
+- vision/multimodal input;
 - production-grade HA/failover;
 - external Prometheus/OpenTelemetry/TSDB exporters, paging, alerting;
 - billing/invoice/payment semantics;

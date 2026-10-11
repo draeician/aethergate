@@ -50,18 +50,23 @@ cutover.
 12. Keep the legacy v1 service disabled/removed; do not run the old and new gateways against the same
     public endpoint during normal operation.
 
-## Legacy artifacts
+## Legacy artifacts (removed)
 
 The v1 implementation used:
 - FastAPI + SQLModel/SQLite under `app/`;
 - a root legacy `docker-compose.yml` / `Dockerfile`;
 - root `requirements.txt`;
-- direct SQLite initialization/management scripts;
-- ad-hoc SQLite schema migration scripts;
-- old admin/API/runbook/agent instructions.
+- direct SQLite initialization/management scripts (`init_db.py`, `manage.py`,
+  `debug_inference.py`);
+- ad-hoc SQLite schema migration scripts (`scripts/add_model_config_columns.py`,
+  `scripts/add_rate_limit_column.py`, `scripts/migrate_endpoints.py`);
+- old admin/API/runbook/agent instructions (`API_REFERENCE.md`, `OPS_RUNBOOK.md`,
+  `AETHERGATE_RULES.md`, `.context-resume.md`, stale `.cursorrules`/`CLAUDE.md`).
 
-The cutover task removes these from the active product tree so operators and coding agents cannot
-mistake them for supported paths.
+These have been removed from the active product tree so operators and coding
+agents cannot mistake them for supported paths. `scripts/ci/no_legacy_v1.sh`
+fails CI if any of them (or active `app.*` imports / SQLModel-aiosqlite /
+`MASTER_API_KEY`-`x-admin-key` references) are reintroduced.
 
 The immutable dated architecture audit under `docs/audits/` is retained.
 

@@ -1,7 +1,9 @@
-# AetherGate v2 — Developer Instructions
+# AetherGate — Developer Instructions
 
-Container-first development on the nomnom test bed. The v2 stack lives in `deploy/v2/`
-(Compose project `aethergate-v2`), and a single helper wraps the workflow.
+Container-first development on the nomnom test bed. The current stack lives in `deploy/v2/`
+(Compose project `aethergate-v2`), and a single helper wraps the workflow. `deploy/v2/`,
+`scripts/dev/v2`, and `scripts/ops/v2` are the canonical paths; the `v2` component is
+historical naming, not a second supported runtime (v1 has been removed).
 
 Alpha 1 hardening adds: CI under `.github/workflows/`, a deterministic offline
 fake Ollama fixture (`aethergate.testing.fake_ollama`), configuration preflight
@@ -47,7 +49,9 @@ scripts/dev/v2 <command>
 
 - PostgreSQL is reachable **only on the Compose network**; it is never host-published.
 - The Compose project is `aethergate-v2`; container names are `aethergate-v2-api`,
-  `aethergate-v2-postgres`, and `aethergate-v2-worker-{1..N}` (distinct from the legacy v1 stack).
+  `aethergate-v2-postgres`, and `aethergate-v2-worker-{1..N}`. (The `v2` naming is historical;
+  it is the only supported stack — the old v1 `aethergate-api`/`aethergate-frontend` containers
+  and scripts have been removed.)
 - The scheduler worker runs as a separate `worker` service (`python -m aethergate.worker`); it can be
   scaled independently with `scripts/dev/v2 workers N`.
 

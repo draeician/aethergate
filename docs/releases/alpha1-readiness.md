@@ -53,10 +53,15 @@ AetherGate may be called Alpha 1 because all of the following hold:
 
 Responses rich semantics (tools/function/MCP/computer-use, multimodal, structured
 outputs, reasoning, `previous_response_id`/conversations, background, stored
-responses), embeddings, v1->v2 data migration, production secret-backend
+responses), embeddings, vision/multimodal input, production secret-backend
 selection, production-grade HA/failover, external Prometheus/OpenTelemetry/TSDB
 exporters, paging/alerting, billing/invoice/payment semantics, hosted SaaS
 tenancy, and broad visual redesign.
+
+The v1 -> v2 transition is **not** a deferred data migration: the operator
+decision (2026-10-11) is a clean/destructive cutover to a fresh PostgreSQL
+database with no v1 import (`docs/migrations/v1-to-v2.md`). The retired v1
+runtime has been removed from the repository.
 
 ## Exact test gates
 
@@ -75,7 +80,7 @@ CI (offline, deterministic; see `.github/workflows/`):
 
 Local/nomnom regression gates (with baselines):
 
-- backend full suite: baseline **561** (canonical `scripts/dev/v2 test`, exit 0);
+- backend full suite: baseline **613** (canonical `scripts/dev/v2 test`, exit 0);
 - frontend unit/component: baseline **87**;
 - full Playwright: baseline **32** (3 skipped: the CI-only `alpha-golden.spec.ts`);
 - `npm run build`, `npm run lint`, `npx tsc -b --noEmit`;
