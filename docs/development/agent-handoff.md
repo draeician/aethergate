@@ -93,11 +93,17 @@ torn down.
 
 ### Final remote CI (AGV2-027)
 All four required workflows `completed/success` on the final `origin/v2` SHA
-`f2c37446b25e4ac9b3545bb3ed3f2d8a32fa05e1`:
-- backend — run `38157863695`
-- frontend — run `38157863677`
-- schema-secret-gate — run `38157863609`
-- alpha-golden-path — run `38157863692`
+`26a1344ef394cf509688c62d80ae15ce072ebe63`:
+- backend — run `38158674053`
+- frontend — run `38158674062`
+- schema-secret-gate — run `38158674024`
+- alpha-golden-path — run `38158674106`
+
+The substantive cutover SHA `f2c37446b25e4ac9b3545bb3ed3f2d8a32fa05e1` was also
+`completed/success` on all four (backend `38157863695`, frontend `38157863677`,
+schema-secret-gate `38157863609`, alpha-golden-path `38157863692`); commits after it are
+documentation-only and re-run the same deterministic offline gates. This handoff-update commit is
+docs-only and is verified green on its own tip by the same four workflows.
 
 ### Main-branch readiness
 - All four workflows now push on `v2` **and** `main`; pull-request + `workflow_dispatch` kept,
