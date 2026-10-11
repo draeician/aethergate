@@ -39,9 +39,10 @@ provider adapters; `accounting` + `audit` -> accounting/audit; `interfaces` -> a
   platform/migrations and the integrator before adding a revision.
 - **Domain model entities referenced across domains** (request, attempt, reservation, ledger entry) —
   owned by contracts/data-model; coordinate before renaming or re-keying.
-- **Existing god-files** `app/routers/admin.py`, `app/models.py`, `app/routers/proxy.py` — must be
-  split before domains can own them independently (AG-034). Until then, changes to these files
-  require coordination.
+- **Shared domain modules** `src/aethergate/persistence/models.py`,
+  `src/aethergate/persistence/repository.py`, and the `src/aethergate/api/*` routers — the v2
+  equivalents of the retired v1 god-files; keep routers thin (no DB policy) and coordinate before
+  splitting or re-keying shared entities.
 - **`docs/architecture/` and `project_spec.md`** — living documents; update only within your
   domain's section, and flag cross-domain implications.
 
@@ -50,22 +51,23 @@ provider adapters; `accounting` + `audit` -> accounting/audit; `interfaces` -> a
 Enforced by architecture tests and CODEOWNERS: routers/CLI -> services -> repositories -> models,
 never upward, and never policy inside routers/CLI. (Direction)
 
-## Existing diagnostic/support utilities (do not delete; review recommendation)
+## Developer/support utilities
 
-These untracked developer scripts currently sit at the repo root. Recommendation recorded here;
-**no reorganization performed in this task.**
+The retired v1 root helper scripts (`aethergate_client.py`, `chat_completion.py`,
+`diagnose.py`, `inspect_routing.py`, `list_models.py`, `ollama_direct.py`,
+`prompt1.md`) were removed with the v1 cutover. The supported equivalents now
+live in the product itself:
 
-| File | Recommendation |
+| Need | Current supported path |
 |---|---|
-| `aethergate_client.py` | **Become a test/dev library.** Shared OpenAI SDK client helper; reuse as a fixture for SDK-interoperability tests. Eventually move under a `tools/` or `tests/` support module. |
-| `chat_completion.py` | **Become a test / dev tool.** Exercises `POST /v1/chat/completions`; candidate for SDK contract tests and a dev smoke command. Move under `tools/`. |
-| `diagnose.py` | **Remain a developer tool** (connectivity + key-validation smoke). Move under `tools/`; supersede the error-guessing heuristics with structured gateway error codes over time. |
-| `inspect_routing.py` | **Superseded** by the future admin API `effective-limits`/routing inspection, but keep as a temporary dev tool until the console exposes it. Move under `tools/`. |
-| `list_models.py` | **Become a test / dev tool** for `/v1/models`; candidate for contract fixtures. Move under `tools/`. |
-| `ollama_direct.py` | **Remain a developer tool** for pre-gateway backend verification (historical/reference). Move under `tools/`. |
-| `prompt1.md` | **Historical/reference material.** Phase-1 characterization prompt; archive, do not execute against v2. |
+| List/verify models + Chat/Responses smoke | Official SDKs via `sdk/js/smoke.mjs`, `scripts/ci/golden_path.py`, `frontend/e2e/sdk_inference.py` |
+| Connect an OpenAI SDK client | `docs/operations/alpha-runbook.md` (base URL + `agk_...` key) |
+| Routing/quota inspection | `/admin/v1` (`queue/summary`, `effective-limits`) and the web console |
+| Pre-gateway upstream check | Use the provider directly (e.g. Ollama `/api/chat`); the gateway revalidates egress |
 
-Related v1-era files that will be superseded (documented for completeness, not reorganized here):
-`manage.py` (direct-DB CLI -> superseded by the admin-API CLI), `scripts/migrate_endpoints.py`,
-`scripts/add_model_config_columns.py`, `scripts/add_rate_limit_column.py` (ad-hoc migrations ->
-versioned migrations), `debug_inference.py` (upstream connectivity example -> test fixture).
+Related v1-era files removed in the cutover (superseded by v2): `manage.py`
+(direct-DB CLI -> the admin-API `aethergate` CLI), `scripts/migrate_endpoints.py`,
+`scripts/add_model_config_columns.py`, `scripts/add_rate_limit_column.py`
+(ad-hoc SQLite migrations -> versioned Alembic migrations under
+`src/aethergate/migrations/`), and `debug_inference.py` (upstream connectivity
+example -> test fixtures / fake Ollama).
