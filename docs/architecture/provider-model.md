@@ -1,0 +1,101 @@
+# AetherGate v2 — Provider, Account, and Routing Model
+
+Living document. Derived from the audit. Distinguish **settled** / **direction** / **deferred**.
+
+## Core entities
+
+| Entity | Meaning | Notes |
+|---|---|---|
+| Organization / Project | Tenant boundary | First release: one company per deployment with project boundaries. (Settled) |
+| Principal | User or service account | OIDC-backed named identity for humans; scoped, expiring service accounts for automation. |
+| API credential | Scoped key/secret | Rotatable without resetting quota history; separate from provider credentials. |
+| Provider | A backend vendor (OpenAI, Anthropic, Ollama, LiteLLM-compatible, etc.) | Capability + limit profile. |
+| Provider account | A distinct billing/quota scope at a provider | **Not identified by base URL** — two accounts can share a URL. (Settled) |
+| Secret reference | Pointer to encrypted/envelope-encrypted credential | Decrypting key outside the database. |
+| Endpoint / deployment | A physical serving location for an account | Multiple endpoints/credentials can share one provider org/project quota. |
+| Public model alias | The name clients use (`gpt-4o`) | Must not mint independent provider capacity. |
+| Route binding | Maps alias + capabilities to an endpoint/deployment | Explicit; no implicit data destination. |
+| Shared quota group | Shared limit across aliases/endpoints | Belongs to exactly one provider account (`provider_account_id`); two endpoint records sharing one account quota must share the same bucket. (Settled) |
+
+## Invariants
+
+- Provider account identity is a first-class field, never inferred from URL alone. (Settled)
+- Public aliases do not create provider capacity; they resolve through route bindings. (Settled)
+- Unknown, deleted, or unbound aliases cannot invoke an upstream or receive accidental free routing. (Settled)
+- Deleting an endpoint must not silently unlink models into a fallback backend; it must reject while
+  referenced or explicitly disable dependent routes. (Settled)
+- Credentials are rotatable without resetting quota history or usage attribution. (Settled)
+- Model capability (text/embedding/image/audio) is explicit and gates which routes/adapter paths a
+  request may use. (Direction)
+
+## Capability matrix
+
+The gateway publishes an endpoint/model capability matrix rather than claiming the whole OpenAI
+platform. Core v2 target: model listing/retrieval, Chat Completions, Responses, embeddings.
+Image/audio are advertised only after their routes and adapters pass contract tests. (Direction)
+
+## Routing policy
+
+- Routing is a settled authorization decision made by AetherGate, not a client-supplied destination.
+- Ordinary inference callers never choose arbitrary server-side destinations, upstream URLs,
+  credentials, or trusted headers. (Settled)
+- Approved egress destinations are enforced; intended private LAN ranges are allowed explicitly,
+  while metadata endpoints, DNS rebinding, and redirect escapes are blocked. (Settled)
+
+## Resolution boundary (implemented)
+
+`aethergate.catalog` resolves an active public `ModelAlias` to its single active `RouteBinding`,
+`Endpoint`, `ProviderAccount`, and `Provider`. Unknown aliases raise a not-found error, inactive
+alias/route/endpoint/account/provider raise an explicit unavailable error, and multiple active
+routes with no selection policy raise an explicit ambiguity error — there is no silent default or
+"unknown model -> Ollama" fallback. This is the configuration boundary the next inference task
+consumes. (Direction)
+
+The `RouteBinding` carries the provider-facing `upstream_model`; resolution now requires a
+non-empty `upstream_model` on the selected route and returns it as `ResolvedRoute.upstream_model`.
+A route with no `upstream_model` is unresolved and raises `RouteUnresolved` (implemented in the
+first inference milestone).
+
+## Catalog/routing admin control plane (AGV2-016)
+
+The catalog/routing entities are now administered through `/admin/v1` (see `admin-api.md`), enforcing
+the invariants above at configuration time rather than only at dispatch:
+
+- One active `RouteBinding` per alias (partial unique index, migration `0014`); ambiguous active-route
+  states are prevented at write time, not merely rejected by the runtime resolver.
+- `route_binding.provider_account_id` must match the endpoint's account and any attached quota group's
+  account.
+- Endpoint destinations are egress-validated on create/update using the same `DestinationPolicy` as
+  dispatch, so an endpoint that dispatch would reject is never persisted.
+- `SecretRef` is metadata only; the production secret backend remains deferred.
+- Quota limit edits take effect on future admission without rewriting historical reservation/window
+  rows.
+
+## Direct dispatch (current milestone)
+
+The first inference path directly dispatches a single resolved route to the provider adapter
+(LiteLLM) and does **not** queue, reserve quota, apply fallback policy, or retry. The durable
+scheduler and queueing described in `scheduler.md` are out of scope for this milestone.
+
+
+## Provider feedback
+
+- Provider-specific token reservation and reset-window semantics are captured in the provider
+  capability/limit profile; do not assume every provider counts input/output or resets daily
+  identically. (Direction)
+- `Retry-After` and documented reset windows are honored; cooldown applies to the actual shared
+  quota scope. (Settled)
+- The adapter boundary now carries a narrow token-estimation contract
+  (`ChatAdapter.estimate_input_tokens`) that never contacts upstream; provider/model-specific
+  tokenizer behavior stays behind the adapter, and the scheduler consumes only a numeric
+  conservative reservation value. (Implemented)
+- The adapter error boundary preserves safe structured rate-limit feedback (`status_code`,
+  `retry_after_seconds`) with no raw credential/header or URL leakage; a provider `429` applies
+  cooldown to the route's shared quota group and never triggers an automatic retry. (Implemented)
+
+## Deferred
+
+- Exact schema for the provider capability/limit profile (fields, granularity).
+- The operating/commercial model (internal access, project budgets, showback/chargeback, prepaid
+  balances, reseller access, or combinations). This is deferred, not settled: do not assume prepaid
+  billing is superseded — see `project_spec.md` §Accounting, pricing, and commercial model.

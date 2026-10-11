@@ -1,73 +1,116 @@
-# React + TypeScript + Vite
+# AetherGate v2 — Web Console
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Same-origin React + TypeScript operator console for the v2 `/admin/v1` API. See
+`../docs/web-console.md` for the design, data sources, and deployment path.
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev            # Vite dev server (proxies /admin, /health, /v1 to the local API)
+npm run build          # tsc -b && vite build
+npm run lint           # eslint
+npm run preview        # serve the production build
 ```
+
+The Vite dev proxy target defaults to `http://localhost:8000`; override with
+`VITE_API_PROXY_TARGET` if the API binds another port. Runtime client code uses same-origin relative
+paths — it never hard-codes the API host port.
+
+## Generated API types
+
+The frontend does not hand-maintain endpoint/types as its source of truth:
+
+```bash
+npm run generate:openapi   # deterministic FastAPI OpenAPI export -> src/generated/openapi.json
+npm run generate:client    # openapi-typescript -> src/generated/schema.d.ts (committed)
+```
+
+`src/generated/schema.d.ts` is auto-generated; do not edit it. The application wrapper
+(`src/lib/client.ts`) owns credentials, CSRF, and error handling on top of the generated types.
+
+## Tests
+
+```bash
+npm run test          # vitest unit/component tests
+npm run test:watch    # vitest in watch mode
+npm run test:e2e      # Playwright browser tests (requires a live stack)
+```
+
+The Playwright specs in `e2e/` target `WEB_BASE_URL` (default `http://127.0.0.1:8080`) and use the
+deterministic local OIDC provider — no external IdP credentials required. The
+offline CI browser smoke is `e2e/alpha-golden.spec.ts` (deterministic IdP + fake
+Ollama upstream; no Internet/model download). See
+`docs/operations/alpha-runbook.md`.
+
+## Management UI (AGV2-021)
+
+The console now includes identity and catalog management over `/admin/v1`, organized into feature
+modules:
+
+- `src/features/identity/` — Projects (`/projects`, `/projects/:projectId`), Principals
+  (`/principals`, `/principals/:principalId`), Credentials (`/credentials`), Roles (`/roles`).
+- `src/features/catalog/` — Providers (`/catalog/providers`), Provider Accounts
+  (`/catalog/provider-accounts`), Endpoints (`/catalog/endpoints`), Quotas (`/catalog/quotas`),
+  Model Aliases (`/catalog/models`), Route Bindings (`/catalog/routes`).
+- `src/components/ui/` — shared `Modal`, `ConfirmDialog`, `ErrorBanner`, `EmptyState`, `StatusBadge`,
+  `RevealSecret`, `Form`, `Pagination`.
+- `src/lib/client.ts` — typed management client; `src/lib/roles.ts` — `isSystemAdmin` /
+  `isProjectAdmin` guards for role-aware navigation (backend remains authoritative).
+
+Security notes:
+
+- Credential raw keys are shown once in a `RevealSecret` modal (Copy, destroyed on close); never in
+  URL/history/web storage, and no "show existing key" control.
+- Provider accounts select existing `SecretRef` metadata only (no plaintext provider-secret input).
+- Endpoints distinguish catalog `is_active` from queue runtime `operational_state`.
+
+Live E2E: `e2e/management-rbac.spec.ts` (RBAC + one-time reveal canary + credential lifecycle) and
+`e2e/catalog-inference.spec.ts` (disposable alias → real SDK inference → deactivate fails safely →
+restore succeeds).
+
+## Accounting management (AGV2-022)
+
+The console now includes the accounting-management surface over `/admin/v1`:
+
+- `src/features/accounting/` — Pricing (`/accounting/pricing`), Price Snapshots
+  (`/accounting/snapshots`), Budgets (`/accounting/budgets`), Reservations
+  (`/accounting/reservations`), Usage (`/accounting/usage`), Ledger (`/accounting/ledger`), Audit
+  (`/audit`).
+- `src/lib/decimal.ts` — Decimal-safe validation/formatting that never uses `Number()`/`parseFloat()`;
+  monetary fields stay strings end-to-end.
+- `src/lib/client.ts` — typed accounting methods; `src/lib/roles.ts` — accounting role guards
+  (`system_admin` sees all; `project_admin` own-project; `project_viewer` read-only).
+
+Accounting invariants:
+
+- `PricePolicy` is mutable config; `PriceSnapshot`, `UsageRecord`, `LedgerEntry`, and
+  `BudgetReservation` are immutable/read-only history.
+- Budgets are optional policy controls (not prepaid balances); `currency`/`window_seconds` are
+  immutable after create, and the console uses the server-returned headroom.
+- A released pre-dispatch reservation renders `price_snapshot_id = null` safely.
+- Ledger amounts are signed (`usage_debit` negative); there are no manual adjustment writes.
+
+Live E2E: `e2e/accounting.spec.ts` (accounting RBAC + exact-Decimal price policy + immutable snapshot
+proof + budget block/unblock proof via the official OpenAI SDK).
+
+## Operational observability (AGV2-023)
+
+The dashboard (`src/pages/DashboardPage.tsx`) renders authoritative operational
+metrics from `/admin/v1/observability`:
+
+- Queue wait and streaming TTFT (dispatch-to-first-token) p50/p95/p99 with sample
+  counts, plus the request retry rate and retried/attempted counts.
+- `system_admin` passive per-endpoint upstream-health cards.
+- A 15m / 1h / 24h window selector; no-sample states render "No samples" (never a
+  fake `0ms`/`100%`). Project roles see only their own queue/TTFT/retry aggregate
+  and never request deployment upstream health.
+
+Typed methods live in `src/lib/client.ts` (`observabilitySummary`,
+`observabilityUpstreams`); millisecond/rate formatting in `src/lib/format.ts`.
+

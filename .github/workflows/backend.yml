@@ -1,0 +1,117 @@
+name: backend
+
+on:
+  pull_request:
+  push:
+    branches: [v2, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (python 3.12 + postgres 16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aethergate
+          POSTGRES_PASSWORD: aethergate_ci
+          POSTGRES_DB: aethergate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aethergate -d aethergate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AETHERGATE_ENV: test
+      AETHERGATE_TEST_DATABASE_URL: postgresql+asyncpg://aethergate:aethergate_ci@127.0.0.1:5432/aethergate_test
+      DATABASE_URL: postgresql+asyncpg://aethergate:aethergate_ci@127.0.0.1:5432/aethergate_test
+      AETHERGATE_QUEUE_KEY: "o0B7X9m2v3z6Q1s4R8t5U2w1Y4n7K0p9L2c5d8f1g4h="
+      AETHERGATE_UPSTREAM_ALLOWLIST: "localhost"
+      AETHERGATE_BOOTSTRAP_TOKEN: "ci-bootstrap-token-0123456789abcdefghij"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + dev dependencies (locked)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints.txt -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check src tests
+
+      - name: git diff --check
+        run: git diff --check
+
+      - name: Create explicit test database
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          from tests.db_helpers import ensure_database
+
+          url = os.environ["AETHERGATE_TEST_DATABASE_URL"]
+          asyncio.run(ensure_database(url))
+          print("ensured test database for AETHERGATE_TEST_DATABASE_URL")
+          PY
+
+      - name: Backend pytest (explicit test database)
+        run: pytest -q
+
+      - name: Migration empty -> head
+        env:
+          DATABASE_URL: postgresql+asyncpg://aethergate:aethergate_ci@127.0.0.1:5432/aethergate_mig_head
+        run: |
+          python - <<'PY'
+          import asyncio
+          from tests.db_helpers import ensure_database
+          asyncio.run(ensure_database(__import__("os").environ["DATABASE_URL"]))
+          PY
+          alembic -c src/aethergate/migrations/alembic.ini upgrade head
+          alembic -c src/aethergate/migrations/alembic.ini current
+
+      - name: Migration 0016 -> 0017 (populated path)
+        env:
+          DATABASE_URL: postgresql+asyncpg://aethergate:aethergate_ci@127.0.0.1:5432/aethergate_mig_1617
+        run: |
+          python - <<'PY'
+          import asyncio
+          from tests.db_helpers import ensure_database
+          asyncio.run(ensure_database(__import__("os").environ["DATABASE_URL"]))
+          PY
+          alembic -c src/aethergate/migrations/alembic.ini upgrade 0016
+          alembic -c src/aethergate/migrations/alembic.ini upgrade head
+          alembic -c src/aethergate/migrations/alembic.ini current
+
+      - name: Config preflight (valid dev config, exit 0)
+        env:
+          AETHERGATE_ENV: dev
+          DATABASE_URL: postgresql+asyncpg://aethergate:aethergate_ci@127.0.0.1:5432/aethergate
+        run: python -m aethergate.config_check
+
+      - name: OpenAPI generation (deterministic)
+        run: python scripts/gen_openapi.py /tmp/openapi.ci.json
+
+      - name: Upload OpenAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: /tmp/openapi.ci.json
+          retention-days: 7

@@ -1,0 +1,238 @@
+name: alpha-golden-path
+
+on:
+  pull_request:
+  push:
+    branches: [v2, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha-golden-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden:
+    name: offline alpha golden path (fake ollama + browser + SDK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      WEB_BASE_URL: http://127.0.0.1:8080
+      # OIDC_ISSUER is computed at runtime (see the secrets step): the issuer URL
+      # must be reachable by BOTH the runner/browser and the api container, so it
+      # is the runner's own non-loopback IP (a container's 127.0.0.1 is itself,
+      # not the host). This mirrors scripts/ci/nomnom_acceptance.sh.
+      #
+      # AETHERGATE_PYTHON points the Playwright SDK driver (frontend/e2e/
+      # sdk_inference.py) at the runner's interpreter; it otherwise defaults to a
+      # repo-local .venv that does not exist on CI.
+      AETHERGATE_PYTHON: python
+      COMPOSE_FILES: >-
+        -f deploy/v2/compose.yaml
+        -f deploy/v2/compose.web.yaml
+        -f deploy/v2/compose.ci.yaml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Generate deterministic secrets (CI-only, ephemeral)
+        # Standard library only: this step runs BEFORE any `pip install`, so it
+        # must not import project dependencies (e.g. cryptography). The queue key
+        # is a valid Fernet key generated with os.urandom + urlsafe base64.
+        # Secrets are written to deploy/v2/.env and never printed.
+        #
+        # The IdP issuer is the runner's own non-loopback IP: the issuer URL must
+        # be reachable by both the browser (on the runner) and the api container
+        # over the host network. The playwright spec reads OIDC_ISSUER from the
+        # job environment, so it is exported to $GITHUB_ENV.
+        run: |
+          HOST_IP="$(python3 - <<'PY'
+          import socket
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          try:
+              s.connect(("8.8.8.8", 80)); print(s.getsockname()[0])
+          except OSError:
+              print("127.0.0.1")
+          finally:
+              s.close()
+          PY
+          )"
+          echo "OIDC_ISSUER=http://${HOST_IP}:8090" >> "$GITHUB_ENV"
+          OIDC_ISSUER="http://${HOST_IP}:8090" python - <<'PY'
+          import base64
+          import os
+          import secrets
+
+          queue_key = base64.urlsafe_b64encode(os.urandom(32)).decode()
+          lines = [
+            f"POSTGRES_PASSWORD={secrets.token_urlsafe(24)}",
+            f"AETHERGATE_QUEUE_KEY={queue_key}",
+            f"AETHERGATE_BOOTSTRAP_TOKEN=agb_{secrets.token_urlsafe(32)}",
+            "AETHERGATE_OIDC_ENABLED=true",
+            f"AETHERGATE_OIDC_ISSUER={os.environ['OIDC_ISSUER']}",
+            "AETHERGATE_OIDC_CLIENT_ID=aethergate-dev-client",
+            f"AETHERGATE_OIDC_REDIRECT_URI={os.environ['WEB_BASE_URL']}/admin/v1/auth/oidc/callback",
+            "AETHERGATE_OIDC_SCOPES=openid",
+            "AETHERGATE_OIDC_SUBJECT=dev-user",
+            "AETHERGATE_OIDC_WEB_CALLBACK_PATH=/auth/callback",
+          ]
+          os.makedirs("deploy/v2", exist_ok=True)
+          with open("deploy/v2/.env", "w") as handle:
+              handle.write("\n".join(lines) + "\n")
+          os.chmod("deploy/v2/.env", 0o600)
+          PY
+
+      - name: Build image
+        run: docker build -t aethergate-v2:local -f deploy/v2/Dockerfile .
+
+      - name: Build web image
+        run: docker build -t aethergate-v2-web:local frontend/
+
+      - name: Start stack (postgres + api + worker + idp + fake-ollama + web)
+        run: docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) up -d --no-build
+
+      - name: IdP readiness + migrate empty database to head
+        # Migrate BEFORE waiting for readiness: /health/ready reports 503
+        # schema_not_current until the applied revision equals the code head, so
+        # an empty database is intentionally not "ready" yet.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "$OIDC_ISSUER/.well-known/openid-configuration" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) run --rm --no-deps api \
+            alembic -c src/aethergate/migrations/alembic.ini upgrade head
+
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$WEB_BASE_URL/health/ready" >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) logs --no-color api worker
+          exit 1
+
+      - name: Install SDK/test deps on the runner (locked)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints.txt -e ".[dev]"
+          (cd frontend && npm ci)
+
+      - name: Golden path main (setup + SDK)
+        env:
+          AETHERGATE_BOOTSTRAP_TOKEN_FILE: deploy/v2/.env
+        run: |
+          export AETHERGATE_BOOTSTRAP_TOKEN="$(grep '^AETHERGATE_BOOTSTRAP_TOKEN=' deploy/v2/.env | cut -d= -f2-)"
+          python scripts/ci/golden_path.py \
+            --phase main \
+            --base-url "$WEB_BASE_URL" \
+            --workdir /tmp/ag-golden \
+            --upstream-base http://fake-ollama:11434
+
+      - name: Export inference key for Playwright
+        run: |
+          echo "GOLDEN_INFERENCE_KEY=$(grep '^AETHERGATE_GOLDEN_INFERENCE_KEY=' /tmp/ag-golden/golden_secrets.env | cut -d= -f2-)" >> "$GITHUB_ENV"
+
+      - name: Backup
+        run: scripts/ops/v2 backup --output /tmp/ag-golden/backup.dump --force
+
+      - name: Destroy + recreate database, restore
+        run: |
+          # Use --keep-stopped so the operator tool does not restart api/worker
+          # with only compose.yaml (which would drop the CI/web overrides, e.g.
+          # the fake-ollama allowlist). We restart them below with the full file
+          # set so the post-restore stack is identical to the pre-backup one.
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) stop worker api
+          # Drop and recreate the database so restore is proven against an empty target.
+          docker exec aethergate-v2-postgres psql -U aethergate -d postgres \
+            -c "DROP DATABASE IF EXISTS aethergate WITH (FORCE);" \
+            -c "CREATE DATABASE aethergate OWNER aethergate;"
+          scripts/ops/v2 restore --input /tmp/ag-golden/backup.dump --force --keep-stopped
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) up -d
+          # nginx caches the upstream api address at start; restart it so it
+          # re-resolves the (possibly recreated) api container.
+          docker restart aethergate-v2-web >/dev/null 2>&1 || true
+
+      - name: Wait for readiness after restore
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$WEB_BASE_URL/health/ready" >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Golden path post-restore (state + SDK)
+        run: |
+          python scripts/ci/golden_path.py \
+            --phase post-restore \
+            --base-url "$WEB_BASE_URL" \
+            --workdir /tmp/ag-golden
+
+      - name: Official JS SDK smoke (Models + Chat + Responses, offline)
+        # Runs AFTER the post-restore count assertions (it performs live SDK
+        # inference, which appends usage records). Uses the locked official
+        # OpenAI Node SDK in sdk/js; the web UI never imports the SDK.
+        run: |
+          cd sdk/js
+          npm ci
+          AETHERGATE_SDK_BASE_URL="$WEB_BASE_URL/v1" \
+            AETHERGATE_SDK_API_KEY="$GOLDEN_INFERENCE_KEY" \
+            AETHERGATE_SDK_MODEL="golden-model" \
+            AETHERGATE_SDK_STREAMING=1 \
+            npm run smoke
+
+      - name: Install Chromium
+        run: (cd frontend && npx playwright install --with-deps chromium)
+
+      - name: Warm OIDC discovery (avoid first-login cold start)
+        # The api caches OIDC discovery/JWKS on first use; a cold cache plus a
+        # transient discovery fetch can 503 the first browser login. Warm it
+        # through the web origin before the browser smoke (documented lesson).
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -L "$WEB_BASE_URL/admin/v1/auth/oidc/login" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Browser golden smoke
+        # Runs AFTER the restore count assertions: the smoke performs live SDK
+        # inference, which appends usage records, so it must not run between the
+        # recorded pre-backup counts and the post-restore count check.
+        run: (cd frontend && npx playwright test e2e/alpha-golden.spec.ts)
+
+      - name: Dump logs on failure
+        # Guard: if setup failed before deploy/v2/.env was written, Compose cannot
+        # interpolate POSTGRES_PASSWORD. Skip instead of masking the real failure
+        # with an interpolation error.
+        if: failure()
+        run: |
+          if [[ ! -f deploy/v2/.env ]]; then
+            echo "deploy/v2/.env absent; nothing to log (setup failed before stack start)"
+            exit 0
+          fi
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) logs --no-color --tail=200 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          if [[ ! -f deploy/v2/.env ]]; then
+            echo "deploy/v2/.env absent; nothing to tear down"
+            exit 0
+          fi
+          docker compose --project-directory deploy/v2 $(echo $COMPOSE_FILES) down -v || true

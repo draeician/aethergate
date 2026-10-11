@@ -1,0 +1,16 @@
+{
+  "name": "aethergate-openai-js-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Narrow locked official OpenAI JavaScript SDK compatibility smoke for AetherGate core surfaces (Models, Chat, Responses). CI/offline only; never imported by the web UI.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "openai": "7.32.0"
+  }
+}

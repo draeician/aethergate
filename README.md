@@ -1,77 +1,84 @@
-# AetherGate v1.0
+# AetherGate
 
-A self-hosted, OpenAI-compatible AI Gateway designed to monetize local inference. AetherGate sits between your users and your local LLM server (e.g., Ollama), adding Authentication, Billing, Rate Limiting, and Logging.
+AetherGate is a self-hosted, OpenAI-compatible inference gateway with a durable
+scheduler, quota/budget accounting, enterprise identity, a versioned `/admin/v1`
+management API, a Linux CLI, and a web operator console.
 
-## Features
-* **OpenAI-Compatible Proxy:** Drop-in replacement for `openai.api_base`.
-* **User Management:** Create users, manage balances, and issue API keys.
-* **Real-Time Billing:** Deducts credit per-token (Input/Output) automatically.
-* **Rate Limiting:** Protects your backend with configurable limits (e.g., `60/m`).
-* **Admin Dashboard:** Visual "Mission Control" for monitoring revenue and logs.
-* **Dockerized:** Single command deployment.
+This repository has **one supported AetherGate implementation**: the current
+PostgreSQL/Alembic/scheduler runtime under `src/aethergate/`. The retired v1
+SQLModel/SQLite application has been removed from the tree; there is no v1 data
+import path. See `docs/migrations/v1-to-v2.md` for the clean-cutover decision.
 
-## Quick Start
+This repository is at **Alpha 1** (internal/self-hosted). See
+`docs/releases/alpha1-readiness.md` for scope and gates, and
+`docs/operations/alpha-runbook.md` for the operator runbook.
 
-### 1. Configuration
-Create a `.env` file in the root directory:
-```bash
-SECRET_KEY="your-secret-key"
-MASTER_API_KEY="sk-admin-master-key"
-DATABASE_URL="sqlite+aiosqlite:///./aethergate.db"
-OLLAMA_API_BASE="http://nomnom:11434" # Your backend URL
-```
+## Supported today (Alpha 1)
 
-### 2. Run with Docker (Recommended)
+- `GET /v1/models`, `GET /v1/models/{model}`
+- `POST /v1/chat/completions` (non-streaming and streaming)
+- `POST /v1/responses` (Responses text-generation subset: string/text input,
+  `instructions`, `max_output_tokens`, `temperature`, `top_p`, non-streaming and
+  streaming; durable queue + accounting). Unsupported Responses semantics
+  (tools/function/MCP/computer-use, multimodal, structured outputs, reasoning,
+  `previous_response_id`/conversations, background, stored responses) are
+  rejected with a structured `400 unsupported_feature`; see
+  `docs/contracts/responses.md`.
+- `/admin/v1` management API (identity/RBAC, catalog/routing, accounting, queue,
+  observability, OIDC/session, CLI/device flow)
+- Linux CLI (`aethergate`, thin client over `/admin/v1`)
+- Web console (operator + management + accounting + observability)
 
-```bash
-docker compose up -d
-```
+Deferred: embeddings (`POST /v1/embeddings`); vision/multimodal input is the
+planned next inference surface. Also not yet: production HA, external
+metrics/alerting.
 
-* **API:** `http://localhost:8000`
-* **Dashboard:** `http://localhost:8501`
+## Quick start (development)
 
-### 3. Run Manually (Development)
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Initialize DB
-python manage.py init
-
-# Start API
-uvicorn app.main:app --reload
-
-# Start Dashboard
-streamlit run dashboard.py
-```
-
-## Administration (CLI)
-
-Manage the system using the `manage.py` utility inside the container or venv.
+Prerequisites: Docker + Docker Compose, Python 3.12, Node 22 (for the web image).
 
 ```bash
-# Create a User with $10.00 credit
-python manage.py add-user <Username> --balance 10.00
+# 1. Configuration preflight (never prints secrets)
+python -m aethergate.config_check
 
-# Generate an API Key
-python manage.py gen-key <Username> --name "default"
+# 2. Build + start the core stack (postgres + api + worker) and migrate
+scripts/dev/v2 build
+scripts/dev/v2 up
+scripts/dev/v2 migrate
+scripts/dev/v2 wait
 
-# Set Price for a Model (e.g., $1.00 per 1M input tokens)
-python manage.py add-model "qwen2.5:3b" "ollama/qwen2.5:3b" --price-in 0.000001 --price-out 0.000002
-
-# Check User Balance
-python manage.py check-balance <Username>
+# 3. (Optional) web console + deterministic dev OIDC IdP
+scripts/dev/v2 web up
 ```
 
-## Administration (HTTP API)
+The API binds an ephemeral loopback host port; `scripts/dev/v2 url` prints it.
+`scripts/dev/v2 test` runs the canonical containerized backend suite.
 
-You can also manage the system remotely using the Admin Endpoints.
-**Header Required:** `x-admin-key: <MASTER_API_KEY>`
+For a real operator install (secrets, bootstrap, OIDC, TLS expectations,
+backup/restore, upgrade), follow `docs/operations/alpha-runbook.md`.
 
-* `GET /admin/users` - List all users.
-* `POST /admin/users` - Create a new user.
-* `POST /admin/keys` - Generate a new key for a user.
-* `POST /admin/models` - Update model pricing.
+## Repository layout
 
-See `API_REFERENCE.md` for full details.
+- `src/aethergate/` — the current application (API, worker, scheduler,
+  accounting, identity, catalog, observability, contracts, admin/CLI surfaces).
+- `frontend/` — web console (React + TypeScript).
+- `deploy/v2/` — the canonical Compose stack and container image definition
+  (`deploy/v2/Dockerfile`, `deploy/v2/compose*.yaml`). There is no root
+  Dockerfile or root Compose file.
+- `scripts/dev/v2` — canonical development helper.
+- `scripts/ops/v2` — canonical operator recovery tooling (backup/restore/
+  diagnostics).
+- `scripts/ci/` — offline CI/golden-path tooling (incl. the legacy-v1 guard).
+- `docs/` — architecture, operations, releases, and development documentation.
+
+The `v2` path component in `deploy/v2/`, `scripts/dev/v2`, and `scripts/ops/v2`
+is historical naming; these are the canonical current paths (do not rename them
+or add duplicate root Docker/Compose definitions).
+
+## Documentation
+
+- Operator runbook: `docs/operations/alpha-runbook.md`
+- Alpha status: `docs/releases/alpha1-readiness.md`
+- Architecture: `docs/architecture/`
+- Development: `docs/development/README.md`
+- Web console: `docs/web-console.md`
