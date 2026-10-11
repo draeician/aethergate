@@ -28,7 +28,7 @@ not a hosted multi-company SaaS tenancy model. (Settled)
 4. Enterprise identity: OIDC-backed named identities, role/resource authorization, scoped
    expiring credentials, secure browser sessions.
 5. One versioned management API (`/admin/v1`) shared by the web console and the Linux CLI.
-6. A migration path from the v1 database that preserves account identity and usage attribution.
+6. A clean, tested cutover path from the unused v1 deployment to v2. The current deployment has no production v1 data worth preserving, so v1 SQLite data import is explicitly not required; v2 starts from a fresh PostgreSQL authority.
 7. Observability that lets operators explain *why* a request is waiting and what limit is blocking.
 
 ## Non-goals (for the first enterprise release)
@@ -184,16 +184,25 @@ ability to implement prepaid billing later. (Deferred)
 
 ## Database / migration direction
 
-- PostgreSQL authoritative; SQLite/SQLModel is the v1 legacy state to be migrated from. (Direction)
-- Versioned, tested migrations; explicit and reversible where practical. (Settled)
-- v1 -> v2 migration runs against a copy of the real old schema, preserves account identity and
-  historical attribution, and never infers account identity from URL alone. (Settled)
+- PostgreSQL is authoritative. SQLite/SQLModel is retired v1 legacy state and is not part of the
+  supported runtime after cutover. (Settled)
+- Versioned PostgreSQL migrations are tested, explicit, and reversible where practical. (Settled)
+- **Current cutover decision:** v1 was never used for production and contains no important state.
+  The supported v1 -> v2 transition is therefore a destructive/clean cutover to a fresh v2
+  PostgreSQL database; no v1 SQLite account, key, balance, request-log, provider, or usage data is
+  imported. (Settled by operator decision, 2026-10-11)
+- The dated v1 architecture audit remains historical evidence, but the v1 application/runtime,
+  SQLite migration scripts, and stale v1 operator instructions are removed from the active product
+  tree so they cannot be mistaken for supported paths. (Settled)
+- If a future deployment unexpectedly requires real legacy-data preservation, that is a new,
+  separately designed migration project; do not infer provider-account identity from URL alone or
+  revive the discarded ad-hoc v1 migration scripts. (Settled)
 
 ## Testing expectations
 
 - No automated test suite exists today (see audit AG-030); it must be built. (Direction)
-- Required suites: unit, provider-contract, API, migration, browser, concurrency, fault-injection,
-  and official-SDK interoperability, wired into CI. (Direction)
+- Required suites: unit, provider-contract, API, PostgreSQL schema migration/upgrade, browser,
+  concurrency, fault-injection, and official-SDK interoperability, wired into CI. (Direction)
 - Key scenarios: six-request/two-slot dispatch; cross-worker limits; quota-authority failure/failover;
   ambiguous outcomes without duplicate execution or premature slot release; SDK tool loops, structured
   outputs, SSE usage; migration/restore; canary-secret leakage. (Settled)
