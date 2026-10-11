@@ -1,10 +1,131 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-024V (close Alpha 1 remote CI gates and dependency reproducibility)** is
-  complete: local regressions green, dependency/OpenAPI generation reproducible, and all four remote
-  GitHub Actions workflows green on the final `origin/v2` SHA. `.aethergate-wip` is removed only
-  after the final remote verification.
+- Branch: `v2`. **AGV2-025 (Alpha 2 — OpenAI Responses API text subset, durable queue, official
+  SDK)** implemented: `POST /v1/responses` for the text-generation subset, reusing the existing
+  durable scheduler/accounting/worker authority, with explicit rejection of every unsupported
+  Responses semantic family and official Python + JavaScript SDK proofs.
+- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
+
+## AGV2-025 — OpenAI Responses API (text generation, durable queue, official SDK)
+
+### Pinned contract / SDK baseline
+- Request/response/event shapes derived from the locked official **`openai==2.54.0`** Python SDK
+  (`openai.types.responses.*`, `openai.resources.responses`) and the pinned upstream OpenAPI
+  baseline (`docs/contracts/openai-compatibility-baseline.md`), never from memory.
+- JS smoke uses the locked official **`openai` Node SDK `7.32.0`** (`sdk/js/package-lock.json`).
+
+### Supported request fields / input forms
+- `model` (always the public `ModelAlias.name`), `input` (string OR array of text message items
+  with `input_text`/`output_text` content parts), `instructions`, `max_output_tokens`,
+  `temperature`, `top_p`, `stream`.
+- `instructions` -> leading highest-precedence canonical `system` message (never dropped);
+  `developer` -> canonical `system` (`tests/test_responses_contracts.py`, live proof).
+- Unknown purely-additive fields are ignored (documented tolerance policy).
+
+### Explicitly unsupported semantics (HTTP 400 `unsupported_feature`)
+`tools`/`tool_choice`/`max_tool_calls`/`parallel_tool_calls`, image/audio/file input, output audio,
+structured-output `text.format`, `reasoning`, `previous_response_id`, `conversation`, `background`,
+`store=true`, `include`, `top_logprobs`, non-`disabled` `truncation`, `metadata`, `moderation`,
+`service_tier`, `prompt`/`prompt_cache_*`, `safety_identifier`, `user`, `context_management`,
+`stream_options`, and all provider/endpoint/base-url/header/secret transport overrides. Known
+semantic fields are never silently dropped; no client may choose provider/account/endpoint/upstream
+model/URL/transport secrets.
+
+### Responses -> scheduler mapping
+`ResponsesRequest -> canonical Message[] + GenerationParams -> SchedulingService.admit_and_enqueue
+-> existing worker (claim_and_reserve/run_complete/run_stream) -> existing provider adapter ->
+existing quotas/budgets/PriceSnapshot/UsageRecord/usage_debit ledger -> Responses-specific
+response/SSE translation (API side only)`. No second scheduler, worker, accounting path, or hidden
+fallback.
+
+### Streaming event sequence
+`response.created` -> `response.in_progress` -> `response.output_item.added` ->
+`response.content_part.added` -> `response.output_text.delta`* -> `response.output_text.done` ->
+`response.content_part.done` -> `response.output_item.done` -> `response.completed` (final
+response + usage). Monotonic `sequence_number`; stable response/output/content IDs and indices; no
+proprietary queue events; **no `[DONE]`**. Failed/cancelled/expired/outcome_unknown ends with
+`response.failed` and never fakes success.
+
+### Cancellation / auth
+Same durable cancellation as Chat (queued/reserved never dispatches; dispatched/streaming flagged
+for the owning worker). Same auth as Chat: inference-audience `agk_...`, `inference:invoke`,
+project/principal attribution, dispatch-time credential revalidation, `bypass=false` in all proofs.
+
+### Quota/budget/accounting proof
+Responses participates in endpoint slots, request/token quotas, cooldown, project budget,
+PriceSnapshot, UsageRecord, signed `usage_debit`, exactly-once settlement. Live run: 10 Responses
+requests (6 non-stream, 4 stream) -> exactly 10 UsageRecords and 10 usage_debit ledger entries.
+`max_output_tokens` feeds the same canonical output reservation bound as Chat.
+
+### Official SDK results
+- Python `openai==2.54.0`: Responses non-stream parses a typed `Response` (`output_text`,
+  `usage`, `status=completed`); Responses stream parses typed events and reconstructs exact text;
+  `response.completed` observed; unsupported tools raise an SDK-visible `BadRequestError` (400);
+  `bypass=false` throughout.
+- JS `openai@7.32.0` (`sdk/js/smoke.mjs`): Models + Chat non-stream/stream + Responses
+  non-stream/stream + Responses tools 400. The web UI never imports the OpenAI SDK.
+
+### Fake-Ollama CI proof
+`scripts/ci/golden_path.py` phase main/post-restore now also run Responses non-stream + stream via
+the official Python SDK. `alpha-golden-path.yml` adds a locked official JS SDK smoke step. All
+offline (fake Ollama, no Internet/model download/provider credentials).
+
+### Live Ollama proof (real internal Ollama, bypass=false)
+- Chat non-stream + stream green; Responses non-stream (≈9 KB output) + stream (≈8.9 KB)
+  green against `tev1:0.8b`.
+- `instructions` request returns non-empty output (not dropped).
+- Six concurrent Responses streams under `max_concurrency=1` visibly queue
+  (queue-wait p95 ≈ 67 s) and observability reports queue-wait + TTFT samples.
+- Deactivate route -> safe failure (no fallback); restore -> succeeds.
+- Revoke credential -> never reaches upstream; unsupported tool -> 400 with no
+  `inference_requests` row created.
+
+### OpenAPI drift / migration
+- OpenAPI + frontend generated types regenerated; two consecutive generations produce zero
+  additional diff (md5 stable).
+- **No migration**; head remains `0017`; `0001`–`0017` untouched.
+
+### Regression counts (AGV2-025)
+- backend: **613 collected** (baseline 561 + 13 `test_responses_contracts.py` + 17
+  `test_responses_api.py` + …); canonical `scripts/dev/v2 test` exit 0.
+- frontend unit/component: **87 passed**.
+- full Playwright: **32 passed, 3 skipped** (CI-only alpha-golden).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff check src tests` clean;
+  `git diff --check` clean; `scripts/ci/secret_scan.sh` clean.
+- migration empty -> `0017`; populated `0016` -> `0017`; `config_check` valid (exit 0) and invalid
+  (nonzero).
+
+### Final remote CI
+Final substantive `origin/v2` SHA `8cad5b4e4f6ecd219e72a8910ae842e8841736f0`; all four required
+workflows `completed/success` on that exact SHA:
+- backend — run `38104205191`
+- frontend — run `38104205185`
+- schema-secret-gate — run `38104205190`
+- alpha-golden-path — run `38104205192`
+
+The commit series: `4039e7d` (feat api), `aa7d7ec` (test ci), `8cad5b4` (docs).
+
+### Known limitations
+- Only the Responses text-generation subset is implemented; rich semantics are explicitly
+  rejected, not emulated (see `docs/contracts/responses.md`).
+- `developer` maps to canonical `system` (the Ollama adapter path cannot distinguish them); the
+  highest-precedence instruction slot is preserved rather than dropped.
+- No Responses persistence/retrieval, background jobs, or `previous_response_id` (deferred).
+- `POST /v1/embeddings` is still unimplemented (next step).
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-025`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria green and remote verified; never staged/committed/pushed.
+
+### Recommended next step
+Implement the **embeddings** surface (`POST /v1/embeddings`) through the same durable
+scheduler/accounting authority, following the AGV2-025 Responses pattern.
+
+## Prior — AGV2-024V (close Alpha 1 remote CI gates and dependency reproducibility)
+- Branch: `v2`. **AGV2-024V** is complete: local regressions green, dependency/OpenAPI generation
+  reproducible, and all four remote GitHub Actions workflows green on the final `origin/v2` SHA.
+  `.aethergate-wip` is removed only after the final remote verification.
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
 
 ## AGV2-024V — Close Alpha 1 remote CI gates and dependency reproducibility
