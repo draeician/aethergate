@@ -284,14 +284,22 @@ export async function goToLastPage(page: Page): Promise<void> {
 }
 
 export interface SdkResult {
-  status: "ok" | "ok_stream" | "fail" | "missing_env" | "error";
+  status: "ok" | "ok_stream" | "ok_400" | "fail" | "missing_env" | "error";
   exitCode: number;
   httpStatus: number | null;
   errorCode: string | null;
   raw: string;
 }
 
-function sdkEnv(opts: { key: string; model: string; stream?: boolean; baseUrl?: string; timeout?: number }) {
+function sdkEnv(opts: {
+  key: string;
+  model: string;
+  stream?: boolean;
+  baseUrl?: string;
+  timeout?: number;
+  vision?: boolean;
+  expect400?: boolean;
+}) {
   const baseUrl = opts.baseUrl ?? `${WEB_BASE_URL.replace(/\/$/, "")}/v1`;
   return {
     ...process.env,
@@ -299,6 +307,8 @@ function sdkEnv(opts: { key: string; model: string; stream?: boolean; baseUrl?: 
     AETHERGATE_API_KEY: opts.key,
     AETHERGATE_MODEL: opts.model,
     AETHERGATE_STREAM: opts.stream ? "1" : "0",
+    ...(opts.vision ? { AETHERGATE_VISION: "1" } : {}),
+    ...(opts.expect400 ? { AETHERGATE_EXPECT_400: "1" } : {}),
     ...(opts.timeout !== undefined ? { AETHERGATE_TIMEOUT: String(opts.timeout) } : {}),
   };
 }
@@ -306,6 +316,7 @@ function sdkEnv(opts: { key: string; model: string; stream?: boolean; baseUrl?: 
 function parseSdkOutput(stdout: string, code: number | null): SdkResult {
   const line = stdout.trim().split("\n").pop() ?? "";
   if (line.startsWith("OK_STREAM")) return { status: "ok_stream", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
+  if (line.startsWith("OK_400")) return { status: "ok_400", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
   if (line.startsWith("OK")) return { status: "ok", exitCode: 0, httpStatus: null, errorCode: null, raw: stdout };
   if (line.startsWith("MISSING_ENV")) return { status: "missing_env", exitCode: 2, httpStatus: null, errorCode: null, raw: stdout };
   if (line.startsWith("FAIL")) {
@@ -330,6 +341,8 @@ export async function runOfficialSdk(opts: {
   stream?: boolean;
   baseUrl?: string;
   timeout?: number;
+  vision?: boolean;
+  expect400?: boolean;
 }): Promise<SdkResult> {
   const env = sdkEnv(opts);
   const stdout = await new Promise<string>((resolve) => {

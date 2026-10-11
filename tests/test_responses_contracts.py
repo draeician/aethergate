@@ -123,7 +123,7 @@ def test_unsupported_semantic_fields_rejected(field, value):
         ResponsesRequest.model_validate({"model": "gpt-4", "input": "hi", field: value})
 
 
-def test_image_input_rejected():
+def test_remote_image_input_rejected():
     req = ResponsesRequest.model_validate(
         {
             "model": "gpt-4",
@@ -135,8 +135,26 @@ def test_image_input_rejected():
             ],
         }
     )
-    with pytest.raises(UnsupportedFeature):
+    with pytest.raises(UnsupportedFeature) as info:
         req.to_canonical_messages()
+    assert info.value.feature == "image_remote_url"
+
+
+def test_image_file_id_input_rejected():
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-4",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "file_id": "file-1"}],
+                }
+            ],
+        }
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert info.value.feature == "image_file_id"
 
 
 def test_unsupported_input_item_type_rejected():

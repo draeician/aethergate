@@ -48,14 +48,31 @@ def test_unsupported_role_rejected():
         )
 
 
-def test_multimodal_content_rejected():
-    with pytest.raises(ValidationError):
-        ChatCompletionRequest.model_validate(
-            {
-                "model": "gpt-4",
-                "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
-            }
-        )
+def test_text_content_part_maps_to_canonical_message():
+    from aethergate.adapters.base import TextContentPart
+
+    req = ChatCompletionRequest.model_validate(
+        {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
+        }
+    )
+    messages = req.to_canonical_messages()
+    assert messages[0].content == "x"
+    assert isinstance(messages[0].parts[0], TextContentPart)
+
+
+def test_unsupported_content_part_type_rejected():
+    from aethergate.errors import UnsupportedFeature
+
+    req = ChatCompletionRequest.model_validate(
+        {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": [{"type": "input_audio"}]}],
+        }
+    )
+    with pytest.raises(UnsupportedFeature):
+        req.to_canonical_messages()
 
 
 def test_multiple_completions_rejected():

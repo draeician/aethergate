@@ -61,4 +61,46 @@ test.describe("alpha golden path (offline CI)", () => {
     // The fake upstream is reachable only through the gateway web origin.
     expect(WEB_BASE_URL).toBeTruthy();
   });
+
+  test("official SDK vision non-stream + stream on the image-capable alias", async ({ page }) => {
+    await loginAs(page, SYSTEM_ADMIN_SUBJECT);
+    const key = process.env.GOLDEN_INFERENCE_KEY;
+    expect(key, "GOLDEN_INFERENCE_KEY must be set by the CI workflow").toBeTruthy();
+
+    const nonStream = await runOfficialSdk({
+      key: key!,
+      model: "golden-vision-model",
+      vision: true,
+    });
+    expect(nonStream.status).toBe("ok");
+    const stream = await runOfficialSdk({
+      key: key!,
+      model: "golden-vision-model",
+      vision: true,
+      stream: true,
+    });
+    expect(stream.status).toBe("ok_stream");
+  });
+
+  test("remote image URL and text-only alias image are rejected with 400", async ({ page }) => {
+    await loginAs(page, SYSTEM_ADMIN_SUBJECT);
+    const key = process.env.GOLDEN_INFERENCE_KEY;
+    expect(key, "GOLDEN_INFERENCE_KEY must be set by the CI workflow").toBeTruthy();
+
+    const remote = await runOfficialSdk({
+      key: key!,
+      model: "golden-vision-model",
+      vision: true,
+      expect400: true,
+    });
+    expect(remote.status).toBe("ok_400");
+
+    const textOnly = await runOfficialSdk({
+      key: key!,
+      model: "golden-model",
+      vision: true,
+      expect400: true,
+    });
+    expect(textOnly.status).toBe("ok_400");
+  });
 });
