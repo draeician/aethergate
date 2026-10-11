@@ -4096,6 +4096,450 @@
         "title": "ResourceScopeType",
         "type": "string"
       },
+      "ResponseErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "default": "server_error",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ResponseErrorDetail",
+        "type": "object"
+      },
+      "ResponseIncompleteDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "max_output_tokens",
+                  "content_filter"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "ResponseIncompleteDetails",
+        "type": "object"
+      },
+      "ResponseInputTokensDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_write_tokens": {
+            "default": 0,
+            "title": "Cache Write Tokens",
+            "type": "integer"
+          },
+          "cached_tokens": {
+            "default": 0,
+            "title": "Cached Tokens",
+            "type": "integer"
+          }
+        },
+        "title": "ResponseInputTokensDetails",
+        "type": "object"
+      },
+      "ResponseObject": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "incomplete_details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseIncompleteDetails"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "object": {
+            "const": "response",
+            "default": "response",
+            "title": "Object",
+            "type": "string"
+          },
+          "output": {
+            "items": {
+              "$ref": "#/components/schemas/ResponseOutputMessageItem"
+            },
+            "title": "Output",
+            "type": "array"
+          },
+          "parallel_tool_calls": {
+            "default": true,
+            "title": "Parallel Tool Calls",
+            "type": "boolean"
+          },
+          "status": {
+            "default": "completed",
+            "enum": [
+              "completed",
+              "failed",
+              "in_progress",
+              "cancelled",
+              "queued",
+              "incomplete"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_choice": {
+            "default": "auto",
+            "title": "Tool Choice",
+            "type": "string"
+          },
+          "tools": {
+            "items": {},
+            "title": "Tools",
+            "type": "array"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "model"
+        ],
+        "title": "ResponseObject",
+        "type": "object"
+      },
+      "ResponseOutputMessageItem": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/ResponseOutputText"
+            },
+            "title": "Content",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "const": "assistant",
+            "default": "assistant",
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "default": "completed",
+            "enum": [
+              "in_progress",
+              "completed",
+              "incomplete"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "const": "message",
+            "default": "message",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ResponseOutputMessageItem",
+        "type": "object"
+      },
+      "ResponseOutputText": {
+        "additionalProperties": false,
+        "properties": {
+          "annotations": {
+            "items": {},
+            "title": "Annotations",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "const": "output_text",
+            "default": "output_text",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "ResponseOutputText",
+        "type": "object"
+      },
+      "ResponseOutputTokensDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "reasoning_tokens": {
+            "default": 0,
+            "title": "Reasoning Tokens",
+            "type": "integer"
+          }
+        },
+        "title": "ResponseOutputTokensDetails",
+        "type": "object"
+      },
+      "ResponseUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "default": 0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "input_tokens_details": {
+            "$ref": "#/components/schemas/ResponseInputTokensDetails"
+          },
+          "output_tokens": {
+            "default": 0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "output_tokens_details": {
+            "$ref": "#/components/schemas/ResponseOutputTokensDetails"
+          },
+          "total_tokens": {
+            "default": 0,
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "title": "ResponseUsage",
+        "type": "object"
+      },
+      "ResponsesRequest": {
+        "description": "Pinned Responses API request surface (text-generation subset).",
+        "properties": {
+          "api_base": {
+            "title": "Api Base"
+          },
+          "api_key": {
+            "title": "Api Key"
+          },
+          "api_token": {
+            "title": "Api Token"
+          },
+          "background": {
+            "title": "Background"
+          },
+          "base_url": {
+            "title": "Base Url"
+          },
+          "context_management": {
+            "title": "Context Management"
+          },
+          "conversation": {
+            "title": "Conversation"
+          },
+          "custom_api_base": {
+            "title": "Custom Api Base"
+          },
+          "deployment": {
+            "title": "Deployment"
+          },
+          "endpoint": {
+            "title": "Endpoint"
+          },
+          "extra_headers": {
+            "title": "Extra Headers"
+          },
+          "headers": {
+            "title": "Headers"
+          },
+          "include": {
+            "title": "Include"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "max_tool_calls": {
+            "title": "Max Tool Calls"
+          },
+          "metadata": {
+            "title": "Metadata"
+          },
+          "model": {
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "moderation": {
+            "title": "Moderation"
+          },
+          "organization": {
+            "title": "Organization"
+          },
+          "parallel_tool_calls": {
+            "title": "Parallel Tool Calls"
+          },
+          "previous_response_id": {
+            "title": "Previous Response Id"
+          },
+          "project": {
+            "title": "Project"
+          },
+          "prompt": {
+            "title": "Prompt"
+          },
+          "prompt_cache_key": {
+            "title": "Prompt Cache Key"
+          },
+          "prompt_cache_options": {
+            "title": "Prompt Cache Options"
+          },
+          "prompt_cache_retention": {
+            "title": "Prompt Cache Retention"
+          },
+          "provider": {
+            "title": "Provider"
+          },
+          "reasoning": {
+            "title": "Reasoning"
+          },
+          "safety_identifier": {
+            "title": "Safety Identifier"
+          },
+          "service_tier": {
+            "title": "Service Tier"
+          },
+          "store": {
+            "title": "Store"
+          },
+          "stream": {
+            "default": false,
+            "title": "Stream",
+            "type": "boolean"
+          },
+          "stream_options": {
+            "title": "Stream Options"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "text": {
+            "title": "Text"
+          },
+          "tool_choice": {
+            "title": "Tool Choice"
+          },
+          "tools": {
+            "title": "Tools"
+          },
+          "top_logprobs": {
+            "title": "Top Logprobs"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P"
+          },
+          "truncation": {
+            "title": "Truncation"
+          },
+          "upstream_model": {
+            "title": "Upstream Model"
+          },
+          "user": {
+            "title": "User"
+          }
+        },
+        "required": [
+          "model",
+          "input"
+        ],
+        "title": "ResponsesRequest",
+        "type": "object"
+      },
       "RetryMetricsRead": {
         "additionalProperties": false,
         "description": "Retry metrics for the observation cohort.\n\nA retry is an additional ``ExecutionAttempt`` for the same gateway request.\n``request_retry_rate`` is NULL when there are no attempted requests.",
@@ -10017,6 +10461,47 @@
         "summary": "Get Model",
         "tags": [
           "models"
+        ]
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "operationId": "create_response_v1_responses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResponsesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponseObject"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Response",
+        "tags": [
+          "responses"
         ]
       }
     }

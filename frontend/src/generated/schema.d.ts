@@ -1252,6 +1252,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/responses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Response */
+        post: operations["create_response_v1_responses_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2682,6 +2699,235 @@ export interface components {
          * @enum {string}
          */
         ResourceScopeType: "deployment" | "project";
+        /** ResponseErrorDetail */
+        ResponseErrorDetail: {
+            /**
+             * Code
+             * @default server_error
+             */
+            code: string;
+            /** Message */
+            message: string;
+        };
+        /** ResponseIncompleteDetails */
+        ResponseIncompleteDetails: {
+            /** Reason */
+            reason?: ("max_output_tokens" | "content_filter") | null;
+        };
+        /** ResponseInputTokensDetails */
+        ResponseInputTokensDetails: {
+            /**
+             * Cache Write Tokens
+             * @default 0
+             */
+            cache_write_tokens: number;
+            /**
+             * Cached Tokens
+             * @default 0
+             */
+            cached_tokens: number;
+        };
+        /** ResponseObject */
+        ResponseObject: {
+            /** Created At */
+            created_at?: number;
+            error?: components["schemas"]["ResponseErrorDetail"] | null;
+            /** Id */
+            id: string;
+            incomplete_details?: components["schemas"]["ResponseIncompleteDetails"] | null;
+            /** Model */
+            model: string;
+            /**
+             * Object
+             * @default response
+             * @constant
+             */
+            object: "response";
+            /** Output */
+            output?: components["schemas"]["ResponseOutputMessageItem"][];
+            /**
+             * Parallel Tool Calls
+             * @default true
+             */
+            parallel_tool_calls: boolean;
+            /**
+             * Status
+             * @default completed
+             * @enum {string}
+             */
+            status: "completed" | "failed" | "in_progress" | "cancelled" | "queued" | "incomplete";
+            /**
+             * Tool Choice
+             * @default auto
+             */
+            tool_choice: string;
+            /** Tools */
+            tools?: unknown[];
+            usage?: components["schemas"]["ResponseUsage"] | null;
+        };
+        /** ResponseOutputMessageItem */
+        ResponseOutputMessageItem: {
+            /** Content */
+            content?: components["schemas"]["ResponseOutputText"][];
+            /** Id */
+            id: string;
+            /**
+             * Role
+             * @default assistant
+             * @constant
+             */
+            role: "assistant";
+            /**
+             * Status
+             * @default completed
+             * @enum {string}
+             */
+            status: "in_progress" | "completed" | "incomplete";
+            /**
+             * Type
+             * @default message
+             * @constant
+             */
+            type: "message";
+        };
+        /** ResponseOutputText */
+        ResponseOutputText: {
+            /** Annotations */
+            annotations?: unknown[];
+            /** Text */
+            text: string;
+            /**
+             * Type
+             * @default output_text
+             * @constant
+             */
+            type: "output_text";
+        };
+        /** ResponseOutputTokensDetails */
+        ResponseOutputTokensDetails: {
+            /**
+             * Reasoning Tokens
+             * @default 0
+             */
+            reasoning_tokens: number;
+        };
+        /** ResponseUsage */
+        ResponseUsage: {
+            /**
+             * Input Tokens
+             * @default 0
+             */
+            input_tokens: number;
+            input_tokens_details?: components["schemas"]["ResponseInputTokensDetails"];
+            /**
+             * Output Tokens
+             * @default 0
+             */
+            output_tokens: number;
+            output_tokens_details?: components["schemas"]["ResponseOutputTokensDetails"];
+            /**
+             * Total Tokens
+             * @default 0
+             */
+            total_tokens: number;
+        };
+        /**
+         * ResponsesRequest
+         * @description Pinned Responses API request surface (text-generation subset).
+         */
+        ResponsesRequest: {
+            /** Api Base */
+            api_base?: unknown;
+            /** Api Key */
+            api_key?: unknown;
+            /** Api Token */
+            api_token?: unknown;
+            /** Background */
+            background?: unknown;
+            /** Base Url */
+            base_url?: unknown;
+            /** Context Management */
+            context_management?: unknown;
+            /** Conversation */
+            conversation?: unknown;
+            /** Custom Api Base */
+            custom_api_base?: unknown;
+            /** Deployment */
+            deployment?: unknown;
+            /** Endpoint */
+            endpoint?: unknown;
+            /** Extra Headers */
+            extra_headers?: unknown;
+            /** Headers */
+            headers?: unknown;
+            /** Include */
+            include?: unknown;
+            /** Input */
+            input: unknown;
+            /** Instructions */
+            instructions?: string | null;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /** Max Tool Calls */
+            max_tool_calls?: unknown;
+            /** Metadata */
+            metadata?: unknown;
+            /** Model */
+            model: string;
+            /** Moderation */
+            moderation?: unknown;
+            /** Organization */
+            organization?: unknown;
+            /** Parallel Tool Calls */
+            parallel_tool_calls?: unknown;
+            /** Previous Response Id */
+            previous_response_id?: unknown;
+            /** Project */
+            project?: unknown;
+            /** Prompt */
+            prompt?: unknown;
+            /** Prompt Cache Key */
+            prompt_cache_key?: unknown;
+            /** Prompt Cache Options */
+            prompt_cache_options?: unknown;
+            /** Prompt Cache Retention */
+            prompt_cache_retention?: unknown;
+            /** Provider */
+            provider?: unknown;
+            /** Reasoning */
+            reasoning?: unknown;
+            /** Safety Identifier */
+            safety_identifier?: unknown;
+            /** Service Tier */
+            service_tier?: unknown;
+            /** Store */
+            store?: unknown;
+            /**
+             * Stream
+             * @default false
+             */
+            stream: boolean;
+            /** Stream Options */
+            stream_options?: unknown;
+            /** Temperature */
+            temperature?: number | null;
+            /** Text */
+            text?: unknown;
+            /** Tool Choice */
+            tool_choice?: unknown;
+            /** Tools */
+            tools?: unknown;
+            /** Top Logprobs */
+            top_logprobs?: unknown;
+            /** Top P */
+            top_p?: number | null;
+            /** Truncation */
+            truncation?: unknown;
+            /** Upstream Model */
+            upstream_model?: unknown;
+            /** User */
+            user?: unknown;
+        };
         /**
          * RetryMetricsRead
          * @description Retry metrics for the observation cohort.
@@ -5951,6 +6197,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelObject"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_response_v1_responses_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResponsesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResponseObject"];
                 };
             };
             /** @description Validation Error */

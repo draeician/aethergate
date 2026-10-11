@@ -22,6 +22,7 @@ from aethergate.errors import (
     ResourceInactive,
     RouteUnresolved,
     SecretResolutionError,
+    UnsupportedFeature,
     UnsupportedProvider,
 )
 
@@ -32,6 +33,7 @@ def _error(
     type_: str,
     *,
     code: str | None = None,
+    param: str | None = None,
     request_id: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
@@ -39,6 +41,7 @@ def _error(
         error={
             "message": message,
             "type": type_,
+            "param": param,
             "code": code,
             "request_id": request_id,
         }
@@ -47,6 +50,15 @@ def _error(
 
 
 def to_openai_error(exc: DomainError, request_id: str | None) -> JSONResponse:
+    if isinstance(exc, UnsupportedFeature):
+        return _error(
+            400,
+            f"The requested feature is not supported by this gateway: {exc.feature}.",
+            "invalid_request_error",
+            code="unsupported_feature",
+            param=exc.param,
+            request_id=request_id,
+        )
     if isinstance(exc, ModelAliasNotFound):
         return _error(
             404,

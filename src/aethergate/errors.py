@@ -224,6 +224,21 @@ class CredentialLifecycleError(DomainError):
     """
 
 
+class UnsupportedFeature(DomainError):
+    """A request asked for a known semantic feature the gateway does not implement.
+
+    Unsupported *semantics* must be rejected explicitly, never silently dropped.
+    ``param`` is the request field/feature name; ``feature`` is a stable
+    machine-readable family keyword (e.g. ``tools``). Neither ever contains
+    request content.
+    """
+
+    def __init__(self, feature: str, *, param: str | None = None) -> None:
+        super().__init__(f"unsupported feature {feature!r}")
+        self.feature = feature
+        self.param = param
+
+
 class QueueKeyError(DomainError):
     """The scheduler queue encryption key is absent or invalid."""
 
