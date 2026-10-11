@@ -108,23 +108,21 @@ tokens. Request-priced accounting, UsageRecord, signed `usage_debit`, leases/fen
   `git diff --check` clean; secret/content/image-data scans clean; no-legacy guard + self-test clean.
 
 ### Final remote CI (AGV2-028)
-All four required workflows are `completed/success` on `origin/v2` (push events):
-- final v2 SHA `6087dc880663e61bc50fccc1a372cef2d3739e12` (docs-only handoff commit):
-  `backend 38176472629`, `frontend 38176472536`, `schema-secret-gate 38176472548`,
-  `alpha-golden-path 38176472553`.
-- substantive feature SHA `7bd9fe5ba25611da0e5e5bf0f5fbaa83f36dcf7f`:
-  `backend 38175168398`, `frontend 38175168385`, `schema-secret-gate 38175168307`,
-  `alpha-golden-path 38175168359` (all green).
-- prior docs SHA `8d67f95af8a935b745905f76e5ffedbc0d65b652`:
-  push `backend 38175608201`, `frontend 38175608114`, `schema-secret-gate 38175608306`,
-  `alpha-golden-path 38175608163`; PR-event `backend 38175613843`, `frontend 38175613806`,
-  `schema-secret-gate 38175613790`, `alpha-golden-path 38175613763` (this PR-event run
-  initially hit the documented transient OIDC/JWKS browser cold-start flake at `loginAs`
-  in a non-vision test; `gh run rerun --failed` then passed — the push-event run on the
-  identical SHA was green throughout).
+The substantive feature SHA is `7bd9fe5ba25611da0e5e5bf0f5fbaa83f36dcf7f`; all four
+required workflows are `completed/success` there (push events):
+- backend — run `38175168398`
+- frontend — run `38175168385`
+- schema-secret-gate — run `38175168307`
+- alpha-golden-path — run `38175168359`
 
-Every commit after the substantive feature SHA is documentation-only and is verified green
-with the same four deterministic, offline workflows.
+Every commit after the substantive feature SHA is documentation-only and was verified green
+with the same four deterministic, offline workflows on the then-current `origin/v2` tip
+(e.g. docs SHA `408c9a937268e95e652eca68d2acf952f4eb8640`: `backend 38176875175`,
+`frontend 38176875089`, `schema-secret-gate 38176875240`, `alpha-golden-path 38176875139`).
+The `origin/v2` tip at handoff is green for all four. One PR-event `alpha-golden-path` run
+(`38175613763`, docs SHA `8d67f95`) initially hit the documented transient OIDC/JWKS browser
+cold-start flake at `loginAs` in a non-vision test; `gh run rerun --failed` then passed, and
+the push-event run on the identical SHA was green throughout.
 
 ### Known limitations
 - Inline-only; no remote fetch, files/`file_id`, object storage, image generation, audio, video,
