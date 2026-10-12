@@ -8,6 +8,7 @@ admission controls are never bypassed for throughput.
 from __future__ import annotations
 
 import base64
+import math
 from collections.abc import AsyncIterator
 
 import litellm
@@ -16,6 +17,8 @@ from litellm.utils import huggingface_tokenizer_kind
 from aethergate.adapters.base import (
     ChatRequest,
     CompletionResult,
+    EmbeddingRequest,
+    EmbeddingResult,
     ImageContentPart,
     Message,
     StreamChunk,
@@ -48,7 +51,9 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
 
 
 class LiteLLMChatAdapter:
-    """Dispatch chat completions through LiteLLM."""
+    """Dispatch chat completions and embeddings through LiteLLM."""
+
+    supports_embedding = True
 
     def _litellm_model(self, request: ChatRequest) -> str:
         prefix = _PROVIDER_PREFIX.get(request.provider_kind)
@@ -233,3 +238,105 @@ class LiteLLMChatAdapter:
                 status_code=getattr(exc, "status_code", None),
                 retry_after_seconds=_retry_after_seconds(exc),
             ) from exc
+
+    def _embedding_model(self, request: EmbeddingRequest) -> str:
+        prefix = _PROVIDER_PREFIX.get(request.provider_kind)
+        if prefix is None:
+            raise UnsupportedProvider(request.provider_kind)
+        return f"{prefix}/{request.upstream_model}"
+
+    @staticmethod
+    def _embedding_data_item(item: object) -> tuple[int, object]:
+        """Return ``(index, embedding)`` from a LiteLLM embedding data entry.
+
+        The pinned LiteLLM ollama transport yields a list of dicts, but other
+        transports may yield ``Embedding``-like objects; both support dict-style
+        ``.get``/``__getitem__``, so read them defensively without assuming one.
+
+        The provider ``index`` must be a genuine integer. Booleans, floats,
+        numeric strings, ``None``, and missing keys are all malformed: coercing
+        them would let a provider silently mis-map inputs to vectors.
+        """
+        get = getattr(item, "get", None)
+        if callable(get):
+            index = get("index")
+            embedding = get("embedding")
+        else:
+            index = item.index  # type: ignore[attr-defined]
+            embedding = item.embedding  # type: ignore[attr-defined]
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ProviderError("provider returned a malformed embedding index")
+        return index, embedding
+
+    @staticmethod
+    def _validate_vector(vector: object) -> tuple[float, ...]:
+        """Validate a single provider vector: numeric, non-empty, all finite."""
+        if not isinstance(vector, (list, tuple)):
+            raise ProviderError("provider returned a malformed embedding vector")
+        if not vector:
+            raise ProviderError("provider returned an empty embedding vector")
+        values: list[float] = []
+        for element in vector:
+            if isinstance(element, bool) or not isinstance(element, (int, float)):
+                raise ProviderError("provider returned a non-numeric embedding value")
+            value = float(element)
+            if not math.isfinite(value):
+                raise ProviderError("provider returned a non-finite embedding value")
+            values.append(value)
+        return tuple(values)
+
+    async def embed(
+        self, request: EmbeddingRequest, secret: str | None
+    ) -> EmbeddingResult:
+        model = self._embedding_model(request)
+        kwargs: dict[str, object] = {
+            "api_base": request.base_destination,
+            "num_retries": 0,
+            "max_retries": 0,
+            "drop_params": False,
+            "timeout": request.timeout_seconds,
+        }
+        if secret is not None:
+            kwargs["api_key"] = secret
+        try:
+            response = await litellm.aembedding(
+                model=model,
+                input=list(request.inputs),
+                **kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 - boundary sanitizes upstream failures
+            raise ProviderError(
+                _safe_error_message(exc),
+                status_code=getattr(exc, "status_code", None),
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc
+
+        raw_data = getattr(response, "data", None) or []
+        try:
+            entries = [self._embedding_data_item(item) for item in raw_data]
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError("provider returned a malformed embedding response") from exc
+
+        input_count = len(request.inputs)
+        if len(entries) != input_count:
+            raise ProviderError("provider returned an unexpected number of embeddings")
+        # Provider entries may legitimately arrive out of order, but their indexes
+        # must map exactly onto the request inputs. Negative/out-of-range indexes,
+        # duplicates, and gaps are rejected rather than silently renumbered, which
+        # would corrupt the input -> vector correspondence.
+        for index, _ in entries:
+            if index < 0 or index >= input_count:
+                raise ProviderError("provider returned an out-of-range embedding index")
+        entries.sort(key=lambda pair: pair[0])
+        if [index for index, _ in entries] != list(range(input_count)):
+            raise ProviderError(
+                "provider returned duplicate or gapped embedding indexes"
+            )
+        vectors = tuple(self._validate_vector(vec) for _, vec in entries)
+        return EmbeddingResult(
+            vectors=vectors,
+            usage=self._usage(getattr(response, "usage", None)),
+            upstream_request_id=getattr(response, "id", None) or None,
+        )

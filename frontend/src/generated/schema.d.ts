@@ -1218,6 +1218,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/embeddings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Embeddings */
+        post: operations["embeddings_v1_embeddings_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/models": {
         parameters: {
             query?: never;
@@ -1616,6 +1633,20 @@ export interface components {
             /** Subject */
             subject?: string | null;
         };
+        /** CreateEmbeddingResponse */
+        CreateEmbeddingResponse: {
+            /** Data */
+            data: components["schemas"]["EmbeddingData"][];
+            /** Model */
+            model: string;
+            /**
+             * Object
+             * @default list
+             * @constant
+             */
+            object: "list";
+            usage: components["schemas"]["EmbeddingUsage"];
+        };
         /**
          * CredentialAudience
          * @description Which surface a scoped API credential may authenticate against.
@@ -1685,6 +1716,71 @@ export interface components {
         DevicePollRequest: {
             /** Device Code */
             device_code: string;
+        };
+        /**
+         * EmbeddingCreateRequest
+         * @description Pinned Embeddings request surface (string input, float/base64 encoding).
+         */
+        EmbeddingCreateRequest: {
+            /** Api Base */
+            api_base?: unknown;
+            /** Api Key */
+            api_key?: unknown;
+            /** Api Token */
+            api_token?: unknown;
+            /** Base Url */
+            base_url?: unknown;
+            /** Custom Api Base */
+            custom_api_base?: unknown;
+            /** Deployment */
+            deployment?: unknown;
+            /** Dimensions */
+            dimensions?: unknown;
+            /** Encoding Format */
+            encoding_format?: ("float" | "base64") | null;
+            /** Endpoint */
+            endpoint?: unknown;
+            /** Extra Headers */
+            extra_headers?: unknown;
+            /** Headers */
+            headers?: unknown;
+            /** Input */
+            input: unknown;
+            /** Model */
+            model: string;
+            /** Organization */
+            organization?: unknown;
+            /** Project */
+            project?: unknown;
+            /** Provider */
+            provider?: unknown;
+            /** Upstream Model */
+            upstream_model?: unknown;
+            /** User */
+            user?: unknown;
+        };
+        /**
+         * EmbeddingData
+         * @description A single embedding entry (numeric floats or a base64 Float32 string).
+         */
+        EmbeddingData: {
+            /** Embedding */
+            embedding: number[] | string;
+            /** Index */
+            index: number;
+            /**
+             * Object
+             * @default embedding
+             * @constant
+             */
+            object: "embedding";
+        };
+        /** EmbeddingUsage */
+        EmbeddingUsage: {
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Total Tokens */
+            total_tokens: number;
         };
         /** EndpointCreate */
         EndpointCreate: {
@@ -6153,6 +6249,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChatCompletion"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    embeddings_v1_embeddings_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmbeddingCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateEmbeddingResponse"];
                 };
             };
             /** @description Validation Error */

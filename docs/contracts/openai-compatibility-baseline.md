@@ -41,7 +41,19 @@ supported compatibility surface.
   unsupported Responses semantics are rejected with a structured HTTP 400 `unsupported_feature`
   (never silently dropped). See `docs/contracts/responses.md` for the exact supported/deferred
   field matrix and `docs/contracts/vision.md` for the vision contract.
-- `POST /v1/embeddings` — **not yet implemented** (still part of the v2 target).
+- `POST /v1/embeddings` — implemented for the **non-streaming string/list-of-strings subset**
+  (AGV2-029): `model`, `input` (one non-empty string or an ordered list of non-empty strings),
+  and `encoding_format` (`float`/`base64`). The input list is bounded at the pinned upstream
+  `CreateEmbeddingRequest.input` `maxItems: 2048` (before durable enqueue), independent of the
+  queue payload byte bound. It uses the same durable scheduler/accounting/worker
+  authority as Chat Completions/Responses (admission, endpoint concurrency, quota/budget
+  reservation, cancellation, exactly-once settlement) and never a second path. Inputs and vectors
+  remain encrypted at rest. Embedding capability is enforced on the alias/provider/adapter at
+  admission and again at dispatch. Token-ID input, `dimensions`, and `user` are rejected with a
+  structured HTTP 400 `unsupported_feature`; `encoding_format: null` is rejected `400
+  invalid_request`. Optional fields are optional but **not nullable** — an omitted key uses the
+  server default, an explicit `null` is rejected, never silently treated as omission. See
+  `docs/contracts/embeddings.md` for the exact supported/deferred field matrix.
 
 ### Multimodal (image input) status
 

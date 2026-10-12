@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aethergate.adapters.base import (
     ChatRequest,
     CompletionResult,
+    EmbeddingRequest,
     GenerationParams,
     Message,
     StreamChunk,
@@ -42,6 +43,16 @@ class PreparedDispatch:
 
     adapter: ChatAdapter
     request: ChatRequest
+    secret: str | None
+    public_alias: str
+
+
+@dataclass(frozen=True)
+class PreparedEmbeddingDispatch:
+    """A fully resolved, guarded embedding dispatch ready for one upstream attempt."""
+
+    adapter: ChatAdapter
+    request: EmbeddingRequest
     secret: str | None
     public_alias: str
 
@@ -86,6 +97,34 @@ class InferenceService:
             params=params or GenerationParams(),
             timeout_seconds=self._timeout,
         )
+
+    def _build_embedding_request(
+        self, resolved: ResolvedRoute, inputs: tuple[str, ...]
+    ) -> EmbeddingRequest:
+        return EmbeddingRequest(
+            provider_kind=resolved.provider.kind,
+            base_destination=resolved.endpoint.base_destination,
+            upstream_model=resolved.upstream_model,
+            inputs=inputs,
+            timeout_seconds=self._timeout,
+        )
+
+    def supports_embedding(self, resolved: ResolvedRoute) -> bool:
+        """Whether the resolved route's adapter advertises embedding support."""
+        adapter = self._adapter_factory(resolved.provider.kind)
+        return bool(getattr(adapter, "supports_embedding", False))
+
+    def estimate_embedding_tokens(
+        self, resolved: ResolvedRoute, inputs: tuple[str, ...]
+    ) -> int | None:
+        """Conservative embedding-input token estimate, or ``None`` if unavailable.
+
+        There is no defensible provider/model-specific embedding tokenizer for the
+        pinned Ollama transport, so this returns ``None`` and enforced token quotas
+        and token-priced budgets fail closed rather than substituting a character/
+        byte/dimension heuristic as a fabricated token count.
+        """
+        return None
 
     def estimate_tokens(
         self,
@@ -136,6 +175,24 @@ class InferenceService:
         adapter = self._adapter_factory(resolved.provider.kind)
         request = self._build_request(resolved, messages, params)
         return PreparedDispatch(
+            adapter=adapter,
+            request=request,
+            secret=secret,
+            public_alias=resolved.alias.name,
+        )
+
+    async def prepare_embedding_from_resolved(
+        self,
+        session: AsyncSession,
+        resolved: ResolvedRoute,
+        inputs: tuple[str, ...],
+    ) -> PreparedEmbeddingDispatch:
+        """Build an embedding dispatch from an already-resolved, guarded route."""
+        self._policy.validate(resolved.endpoint.base_destination)
+        secret = await self._secret(session, resolved)
+        adapter = self._adapter_factory(resolved.provider.kind)
+        request = self._build_embedding_request(resolved, inputs)
+        return PreparedEmbeddingDispatch(
             adapter=adapter,
             request=request,
             secret=secret,

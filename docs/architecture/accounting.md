@@ -68,6 +68,13 @@ price is not equivalent to zero: an explicit `Decimal("0")` is a valid zero pric
 price for a required field is rejected at the domain, DTO, service, and database CHECK layers. No
 image/audio pricing behavior beyond contract extensibility in this task. (Settled)
 
+Embeddings reuse the same `PricePolicy`/`PriceSnapshot`/budget/ledger authority. Request-priced
+embedding settlement records `request_units=1`, `input_units=0`, `output_units=0`; token-priced
+embedding settlement uses `output_units=0` and input-only reservation, failing closed when no
+trustworthy input-token estimator exists. One successful embedding request produces exactly one
+`UsageRecord` and one signed negative `usage_debit` ledger entry, unchanged from chat. See
+`docs/contracts/embeddings.md`. (Settled)
+
 At most one enabled `PricePolicy` exists per `RouteBinding`. Disabled historical/edit records may
 coexist; the database enforces the invariant with a partial unique index
 (`uq_price_policies_one_enabled_per_route` on `route_binding_id WHERE enabled`), and the

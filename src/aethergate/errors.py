@@ -239,6 +239,23 @@ class UnsupportedFeature(DomainError):
         self.param = param
 
 
+class InvalidRequest(DomainError):
+    """A request contained a known field whose value violates the pinned contract.
+
+    Distinct from :class:`UnsupportedFeature`: the field itself is supported, but
+    the supplied value is structurally invalid (for example an explicit JSON
+    ``null`` for an optional-but-non-nullable field, or an input collection that
+    exceeds the documented request-shape bound). ``reason`` is a stable, safe
+    description and ``param`` names the offending field; neither ever contains
+    request content.
+    """
+
+    def __init__(self, reason: str, *, param: str | None = None) -> None:
+        super().__init__(f"invalid request: {reason}")
+        self.reason = reason
+        self.param = param
+
+
 class ImageLimitExceeded(DomainError):
     """A client inline image input violates a configured image resource limit.
 

@@ -25,6 +25,7 @@ from aethergate.api import admin as admin_api
 from aethergate.api.deps import get_gateway_request_id
 from aethergate.api.health import router as health_router
 from aethergate.api.openai_chat import router as chat_router
+from aethergate.api.openai_embeddings import router as embeddings_router
 from aethergate.api.openai_errors import _error, domain_error_handler
 from aethergate.api.openai_models import router as models_router
 from aethergate.api.openai_responses import router as responses_router
@@ -122,6 +123,7 @@ async def _structured_access_log(request: Request, call_next):
 app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(chat_router)
+app.include_router(embeddings_router)
 app.include_router(responses_router)
 app.include_router(admin_api.router)
 app.include_router(catalog_admin.router)

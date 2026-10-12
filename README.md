@@ -27,6 +27,10 @@ This repository is at **Alpha 1** (internal/self-hosted). See
   remote/file image sources, non-default image `detail` modes) are rejected with a
   structured `400 unsupported_feature`; see `docs/contracts/responses.md` and
   `docs/contracts/vision.md`.
+- `POST /v1/embeddings` (non-streaming; string or list-of-strings input,
+  `float`/`base64` encoding) through the same durable scheduler/accounting
+  authority. Token-ID input, `dimensions`, and `user` are rejected with a
+  structured `400 unsupported_feature`; see `docs/contracts/embeddings.md`.
 - `/admin/v1` management API (identity/RBAC, catalog/routing, accounting, queue,
   observability, OIDC/session, CLI/device flow)
 - Linux CLI (`aethergate`, thin client over `/admin/v1`)
@@ -34,9 +38,11 @@ This repository is at **Alpha 1** (internal/self-hosted). See
 
 Vision input is inline-only (`data:` URLs, PNG/JPEG/WebP); AetherGate never
 fetches a client-supplied image URL, never accepts `file_id`/file storage, and
-never logs image bytes. See `docs/contracts/vision.md`.
+never logs image bytes. See `docs/contracts/vision.md`. Embedding inputs and
+vectors remain encrypted at rest and never appear in logs; see
+`docs/contracts/embeddings.md`.
 
-Deferred: embeddings (`POST /v1/embeddings`); image *generation*; audio;
+Deferred: image *generation*; audio;
 files API; video; tools/MCP/computer-use; object/blob storage. Also not yet:
 production HA, external metrics/alerting.
 

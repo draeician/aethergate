@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
-from aethergate.inference.service import InferenceService, PreparedDispatch
+from aethergate.inference.service import (
+    InferenceService,
+    PreparedDispatch,
+    PreparedEmbeddingDispatch,
+)
 
-__all__ = ["InferenceService", "PreparedDispatch"]
+__all__ = ["InferenceService", "PreparedDispatch", "PreparedEmbeddingDispatch"]

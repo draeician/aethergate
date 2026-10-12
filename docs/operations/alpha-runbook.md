@@ -18,6 +18,9 @@ Supported:
 - `POST /v1/responses` (Responses **text-generation subset**: string/text input,
   `instructions`, `max_output_tokens`, `temperature`, `top_p`, non-streaming and
   streaming; unsupported semantics return `400 unsupported_feature`);
+- `POST /v1/embeddings` (non-streaming; string/list-of-strings input,
+  `float`/`base64` encoding; token-ID input, `dimensions`, and `user` return
+  `400 unsupported_feature`);
 - the `/admin/v1` management API (identity, catalog, accounting, queue,
   observability, OIDC/session, CLI/device-flow);
 - the Linux CLI over `/admin/v1`;
@@ -25,7 +28,6 @@ Supported:
 
 Explicitly **not** in Alpha 1 (deferred):
 
-- embeddings (`POST /v1/embeddings`);
 - vision/multimodal input;
 - production-grade HA/failover;
 - external Prometheus/OpenTelemetry/TSDB exporters, paging, alerting;

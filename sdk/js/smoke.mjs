@@ -20,6 +20,7 @@ const baseURL = process.env.AETHERGATE_SDK_BASE_URL;
 const apiKey = process.env.AETHERGATE_SDK_API_KEY;
 const model = process.env.AETHERGATE_SDK_MODEL || "golden-model";
 const visionModel = process.env.AETHERGATE_SDK_VISION_MODEL || "golden-vision-model";
+const embedModel = process.env.AETHERGATE_SDK_EMBED_MODEL || "golden-embed-model";
 const withStreaming = process.env.AETHERGATE_SDK_STREAMING === "1";
 
 // Tiny deterministic 16x16 solid-red PNG (same fixture as the Python golden
@@ -188,6 +189,84 @@ for (const detail of ["low", "high"]) {
   }
 }
 result.chat_vision_detail_400 = "ok";
+
+// Embeddings: default (base64 transport, SDK decodes to a numeric vector).
+const embed = await client.embeddings.create({ model: embedModel, input: "js sdk embed" });
+if (!Array.isArray(embed.data) || embed.data.length !== 1) {
+  fail("embeddings returned unexpected data length");
+}
+const embedVector = embed.data[0].embedding;
+if (
+  !Array.isArray(embedVector) ||
+  embedVector.length !== 3 ||
+  embedVector.some((x) => typeof x !== "number")
+) {
+  fail("embeddings default did not decode to a numeric 3-element vector");
+}
+if (!embed.usage || embed.usage.total_tokens <= 0) {
+  fail("embeddings did not report usage");
+}
+result.embeddings_default = "ok";
+
+// Embeddings: multi-input explicit float.
+const embedMulti = await client.embeddings.create({
+  model: embedModel,
+  input: ["a", "b"],
+  encoding_format: "float",
+});
+if (!Array.isArray(embedMulti.data) || embedMulti.data.length !== 2) {
+  fail("embeddings multi-input returned unexpected data length");
+}
+for (const item of embedMulti.data) {
+  if (!Array.isArray(item.embedding) || item.embedding.length !== 3) {
+    fail("embeddings multi-input float had malformed vector");
+  }
+}
+result.embeddings_multi_float = "ok";
+
+// Embeddings: explicit base64 returns the raw base64 string (never auto-decoded).
+const embedB64 = await client.embeddings.create({
+  model: embedModel,
+  input: "js sdk embed b64",
+  encoding_format: "base64",
+});
+const b64 = embedB64.data[0].embedding;
+if (typeof b64 !== "string") {
+  fail("embeddings explicit base64 did not return a string");
+}
+const b64Bytes = Buffer.from(b64, "base64");
+if (b64Bytes.length !== 12) {
+  fail("embeddings explicit base64 decoded to an unexpected byte length");
+}
+result.embeddings_base64 = "ok";
+
+// Embeddings: unsupported semantics (dimensions, user, token-id input) -> 400.
+for (const [label, body] of [
+  ["dimensions", { input: "x", dimensions: 3 }],
+  ["user", { input: "x", user: "someone" }],
+  ["token_ids", { input: [1, 2, 3] }],
+]) {
+  try {
+    await client.embeddings.create({ model: embedModel, ...body });
+    fail(`embeddings ${label} request unexpectedly succeeded`);
+  } catch (err) {
+    if (err?.status !== 400) {
+      fail(`embeddings ${label} returned unexpected status ${err?.status}`);
+    }
+  }
+}
+result.embeddings_unsupported_400 = "ok";
+
+// Embeddings on a text-only alias -> explicit SDK-visible 400.
+try {
+  await client.embeddings.create({ model, input: "x" });
+  fail("embeddings on text-only alias unexpectedly succeeded");
+} catch (err) {
+  if (err?.status !== 400) {
+    fail(`embeddings on text-only alias returned unexpected status ${err?.status}`);
+  }
+}
+result.embeddings_text_only_400 = "ok";
 
 if (withStreaming) {
   // Chat stream
