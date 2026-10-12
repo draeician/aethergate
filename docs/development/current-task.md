@@ -1,239 +1,179 @@
 # AetherGate — Current Task
 
 ## Task ID
-AGV2-028V
+AGV2-028V2
 
 ## Title
-Vision verification closure — strict WebP signature + explicit image detail semantics
+Vision contract closure — distinguish omitted vs explicit-null Chat image detail
 
-## Why This Verification Task Exists
+## Why This Exists
 
-AGV2-028 is substantially complete and all four remote workflows are green on:
+AGV2-028V correctly fixed:
+- strict WebP RIFF + WEBP signature validation;
+- explicit handling of image detail modes.
 
-`8dafbfd3c1e96cf616bbb7cd88487eee36335d03`
+Independent review of the pinned SDK types found one remaining narrow mismatch:
 
-Independent review found two narrow contract/validation gaps that the current tests do not catch.
+### Chat `image_url.detail`
 
-Do **not** merge PR #2 until this verification task is complete.
+Pinned `openai==2.54.0` Python:
+`detail: Literal["auto", "low", "high"]`
+inside a total=False TypedDict — optional, but not nullable.
 
-### Gap 1 — WebP validation is too permissive
+Pinned `openai@7.32.0` JS:
+`detail?: 'auto' | 'low' | 'high' | 'original'`
+— optional, but not nullable.
 
-Current `src/aethergate/inference/images.py` represents WebP signatures as:
+Current AetherGate code does:
 
 ```python
-"image/webp": ((b"RIFF",), (b"WEBP",)),
+detail = image_url.get("detail")
+validate_image_detail(detail, ...)
 ```
 
-and `_decoded_signature_matches()` accepts any one group whose members all match at offset 0.
+and `validate_image_detail(None)` accepts `None`.
 
-Therefore any payload starting with `RIFF` can currently be accepted as `image/webp`, even when
-bytes 8–11 are not `WEBP` (for example RIFF/WAVE or RIFF/AVI content).
+That makes an explicitly supplied JSON `"detail": null` indistinguishable from omission and therefore accepted on Chat, even though the pinned Chat contracts permit omission but not null.
 
-That contradicts the documented strict MIME/signature validation.
+This task closes only that mismatch.
 
-### Gap 2 — OpenAI image `detail` is silently ignored
-
-The pinned OpenAI multimodal contracts include an image-detail selector.
-
-Current Chat and Responses parsing accepts raw image-part dictionaries and ignores the detail field.
-For example the current Responses vision test sends `"detail": "auto"`, but the parser does not
-inspect it at all.
-
-AetherGate's settled compatibility rule is:
-**semantic fields must be implemented faithfully or explicitly rejected; never silently dropped.**
-
-This task must make image-detail behavior explicit.
+PR #2 must remain open/unmerged until this passes.
 
 ## WIP Marker — FIRST LOCAL ACTION
 
-Immediately after entering the repository, before pull/read/implementation work, create:
+Immediately create `.aethergate-wip` before any other local repository action:
 
-`.aethergate-wip`
-
-Safe contents:
-- task ID: AGV2-028V
-- branch: v2
-- UTC start timestamp
+- task=AGV2-028V2
+- branch=v2
+- started_at=<UTC timestamp>
 
 Never stage/commit/push it.
-Keep it for the entire incomplete task.
-Remove it only after final remote verification and handoff/PR update are complete.
+Remove it only after final remote verification, handoff update, and PR update.
 
 ## Starting Point
 
-AGV2-028 feature tip:
-`8dafbfd3c1e96cf616bbb7cd88487eee36335d03`
+Current `origin/v2` before this task:
+`06728b21e91ea982e171385751067a64fb1ae45a`
 
-Remote workflows on that exact SHA are completed/success:
-- backend — `38177261422` (also duplicate green push/PR run `38177264313`)
-- frontend — `38177261410`
-- schema-secret-gate — `38177261420`
-- alpha-golden-path — `38177261437`
+AGV2-028V remote CI is green on that exact SHA.
 
-Baseline after vision:
-- backend: **657**
+Current baseline:
+- backend: **685**
 - frontend: **89**
-- Playwright: **32 passed / 5 skipped**
+- Playwright: **32 passed / 6 skipped**
 - migration head: **0017**
+- PR #2: open/unmerged/mergeable.
 
-PR #2 (`v2` -> `main`) exists, is open/unmerged, and currently points at the AGV2-028 feature branch.
+## 1. Preserve omission semantics
 
-## 1. Fix WebP signature validation
+For Chat image parts:
 
-Replace the generic logic as needed so WebP requires the real container signature:
+- omitted `image_url.detail` must remain accepted;
+- `detail: "auto"` remains accepted;
+- `low` / `high` / `original` remain explicit `400 unsupported_feature`;
+- invalid strings remain rejected;
+- non-string values remain rejected;
+- **explicit `detail: null` must now be rejected**.
 
-- minimum length sufficient to inspect the header;
-- bytes `0:4 == b"RIFF"`;
-- bytes `8:12 == b"WEBP"`.
+Do not treat missing and explicit null as the same state.
 
-Do not accept RIFF alone.
+Use key-presence detection or a sentinel; do not rely on `.get()` alone.
 
-Keep PNG/JPEG validation at least as strict as today.
+## 2. Responses semantics
 
-Prefer clear per-format validation over a misleading generic abstraction if that is safer/readable.
+Do not blindly copy Chat's null rule into Responses.
 
-No image decoding/decompression library is needed.
+The pinned JS Responses content-part type is:
+`detail?: ImageDetail | null`.
 
-## 2. Add negative WebP tests
+The pinned Python type generation differs in requiredness/nullability.
 
-Add deterministic tests proving all of the following:
+Keep the currently documented Responses omission/default behavior unless direct inspection of the exact content-part contract used by both SDKs proves a safer correction is required.
 
-- valid WebP fixture is accepted;
-- a RIFF/WAVE-like payload labeled `image/webp` is rejected;
-- a RIFF/AVI-like or arbitrary RIFF payload without the WebP marker is rejected;
-- a payload beginning with `WEBP` but lacking the RIFF container signature is rejected;
-- MIME/signature failure returns the existing safe structured error;
-- raw bytes/base64 are not reflected in error text/logs.
+At minimum:
+- do not regress Responses omitted/auto behavior;
+- do not broaden non-default detail support;
+- preserve explicit rejection of low/high/original;
+- document any intentional cross-SDK tolerance decision clearly.
 
-The test must specifically fail against the AGV2-028 implementation and pass after the fix.
+This task is about the clear Chat null mismatch, not reopening the entire Responses contract.
 
-## 3. Inspect the pinned image-detail contract
+## 3. Tests
 
-Before coding detail behavior, inspect the exact locked compatibility sources:
+Add focused tests proving:
 
-- pinned upstream OpenAI reference in `docs/contracts/openai-compatibility-baseline.md`;
-- `openai==2.54.0` Python SDK types;
-- `openai@7.32.0` JS SDK types.
+### Chat
+- omitted succeeds;
+- auto succeeds;
+- explicit JSON null returns structured 400 / UnsupportedFeature;
+- low/high/original rejected;
+- invalid string rejected;
+- non-string rejected;
+- rejected null request does not reach adapter/upstream.
 
-Record the exact allowed detail values separately for:
-- Chat Completions `image_url` content part;
-- Responses `input_image`.
+Include direct contract-level and API-level coverage.
 
-Do not guess the enum from memory.
+### Responses
+Retain regression coverage for the currently documented omission/auto behavior and non-default rejection.
 
-## 4. Make image-detail behavior explicit
+## 4. SDK / contract evidence
 
-This is a verification closure, not a new image-quality feature.
+Record in comments/docs/handoff the exact pinned Chat evidence:
 
-If the pinned contract defines `auto` as the neutral/default behavior and the current LiteLLM/Ollama
-path has no faithful low/high detail control, the preferred narrow policy is:
+Python:
+`ImageURL.detail: Literal["auto","low","high"]` optional by TypedDict total=False, not Optional.
 
-- allow omitted detail;
-- allow `null` only if the pinned request contract permits it;
-- allow `auto` when it is semantically equivalent to provider/default behavior;
-- explicitly reject non-default semantic detail modes (for example low/high, and any other pinned
-  non-neutral values) with structured HTTP 400 `unsupported_feature`.
+JS:
+`detail?: 'auto'|'low'|'high'|'original'`, optional, not `| null`.
 
-If inspection proves LiteLLM/Ollama faithfully supports the pinned detail semantics, preserving them
-through the canonical model is acceptable, but do not expand scope merely to avoid a 400.
+Do not claim `original` is supported; it remains explicitly rejected because transport cannot implement it faithfully.
 
-In all cases:
-- do not silently ignore a semantic detail value;
-- Chat and Responses must behave consistently;
-- use precise `param` paths;
-- no upstream dispatch for rejected detail values.
+No external network/provider behavior changes are needed.
 
-## 5. Add detail contract tests
+## 5. Documentation
 
-Add tests for BOTH Chat and Responses proving:
+Update `docs/contracts/vision.md` narrowly:
 
-- omitted/default detail succeeds;
-- `auto` succeeds only if the pinned contract/default semantics justify it;
-- every pinned non-default mode that is not faithfully supported returns 400 `unsupported_feature`;
-- invalid detail enum values are rejected according to the pinned contract;
-- rejected detail requests do not reach the adapter/upstream.
+- Chat detail omitted/auto accepted;
+- Chat explicit null rejected;
+- Chat low/high/original rejected;
+- Responses behavior remains as currently documented, with any intentional null tolerance stated if relevant.
 
-Extend official Python SDK compatibility proof with at least one supported/default image detail and
-one explicitly rejected semantic detail mode if the SDK exposes it.
+Do not broaden compatibility claims.
 
-Extend the locked JS SDK smoke equivalently when the JS SDK exposes the field.
+## 6. Regression Gate
 
-## 6. Preserve all AGV2-028 invariants
+Run focused tests first, then the established full gate:
 
-Do not alter:
-- inline-data-only source policy;
-- PNG/JPEG/WebP supported set;
-- remote URL/file_id rejection;
-- no-fetch/SSRF invariant;
-- image count/byte/payload limits;
-- encrypted queue storage;
-- image capability enforcement;
-- scheduler/worker/accounting authority;
-- token quota/budget fail-closed behavior;
-- auth/cancellation/recovery;
-- text-only compatibility.
-
-No image bytes/base64 in logs or handoff.
-
-## 7. Documentation cleanup
-
-Update `docs/contracts/vision.md` to state exact image-detail behavior.
-
-Also correct stale wording that still calls the Responses implementation a "text subset" in files
-modified by AGV2-028 where that wording is now materially false. Keep claims scoped:
-Responses supports the documented text + inline-image input subset, not full multimodal Responses.
-
-Do not perform unrelated documentation cleanup.
-
-## 8. Handoff next-step correction
-
-The current handoff says to resume embeddings and then merge PR #2.
-
-Reverse that ordering.
-
-A completed, independently verified vision feature PR must be merged/reviewed before adding the next
-feature to `v2`; otherwise PR #2 stops being a scoped vision PR.
-
-After AGV2-028V passes, the handoff's exactly-one recommended next step must be:
-
-**Merge PR #2 (`v2` -> `main`) through the reviewed/user-authorized process.**
-
-Only after that merge and post-merge main CI are green should embeddings be queued.
-
-## 9. Regression verification
-
-Run the focused new tests first, then the full existing gate:
-
-- backend full suite (must be >= 657 collected and all pass);
+- backend full suite, >= 685 collected and all pass;
 - frontend >= 89 pass;
-- full Playwright >= 32 pass (expected CI-only skips allowed);
+- full Playwright >= 32 pass;
 - npm build;
 - npm lint;
 - `npx tsc -b --noEmit`;
 - OpenAPI/client drift;
 - ruff;
 - git diff --check;
-- secret/content/image-data scan;
+- secret/content/image-data scans;
 - no-legacy-v1 guard + self-test;
-- migration empty -> 0017;
+- migrations empty -> 0017;
 - populated 0016 -> 0017;
 - config_check;
 - fake Ollama vision;
-- official Python Chat/Responses vision;
-- official JS vision smoke;
+- official Python vision;
+- official JS vision;
 - offline golden path.
 
 No migration.
-Do not modify migrations 0001–0017.
+Do not modify migrations 0001-0017.
 
-A full live nomnom repetition is not required merely for the parser correction unless the detail
-behavior changes provider transport. If provider transport is changed, re-run the relevant real model proof.
+No live nomnom rerun is required: this is pre-dispatch request-contract validation only.
 
-## 10. Remote CI
+## 7. Remote CI
 
-Commit/push the correction to `origin/v2`.
+Push to `origin/v2`.
 
-On the exact FINAL v2 SHA require:
+On the exact FINAL SHA require:
 - backend completed/success;
 - frontend completed/success;
 - schema-secret-gate completed/success;
@@ -241,47 +181,44 @@ On the exact FINAL v2 SHA require:
 
 Root-cause any red workflow.
 
-## 11. PR #2
+## 8. PR #2
 
-PR #2 must remain open/unmerged.
+PR #2 remains open/unmerged.
 
-Because its head is `v2`, verify it updates to the final AGV2-028V SHA and still remains mergeable.
-
-Update the PR description if needed so it accurately states:
-- strict WebP header validation;
-- explicit image-detail behavior;
-- final SHA and final four workflow IDs.
+Verify:
+- head updated to final v2 SHA;
+- mergeable;
+- description mentions the explicit-null Chat detail closure;
+- exact final SHA + workflow IDs are current.
 
 Do NOT merge PR #2.
 
-## 12. Handoff
+## 9. Handoff
 
 Update `docs/development/agent-handoff.md` with:
-- independent-review findings;
-- exact WebP fix;
-- exact pinned detail enums and chosen supported/rejected policy;
-- focused regression proof;
-- full gate counts;
+- independent-review finding;
+- exact pinned Chat optional-but-non-null evidence;
+- implementation choice used to distinguish omission from null;
+- focused tests;
+- final regression counts;
 - migration head 0017;
-- final v2 SHA;
-- exact four remote workflow IDs/conclusions;
+- final SHA + four CI workflow IDs/conclusions;
 - PR #2 status/head;
 - WIP lifecycle;
-- exactly one recommended next step: reviewed/user-authorized merge of PR #2.
+- exactly one recommended next step:
+  **Merge PR #2 (v2 -> main) through the reviewed/user-authorized process.**
 
-Never include image contents, base64, credentials, prompt/output content, encrypted bytes, or large logs.
+Never include image bytes/base64, secrets, prompts/outputs, encrypted payloads, or large logs.
 
 ## Commit / Push
 
 Use a narrow conventional commit such as:
-`fix(vision): tighten image validation semantics`
-
-Additional test/docs commits are fine if useful.
+`fix(vision): reject null chat image detail`
 
 Push to `origin/v2`.
 Never push directly to main.
-Do not ask the user whether to commit/push/continue.
+Do not ask whether to commit/push/continue.
 
-The task is complete only when the two review gaps are closed, all regressions pass, all four remote
-workflows are green on the exact final SHA, PR #2 is updated and still unmerged, handoff is truthful,
-and `.aethergate-wip` is removed only after final remote verification.
+The task is complete only when explicit null is rejected on Chat without changing omission/auto behavior,
+all regressions and exact-SHA remote CI are green, PR #2 is updated and still unmerged, handoff is
+truthful, and `.aethergate-wip` is removed only after final remote verification.
