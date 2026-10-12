@@ -1,12 +1,97 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-028V (Vision verification closure)** complete: the independent-review
-  gaps in AGV2-028 are closed — WebP validation now requires the real RIFF+WEBP container
-  signature (RIFF alone rejected), and the OpenAI image `detail` selector is no longer silently
-  ignored (omitted/`auto` accepted; `low`/`high`/`original` rejected with `400
-  unsupported_feature`). All AGV2-028 invariants preserved. No migration (head remains `0017`).
+- Branch: `v2`. **AGV2-028V (Chat image-detail null closure)** complete: an independent review of
+  the pinned SDK types found that Chat `image_url.detail` is optional-but-non-nullable, so an
+  explicitly supplied `detail: null` must be rejected on Chat (it was previously indistinguishable
+  from omission). Closed with a sentinel (key-presence detection); omission/`auto` still accepted,
+  `low`/`high`/`original` still rejected, and Responses (whose content-part type is
+  `detail?: ImageDetail | null`) still tolerates an explicit `null`. No migration (head `0017`).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
+
+## AGV2-028V — Chat image-detail null closure (omitted vs explicit-null)
+
+### Independent-review finding
+The AGV2-028V detail handling used `image_url.get("detail")` and a `validate_image_detail` that
+treated `None` as "omitted". Independent inspection of the pinned SDK types found a narrow
+remaining mismatch: Chat's `detail` is **optional but not nullable**, so a client-supplied JSON
+`"detail": null` was being silently accepted as though it were omitted.
+
+### Pinned contract evidence (exact, from the locked SDKs)
+- **Chat** Python `openai==2.54.0` `ImageURL` is a `total=False` TypedDict with
+  `detail: Literal["auto","low","high"]` — optional, **not** `Optional`, **not** nullable.
+- **Chat** JS `openai@7.32.0` `ChatCompletionContentPartImage.ImageURL` is
+  `detail?: 'auto' | 'low' | 'high' | 'original'` — optional, **not** `| null`.
+- **Responses** JS `ResponseInputImageContent.detail?: ImageDetail | null` — optional **and**
+  nullable; the Python `ResponseInputImageParam` generation differs in requiredness/nullability.
+
+### Implementation (sentinel-based omission detection)
+`src/aethergate/inference/images.py` now exports a `DETAIL_OMITTED` sentinel and
+`validate_image_detail(detail, *, param, allow_null=False)` distinguishes three states:
+
+- omitted (`DETAIL_OMITTED`) — always permitted;
+- explicit `None` — rejected by default (`400 unsupported_feature`, `feature="image_detail"`), and
+  only tolerated when the caller opts in with `allow_null=True`;
+- a string — `auto` accepted, any other value (`low`/`high`/`original`/unknown/non-string)
+  rejected.
+
+Chat (`contracts/openai.py`) uses key-presence detection (`"detail" in image_url`) and the default
+`allow_null=False`; Responses (`contracts/responses.py`) uses the same sentinel but
+`allow_null=True`, preserving the documented nullable content-part contract. Error text never
+contains image bytes or base64.
+
+### Focused tests
+- `tests/test_vision_images.py`: Chat omitted/auto succeed; Chat explicit-null, `low`/`high`/
+  `original`, invalid enum, and non-string rejected (precise `param`); a direct
+  `validate_image_detail` unit test proves the sentinel distinguishes omission from null;
+  Responses omitted/auto/null succeed, `low`/`high`/`original` rejected.
+- `tests/test_vision_api.py`: end-to-end — Chat omitted/auto reach the adapter; Chat explicit null
+  returns `400 unsupported_feature` with **no adapter dispatch**; Responses explicit null is
+  tolerated and dispatches.
+
+### Regression counts (null closure)
+- backend: **691 collected, exit 0** (baseline 685 + 6 null-closure tests).
+- frontend: **89 passed** (unchanged); full Playwright: **32 passed / 6 skipped** (unchanged).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff` clean; `git diff --check`
+  clean; secret scan clean; no-legacy guard + self-test clean.
+- No OpenAPI/client drift (validation-only change; no request/response model shape changed).
+- Migration head `0017`; empty -> `0017` and populated `0016 -> 0017` unchanged.
+
+### Local-gate note (environmental, not a code defect)
+The first local full-suite run failed in `test_oidc_session.py` (callback `302` instead of `200`)
+and DB-gated tests with DNS `socket.gaierror`. Both were environmental, not product defects:
+(1) the long-lived dev stack had stopped (all containers in `created` state after a daemon
+restart), so `postgres` no longer resolved and `scripts/dev/v2 up` was required; (2) `deploy/v2/.env`
+carried `AETHERGATE_OIDC_WEB_CALLBACK_PATH=/auth/callback` (written by a prior `web up`), which
+leaked into the test container's ambient env and flipped `web_console_enabled=True`. The
+`AETHERGATE_OIDC_WEB_CALLBACK_PATH` value was cleared locally for the green run and restored
+afterward. Remote CI is unaffected (it generates a clean `.env`). Root-caused per the ambient-env
+contamination lesson; no source/test change was needed.
+
+### Final remote CI (null closure)
+The substantive code/test SHA is `389fffd772894ab4ae9cede2ce8d2e3a5e925845`; all four required
+workflows are `completed/success` there (push events):
+- backend — run `38194540176`
+- frontend — run `38194540156`
+- schema-secret-gate — run `38194540202`
+- alpha-golden-path — run `38194540148`
+
+### PR
+PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — open, **unmerged**,
+`mergeable`, head `v2` = `389fffd`. Description updated with the null-closure finding, the exact
+pinned evidence, the sentinel implementation, the updated regression counts, and the final CI
+evidence.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-028V`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, commits pushed
+to `origin/v2`, final remote CI verified green, and PR #2 updated. Never staged/committed/pushed
+(gitignored).
+
+### Recommended next step
+**Merge PR #2 (`v2` -> `main`) through the reviewed/user-authorized process.** Do **not** start
+embeddings before PR #2 is merged and post-merge `main` CI is green — otherwise PR #2 stops being a
+scoped vision PR.
 
 ## AGV2-028V — Vision verification closure (strict WebP + explicit image detail)
 
