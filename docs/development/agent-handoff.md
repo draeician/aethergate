@@ -1,3 +1,55 @@
+# Resume checkpoint - 2026-10-12 (per-task branch policy)
+
+- **Policy decided by operator:** new work uses per-task branches created from
+  the latest reviewed/verified `main`. Historical long-lived `v2` is retired
+  for development (preserved for audit), and must not be rebased, force-pushed,
+  or used as the AGV2-030 base. Do not push implementation directly to `main`.
+- Canonical `main`: `7c47cd8575dc96265c02e17333ee88bda920de99`.
+  PRs #1-3 merged; backend `38263020817`, frontend `38263020743`,
+  schema-secret-gate `38263020802`, and alpha-golden-path `38263020770`
+  all succeeded on that merge SHA. Migration head `0017`.
+- **Current prepared branch:** `feat/agv2-030-beta1-security`, created from
+  canonical `main` with **zero commits behind**. Its previously existing
+  preparation commits modified only `AGENTS.md` and
+  `docs/development/current-task.md`; the product implementation is **not
+  started**. This checkpoint and the current task are the active instructions.
+  All downstream AGV2-031 work must start on a fresh branch from the then
+  current reviewed `main`, not from AGV2-030 or old `v2`.
+- `AGV2-030` remains Beta 1 security foundation: file-backed production
+  provider-secret backend and pinned Ollama/LiteLLM DNS/redirect egress closure.
+  Complete scope, proof requirements, nomnom test, no-migration expectation,
+  `.aethergate-wip` lifecycle, and PR gate are in
+  `docs/development/current-task.md` on the active branch.
+- **Golden-path evidence requiring preflight correction:** On historical
+  docs-only `v2` queue SHA `df6ac9ec8e6a218ab214ebb93f268f0f4038b2d9`,
+  golden-path run `38263913698` failed only the second browser test at
+  `frontend/e2e/fixtures.ts:loginAs` (Dashboard not visible, 30 s).
+  The first browser OIDC test and the other four browser tests passed.
+  Redacted web logs show the second test's unauthenticated session check
+  returned 401 around 14:38:42 UTC, **without an OIDC login redirect**
+  before timeout. Immediate `isVisible()` on the sign-in link after
+  `page.goto("/")` is a credible client-auth-loading race. This diagnosis
+  needs deterministic reproduction and a verified fix; do not dismiss as
+  transient or mark resolved from a later green run alone.
+- The historical `v2` handoff SHA
+  `b715f780573b43d4046ddfbb6a6979c7fa368826` subsequently passed
+  **all four** workflows: backend `38312457242`, frontend `38312457133`,
+  schema-secret-gate `38312457067`, golden `38312457044`.
+  This confirms the old green regression baseline, but does not close the
+  missing-auth-redirect race. Preserve failing CI evidence for the fix.
+- Work must proceed in this order: (1) create `.aethergate-wip` as first
+  local repo action for active AGV2-030; (2) root-cause/repair/prove the
+  OIDC smoke defect as the preflight; (3) implement AGV2-030 security scope;
+  (4) independently verify tests, exact-final PR head and four CI gates;
+  (5) reviewed PR to main, with **no automatic merge**.
+- CI workflows respond to `pull_request` for task branches. Their `push`
+  triggers currently name `main` and legacy `v2`; therefore a draft
+  AGV2-030 PR may be used to get PR-event CI, but must not be merged before
+  complete independent review. Do not claim branch-push CI exists when only
+  PR-triggered CI ran.
+
+---
+
 # AetherGate Agent Handoff
 
 ## Current State
