@@ -289,6 +289,93 @@ async def test_adapter_embed_rejects_malformed_vector(monkeypatch):
         await LiteLLMChatAdapter().embed(_embedding_request(), None)
 
 
+def _fake_embed_response_with_indexes(
+    entries, *, prompt_tokens: int = 5, model: str = "embed"
+) -> SimpleNamespace:
+    data = [{"index": i, "embedding": v} for i, v in entries]
+    return SimpleNamespace(
+        id="upstream-embed-1",
+        model=model,
+        data=data,
+        usage=SimpleNamespace(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens),
+    )
+
+
+async def test_adapter_embed_accepts_valid_in_order_indexes(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response_with_indexes(
+            [(0, [1.0, 2.0]), (1, [3.0, 4.0])]
+        )
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    result = await LiteLLMChatAdapter().embed(_embedding_request(), None)
+    assert result.vectors == ((1.0, 2.0), (3.0, 4.0))
+
+
+async def test_adapter_embed_restores_out_of_order_indexes(monkeypatch):
+    async def fake(model, input, **kwargs):
+        # Provider returned index 1 before index 0; the adapter must restore the
+        # input order, not the provider wire order.
+        return _fake_embed_response_with_indexes(
+            [(1, [3.0, 4.0]), (0, [1.0, 2.0])]
+        )
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    result = await LiteLLMChatAdapter().embed(_embedding_request(), None)
+    assert result.vectors == ((1.0, 2.0), (3.0, 4.0))
+
+
+async def test_adapter_embed_rejects_duplicate_indexes(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response_with_indexes([(0, [1.0]), (0, [2.0])])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+async def test_adapter_embed_rejects_negative_index(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response_with_indexes([(0, [1.0]), (-1, [2.0])])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+async def test_adapter_embed_rejects_out_of_range_index(monkeypatch):
+    async def fake(model, input, **kwargs):
+        # Two inputs but indexes 0 and 2: a gap and an out-of-range index.
+        return _fake_embed_response_with_indexes([(0, [1.0]), (2, [2.0])])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+@pytest.mark.parametrize("bad_index", [None, "1", 1.5, True])
+async def test_adapter_embed_rejects_non_integer_index(monkeypatch, bad_index):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response_with_indexes([(0, [1.0]), (bad_index, [2.0])])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+async def test_adapter_embed_index_error_message_is_safe(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response_with_indexes([(0, [1.0]), (0, [987.654])])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    request = _embedding_request(inputs=("secretinputA", "secretinputB"))
+    with pytest.raises(ProviderError) as excinfo:
+        await LiteLLMChatAdapter().embed(request, None)
+    message = str(excinfo.value.message)
+    assert "secretinput" not in message
+    assert "987.654" not in message
+
+
 async def test_adapter_embed_maps_provider_error_safely(monkeypatch):
     async def fake(model, input, **kwargs):
         exc = Exception("boom http://secret.example.com sk-live-abcdefgh")

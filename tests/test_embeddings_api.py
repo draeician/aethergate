@@ -21,6 +21,7 @@ from aethergate.adapters.base import (
 )
 from aethergate.api import deps as api_deps
 from aethergate.config import Settings
+from aethergate.contracts.embeddings import MAX_EMBEDDING_INPUTS
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import Capability
@@ -298,6 +299,63 @@ async def test_embeddings_capability_mismatch_returns_400(api_client):
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "model_unavailable"
+
+
+async def test_embeddings_encoding_format_null_rejected_without_dispatch(api_client):
+    client, mock = api_client
+    resp = await client.post(
+        "/v1/embeddings",
+        json={"model": "embed-model", "input": "hi", "encoding_format": None},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_request"
+    assert mock.embed_calls == 0
+
+
+async def test_embeddings_dimensions_null_rejected_without_dispatch(api_client):
+    client, mock = api_client
+    resp = await client.post(
+        "/v1/embeddings",
+        json={"model": "embed-model", "input": "hi", "dimensions": None},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_feature"
+    assert mock.embed_calls == 0
+
+
+async def test_embeddings_user_null_rejected_without_dispatch(api_client):
+    client, mock = api_client
+    resp = await client.post(
+        "/v1/embeddings",
+        json={"model": "embed-model", "input": "hi", "user": None},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_feature"
+    assert mock.embed_calls == 0
+
+
+async def test_embeddings_input_count_over_max_rejected_without_dispatch(api_client):
+    client, mock = api_client
+    resp = await client.post(
+        "/v1/embeddings",
+        json={"model": "embed-model", "input": ["x"] * (MAX_EMBEDDING_INPUTS + 1)},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_request"
+    assert mock.embed_calls == 0
+
+
+async def test_embeddings_input_count_at_max_succeeds(api_client):
+    client, mock = api_client
+    resp = await client.post(
+        "/v1/embeddings",
+        json={"model": "embed-model", "input": ["x"] * MAX_EMBEDDING_INPUTS},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["data"]) == MAX_EMBEDDING_INPUTS
+    assert data["data"][-1]["index"] == MAX_EMBEDDING_INPUTS - 1
+    assert mock.embed_calls == 1
 
 
 async def test_official_openai_sdk_embeddings(api_client):

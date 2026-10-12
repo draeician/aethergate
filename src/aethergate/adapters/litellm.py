@@ -252,11 +252,21 @@ class LiteLLMChatAdapter:
         The pinned LiteLLM ollama transport yields a list of dicts, but other
         transports may yield ``Embedding``-like objects; both support dict-style
         ``.get``/``__getitem__``, so read them defensively without assuming one.
+
+        The provider ``index`` must be a genuine integer. Booleans, floats,
+        numeric strings, ``None``, and missing keys are all malformed: coercing
+        them would let a provider silently mis-map inputs to vectors.
         """
         get = getattr(item, "get", None)
         if callable(get):
-            return int(get("index")), get("embedding")
-        return int(item.index), item.embedding  # type: ignore[attr-defined]
+            index = get("index")
+            embedding = get("embedding")
+        else:
+            index = item.index  # type: ignore[attr-defined]
+            embedding = item.embedding  # type: ignore[attr-defined]
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ProviderError("provider returned a malformed embedding index")
+        return index, embedding
 
     @staticmethod
     def _validate_vector(vector: object) -> tuple[float, ...]:
@@ -304,11 +314,26 @@ class LiteLLMChatAdapter:
         raw_data = getattr(response, "data", None) or []
         try:
             entries = [self._embedding_data_item(item) for item in raw_data]
+        except ProviderError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise ProviderError("provider returned a malformed embedding response") from exc
-        entries.sort(key=lambda pair: pair[0])
-        if len(entries) != len(request.inputs):
+
+        input_count = len(request.inputs)
+        if len(entries) != input_count:
             raise ProviderError("provider returned an unexpected number of embeddings")
+        # Provider entries may legitimately arrive out of order, but their indexes
+        # must map exactly onto the request inputs. Negative/out-of-range indexes,
+        # duplicates, and gaps are rejected rather than silently renumbered, which
+        # would corrupt the input -> vector correspondence.
+        for index, _ in entries:
+            if index < 0 or index >= input_count:
+                raise ProviderError("provider returned an out-of-range embedding index")
+        entries.sort(key=lambda pair: pair[0])
+        if [index for index, _ in entries] != list(range(input_count)):
+            raise ProviderError(
+                "provider returned duplicate or gapped embedding indexes"
+            )
         vectors = tuple(self._validate_vector(vec) for _, vec in entries)
         return EmbeddingResult(
             vectors=vectors,

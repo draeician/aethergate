@@ -14,10 +14,10 @@ Request fields:
 | Field | Status |
 |---|---|
 | `model` | supported — a public AetherGate model alias (never an upstream model name) |
-| `input` | supported subset — one non-empty string, or a non-empty ordered list of non-empty strings |
-| `encoding_format` | supported — `float` and `base64` (default `float` when omitted) |
-| `dimensions` | rejected — `400 unsupported_feature` |
-| `user` | rejected — `400 unsupported_feature` |
+| `input` | supported subset — one non-empty string, or a non-empty ordered list of at most **2048** non-empty strings |
+| `encoding_format` | supported — `float` and `base64` (default `float` when omitted); explicit `null` rejected |
+| `dimensions` | rejected for any value, **including `null`** — `400 unsupported_feature` |
+| `user` | rejected for any value, **including `null`** — `400 unsupported_feature` |
 | token-ID `input` (`number[]` / `number[][]`) | rejected — `400 unsupported_feature` |
 | transport/provider-control fields (`api_base`, `base_url`, `headers`, `extra_headers`, `api_key`, `api_token`, `organization`, `project`, `provider`, `endpoint`, `upstream_model`, `deployment`, `custom_api_base`) | rejected |
 
@@ -26,6 +26,39 @@ semantic or transport-control field is implemented or explicitly rejected, never
 silently dropped. Empty input (empty string, empty list, or a list containing an
 empty string) is rejected with `400 unsupported_feature`. Token-ID inputs are
 never coerced to strings.
+
+### Bounded input cardinality
+
+The pinned upstream OpenAI OpenAPI reference
+(`docs/contracts/openai-compatibility-baseline.md`, commit
+`f7bc81b7f30e834bbdb6bcc3370903e49fe7e5b1`), schema `CreateEmbeddingRequest.input`,
+declares `minItems: 1` / `maxItems: 2048` on the array input forms. AetherGate
+enforces that provider-neutral, OpenAI-compatible request-shape bound as
+`MAX_EMBEDDING_INPUTS = 2048` before durable enqueue (a single string is one
+input; a list of exactly 2048 succeeds; 2049 returns `400 invalid_request`).
+This is **not** an Ollama-specific limit and is enforced independently of the
+separate queue payload byte bound.
+
+### Optional vs explicit null
+
+The pinned SDK request types mark `encoding_format`, `dimensions`, and `user` as
+*optional but not nullable*: Python `openai==2.54.0` `EmbeddingCreateParams` is
+`total=False` (`dimensions: int`, `encoding_format: Literal["float","base64"]`,
+`user: str`), and JS `openai@7.32.0` uses `?` without `| null`. Key **absence**
+is therefore an accepted omission, while an explicit JSON `null` is a contract
+violation that is never silently treated as omission:
+
+- `encoding_format` omitted — accepted (server default `float`);
+- `encoding_format` `"float"` / `"base64"` — accepted;
+- `encoding_format: null` — rejected `400 invalid_request`;
+- `dimensions` omitted — accepted as omission;
+- `dimensions` present with **any** value, including `null` — rejected
+  `400 unsupported_feature`;
+- `user` omitted — accepted as omission;
+- `user` present with **any** value, including `null` — rejected
+  `400 unsupported_feature`.
+
+Rejected requests are rejected before durable enqueue and never dispatch upstream.
 
 ## Response contract
 
@@ -52,9 +85,19 @@ The response is the pinned OpenAI shape:
 - `usage` reports `prompt_tokens` and `total_tokens` only; there is no
   completion-token field.
 
-Provider results are validated before serialization: result count equals input
-count, order/index correspondence is preserved, every vector element is numeric
-and finite, and no NaN/Infinity or malformed/non-finite vector is forwarded.
+Provider results are validated at the adapter boundary before serialization:
+
+- the number of provider entries must equal the number of inputs;
+- provider entries may arrive in any order, but each entry's `index` must be a
+  genuine integer and the sorted index sequence must equal exactly
+  `0, 1, …, len(inputs)-1`;
+- duplicates, gaps, negative indexes, out-of-range indexes, and non-integer
+  indexes are rejected (`ProviderError`) rather than silently renumbered, so a
+  malformed provider response can never corrupt input → vector correspondence;
+- every vector element is numeric and finite; no NaN/Infinity or
+  malformed/non-finite vector is forwarded.
+
+Provider error text never contains input text or vector contents.
 
 ## Canonical representation & encryption
 

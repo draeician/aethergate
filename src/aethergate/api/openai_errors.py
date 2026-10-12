@@ -16,6 +16,7 @@ from aethergate.errors import (
     DestinationDenied,
     DomainError,
     ImageLimitExceeded,
+    InvalidRequest,
     ModelAliasNotFound,
     PayloadTooLarge,
     ProviderError,
@@ -58,6 +59,15 @@ def to_openai_error(exc: DomainError, request_id: str | None) -> JSONResponse:
             f"The requested feature is not supported by this gateway: {exc.feature}.",
             "invalid_request_error",
             code="unsupported_feature",
+            param=exc.param,
+            request_id=request_id,
+        )
+    if isinstance(exc, InvalidRequest):
+        return _error(
+            400,
+            f"The request was invalid: {exc.reason}.",
+            "invalid_request_error",
+            code="invalid_request",
             param=exc.param,
             request_id=request_id,
         )
