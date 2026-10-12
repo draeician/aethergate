@@ -192,6 +192,8 @@ jobs:
           AETHERGATE_SDK_BASE_URL="$WEB_BASE_URL/v1" \
             AETHERGATE_SDK_API_KEY="$GOLDEN_INFERENCE_KEY" \
             AETHERGATE_SDK_MODEL="golden-model" \
+            AETHERGATE_SDK_VISION_MODEL="golden-vision-model" \
+            AETHERGATE_SDK_EMBED_MODEL="golden-embed-model" \
             AETHERGATE_SDK_STREAMING=1 \
             npm run smoke
 

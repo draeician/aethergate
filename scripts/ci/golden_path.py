@@ -123,15 +123,16 @@ def _create_catalog(
 ) -> dict[str, str]:
     # A local Ollama-compatible upstream needs no provider secret, so the account
     # carries no SecretRef (metadata only; never a raw secret). The provider
-    # advertises both text and image capability; the text-only ``golden-model``
-    # alias still proves image rejection at the alias capability gate.
+    # advertises text, image, and embedding capability; the text-only
+    # ``golden-model`` alias still proves image rejection at the alias capability
+    # gate, and embedding capability is likewise gate-checked on its own alias.
     provider = _post(
         client,
         "/admin/v1/providers",
         {
             "kind": "ollama",
             "name": "golden-provider",
-            "capabilities": ["text", "image"],
+            "capabilities": ["text", "image", "embedding"],
         },
     )
     account = _post(
@@ -211,6 +212,36 @@ def _create_catalog(
             "enabled": True,
         },
     )
+    # An embedding-capable alias/route/policy so embeddings can be proven through
+    # the official SDK and accounted (UsageRecord + LedgerEntry) identically to
+    # chat completions.
+    embed_alias = _post(
+        client,
+        "/admin/v1/model-aliases",
+        {"name": "golden-embed-model", "capabilities": ["embedding"]},
+    )
+    embed_route = _post(
+        client,
+        "/admin/v1/route-bindings",
+        {
+            "model_alias_id": embed_alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": upstream_model,
+            "is_active": True,
+        },
+    )
+    embed_policy = _post(
+        client,
+        "/admin/v1/price-policies",
+        {
+            "route_binding_id": embed_route["id"],
+            "billing_unit": "request",
+            "currency": "USD",
+            "request_price": "0.000000000123",
+            "enabled": True,
+        },
+    )
     return {
         "provider_id": provider["id"],
         "account_id": account["id"],
@@ -221,6 +252,9 @@ def _create_catalog(
         "vision_alias_id": vision_alias["id"],
         "vision_route_id": vision_route["id"],
         "vision_price_policy_id": vision_policy["id"],
+        "embed_alias_id": embed_alias["id"],
+        "embed_route_id": embed_route["id"],
+        "embed_price_policy_id": embed_policy["id"],
     }
 
 
@@ -495,6 +529,82 @@ def _sdk_chat_image_on_text_only_alias_400(base_url: str, key: str) -> str:
     return "unreachable"
 
 
+def _sdk_embedding(
+    base_url: str,
+    key: str,
+    model: str,
+    *,
+    inputs: list[str] | None = None,
+    encoding_format: str | None = None,
+) -> str:
+    """Official SDK embeddings (default float decode + optional explicit format)."""
+    from openai import OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    kwargs: dict = {"model": model}
+    if inputs is not None:
+        kwargs["input"] = inputs
+    else:
+        kwargs["input"] = "golden embed prompt"
+    if encoding_format is not None:
+        kwargs["encoding_format"] = encoding_format
+    response = client.embeddings.create(**kwargs)
+    if response.object != "list" or not response.data:
+        _fail("embeddings response had unexpected object/empty data")
+    expected = len(inputs) if inputs is not None else 1
+    if len(response.data) != expected:
+        _fail(f"embeddings returned {len(response.data)} vectors, expected {expected}")
+    if response.usage is None or response.usage.total_tokens <= 0:
+        _fail("embeddings response did not report usage")
+    # The fake upstream emits dimension-3 vectors; verify they round-trip as
+    # floats (the SDK decodes the default base64 transport to numeric vectors).
+    for entry in response.data:
+        vector = entry.embedding
+        if not isinstance(vector, list) or len(vector) != 3:
+            _fail("embedding vector was not a decoded 3-element float list")
+        if any(not isinstance(x, float) for x in vector):
+            _fail("embedding vector contained non-float values")
+    return "ok_embed"
+
+
+def _sdk_embedding_base64_explicit(base_url: str, key: str, model: str) -> str:
+    """Explicit ``encoding_format="base64"`` returns the raw base64 string."""
+    from openai import OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    response = client.embeddings.create(
+        model=model, input="golden embed base64", encoding_format="base64"
+    )
+    if not response.data or len(response.data) != 1:
+        _fail("explicit base64 embeddings returned wrong vector count")
+    vector = response.data[0].embedding
+    if not isinstance(vector, str):
+        _fail("explicit base64 embedding was not returned as a string")
+    import base64
+    import struct
+
+    raw = base64.b64decode(vector)
+    floats = struct.unpack(f"<{len(raw) // 4}f", raw)
+    if len(floats) != 3 or any(not isinstance(x, float) for x in floats):
+        _fail("explicit base64 embedding did not decode to 3 floats")
+    return "ok_embed_base64"
+
+
+def _sdk_embedding_rejected_400(
+    base_url: str, key: str, model: str, *, body: dict, label: str
+) -> str:
+    """A semantically unsupported embedding field must be an SDK-visible 400."""
+    from openai import BadRequestError, OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    try:
+        client.embeddings.create(model=model, **body)
+    except BadRequestError:
+        return f"ok_{label}"
+    _fail(f"unsupported embeddings field {label!r} was not rejected with 400")
+    return "unreachable"
+
+
 def _write_secrets(path: Path, values: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in values.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -611,6 +721,69 @@ def phase_main(args: argparse.Namespace) -> int:
     ):
         _fail("non-default image detail was not rejected with 400")
 
+    _log("official SDK embeddings (default base64 -> float decode)")
+    if _sdk_embedding(args.base_url, key, "golden-embed-model") != "ok_embed":
+        _fail("embeddings (default) did not return ok_embed")
+    _log("official SDK embeddings (multi-input, explicit float)")
+    if (
+        _sdk_embedding(
+            args.base_url, key, "golden-embed-model", inputs=["a", "b"]
+        )
+        != "ok_embed"
+    ):
+        _fail("embeddings (multi-input float) did not return ok_embed")
+    _log("official SDK embeddings (explicit base64)")
+    if (
+        _sdk_embedding_base64_explicit(args.base_url, key, "golden-embed-model")
+        != "ok_embed_base64"
+    ):
+        _fail("embeddings (explicit base64) did not return ok_embed_base64")
+    _log("embeddings rejection: dimensions, user, token-ids, text-only alias (400)")
+    if (
+        _sdk_embedding_rejected_400(
+            args.base_url,
+            key,
+            "golden-embed-model",
+            body={"input": "x", "dimensions": 3},
+            label="embed_dimensions_400",
+        )
+        != "ok_embed_dimensions_400"
+    ):
+        _fail("embeddings dimensions was not rejected with 400")
+    if (
+        _sdk_embedding_rejected_400(
+            args.base_url,
+            key,
+            "golden-embed-model",
+            body={"input": "x", "user": "someone"},
+            label="embed_user_400",
+        )
+        != "ok_embed_user_400"
+    ):
+        _fail("embeddings user was not rejected with 400")
+    if (
+        _sdk_embedding_rejected_400(
+            args.base_url,
+            key,
+            "golden-embed-model",
+            body={"input": [1, 2, 3]},
+            label="embed_token_ids_400",
+        )
+        != "ok_embed_token_ids_400"
+    ):
+        _fail("embeddings token-id input was not rejected with 400")
+    if (
+        _sdk_embedding_rejected_400(
+            args.base_url,
+            key,
+            "golden-model",
+            body={"input": "x"},
+            label="embed_text_only_400",
+        )
+        != "ok_embed_text_only_400"
+    ):
+        _fail("embeddings on text-only alias was not rejected with 400")
+
     # Record safe state (IDs/counts only; no secrets).
     with _admin_client(args.base_url, admin_key) as client:
         usage = client.get("/admin/v1/usage-records?limit=200").json()
@@ -633,6 +806,13 @@ def phase_main(args: argparse.Namespace) -> int:
         "sdk_vision_remote_url_400": "ok_vision_remote_400",
         "sdk_text_only_image_400": "ok_text_only_image_400",
         "sdk_vision_detail_400": "ok_vision_detail_400",
+        "sdk_embedding": "ok_embed",
+        "sdk_embedding_multi": "ok_embed",
+        "sdk_embedding_base64": "ok_embed_base64",
+        "sdk_embedding_dimensions_400": "ok_embed_dimensions_400",
+        "sdk_embedding_user_400": "ok_embed_user_400",
+        "sdk_embedding_token_ids_400": "ok_embed_token_ids_400",
+        "sdk_embedding_text_only_400": "ok_embed_text_only_400",
     }
     (workdir / STATE_FILE).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     _write_secrets(
@@ -670,6 +850,9 @@ def phase_post_restore(args: argparse.Namespace) -> int:
     # The distinct image-capable vision route must also survive restore.
     if state["catalog"]["vision_route_id"] not in route_ids:
         _fail("restored vision route binding not found")
+    # The embedding route must also survive restore.
+    if state["catalog"]["embed_route_id"] not in route_ids:
+        _fail("restored embedding route binding not found")
     if usage.get("total", 0) != state["usage_records"]:
         _fail(
             f"usage record count changed across restore: "
@@ -704,6 +887,15 @@ def phase_post_restore(args: argparse.Namespace) -> int:
         != "ok_responses_vision_stream"
     ):
         _fail("post-restore Responses vision stream failed")
+
+    # Post-restore embeddings prove the embedding route/alias still works after
+    # restore and the encrypted vector result path survives round-trip.
+    _log("post-restore official SDK embeddings")
+    if (
+        _sdk_embedding(args.base_url, inference_key, "golden-embed-model")
+        != "ok_embed"
+    ):
+        _fail("post-restore embeddings failed")
 
     _log("golden path post-restore verification complete")
     print(
