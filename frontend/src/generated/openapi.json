@@ -745,11 +745,19 @@
       },
       "ChatMessage": {
         "additionalProperties": false,
-        "description": "A single chat message. Multimodal/tool payloads are unsupported and rejected.",
+        "description": "A single Chat Completions message.\n\n``content`` is either a plain string (text-only) or the pinned multimodal\ncontent-parts union: an ordered list of ``{\"type\": \"text\", \"text\": ...}`` and\n``{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:...\"}}`` parts. Only inline\n``data:`` image sources are accepted; remote URLs, ``file_id``/file inputs,\nand other part types are explicitly rejected. Tool/function payloads remain\nunsupported and are rejected.",
         "properties": {
           "content": {
-            "title": "Content",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "title": "Content"
           },
           "role": {
             "title": "Role",
@@ -4357,7 +4365,7 @@
         "type": "object"
       },
       "ResponsesRequest": {
-        "description": "Pinned Responses API request surface (text-generation subset).",
+        "description": "Pinned Responses API request surface (text + inline-image subset).",
         "properties": {
           "api_base": {
             "title": "Api Base"

@@ -124,6 +124,30 @@ class Settings(BaseSettings):
     scheduler_poll_interval_seconds: float = Field(
         default=0.2, validation_alias="AETHERGATE_SCHEDULER_POLL_INTERVAL_SECONDS"
     )
+
+    # --- Vision / inline image input limits ---------------------------------
+    # Inline image input is bounded so the encrypted scheduler payload cannot
+    # become an unbounded blob store. Limits are checked before durable enqueue
+    # and account for base64 expansion (~4/3). Conservative internal-Alpha
+    # defaults; images remain encrypted while queued and are never logged.
+    # Maximum inline image parts per request.
+    max_images_per_request: int = Field(
+        default=4, validation_alias="AETHERGATE_MAX_IMAGES_PER_REQUEST"
+    )
+    # Maximum decoded bytes for a single image.
+    max_image_bytes: int = Field(
+        default=8 * 1024 * 1024, validation_alias="AETHERGATE_MAX_IMAGE_BYTES"
+    )
+    # Maximum total decoded image bytes across a request.
+    max_total_image_bytes: int = Field(
+        default=16 * 1024 * 1024, validation_alias="AETHERGATE_MAX_TOTAL_IMAGE_BYTES"
+    )
+    # Maximum serialized (pre-encryption) scheduler chat payload bytes. Applies
+    # to both text-only and image-bearing payloads. The default accommodates the
+    # conservative image limits above with base64 expansion.
+    max_queue_payload_bytes: int = Field(
+        default=24 * 1024 * 1024, validation_alias="AETHERGATE_MAX_QUEUE_PAYLOAD_BYTES"
+    )
     worker_lease_seconds: float = Field(
         default=120.0, validation_alias="AETHERGATE_WORKER_LEASE_SECONDS"
     )
@@ -286,6 +310,16 @@ class Settings(BaseSettings):
             raise ValueError("queue_max_wait_seconds must be positive")
         if self.queue_total_lifetime_seconds <= 0:
             raise ValueError("queue_total_lifetime_seconds must be positive")
+        if self.max_images_per_request < 1:
+            raise ValueError("max_images_per_request must be >= 1")
+        if self.max_image_bytes < 1:
+            raise ValueError("max_image_bytes must be >= 1")
+        if self.max_total_image_bytes < self.max_image_bytes:
+            raise ValueError(
+                "max_total_image_bytes must be >= max_image_bytes"
+            )
+        if self.max_queue_payload_bytes < 1:
+            raise ValueError("max_queue_payload_bytes must be >= 1")
         return self
 
     @model_validator(mode="after")

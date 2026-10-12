@@ -21,10 +21,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
 
-from aethergate.adapters.base import GenerationParams, Message, Usage
+from aethergate.adapters.base import GenerationParams, Usage
 from aethergate.api.deps import (
     RequestContext,
     get_gateway_request_id,
+    get_image_limits,
     request_context,
     scheduler_service,
 )
@@ -210,7 +211,7 @@ async def chat_completions(
 ) -> ChatCompletion | StreamingResponse:
     gateway_id = get_gateway_request_id(request)
 
-    messages = [Message(role=m.role, content=m.content) for m in body.messages]
+    messages = body.to_canonical_messages(get_image_limits())
     params = GenerationParams(
         temperature=body.temperature,
         top_p=body.top_p,

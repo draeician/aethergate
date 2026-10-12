@@ -11,7 +11,12 @@ import time
 
 import pytest
 
-from aethergate.adapters.base import ChatRequest, Message
+from aethergate.adapters.base import (
+    ChatRequest,
+    ImageContentPart,
+    Message,
+    TextContentPart,
+)
 from aethergate.adapters.litellm import LiteLLMChatAdapter
 from aethergate.errors import ProviderError
 from aethergate.testing.fake_ollama import (
@@ -20,6 +25,7 @@ from aethergate.testing.fake_ollama import (
     FakeOllamaConfig,
     FakeOllamaServer,
 )
+from vision_fixtures import PNG_BYTES
 
 
 def _request(base_url: str, *, model: str = "fixture") -> ChatRequest:
@@ -28,6 +34,23 @@ def _request(base_url: str, *, model: str = "fixture") -> ChatRequest:
         base_destination=base_url,
         upstream_model=model,
         messages=(Message(role="user", content="hello fixture"),),
+    )
+
+
+def _vision_request(base_url: str, *, model: str = "fixture") -> ChatRequest:
+    message = Message(
+        role="user",
+        content="describe ",
+        parts=(
+            TextContentPart(text="describe "),
+            ImageContentPart(media_type="image/png", data=PNG_BYTES),
+        ),
+    )
+    return ChatRequest(
+        provider_kind="ollama",
+        base_destination=base_url,
+        upstream_model=model,
+        messages=(message,),
     )
 
 
@@ -88,3 +111,34 @@ async def test_fake_ollama_does_not_persist_request_content():
     # No attribute on the config holds the prompt/content.
     for value in vars(config).values():
         assert "hello fixture" not in str(value)
+
+
+async def test_fake_ollama_vision_reaches_transport_with_image_metadata():
+    """A canonical image message reaches the real LiteLLM transport as an image.
+
+    The pinned LiteLLM ollama adapter emits ``/api/generate`` with pure-base64
+    ``images``. The fake records only the count and decoded byte lengths — never
+    the base64/bytes themselves.
+    """
+    config = FakeOllamaConfig()
+    with FakeOllamaServer(config) as server:
+        result = await LiteLLMChatAdapter().complete(
+            _vision_request(server.base_url), None
+        )
+    assert result.content == DEFAULT_CONTENT
+    assert server.config.last_image_count == 1
+    assert server.config.last_image_byte_lengths == (len(PNG_BYTES),)
+    assert server.config.image_request_count == 1
+
+
+async def test_fake_ollama_vision_does_not_persist_image_bytes():
+    config = FakeOllamaConfig()
+    with FakeOllamaServer(config) as server:
+        await LiteLLMChatAdapter().complete(_vision_request(server.base_url), None)
+    # Neither the raw bytes nor their base64 appear anywhere in captured state.
+    import base64 as _b64
+
+    encoded = _b64.b64encode(PNG_BYTES).decode("ascii")
+    for value in vars(config).values():
+        assert encoded not in str(value)
+        assert PNG_BYTES.hex() not in str(value)

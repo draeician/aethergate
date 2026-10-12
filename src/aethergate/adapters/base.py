@@ -8,11 +8,55 @@ from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
+class TextContentPart:
+    """A canonical text content part (ordered within a multimodal message)."""
+
+    text: str
+    type: str = "text"
+
+
+@dataclass(frozen=True)
+class ImageContentPart:
+    """A canonical image content part.
+
+    ``media_type`` is the normalized MIME type (``image/png``, ``image/jpeg``,
+    ``image/webp``) and ``data`` is the decoded, validated image bytes. The bytes
+    are never logged, put into metadata, or persisted in plaintext.
+    """
+
+    media_type: str
+    data: bytes
+    type: str = "image"
+
+
+ContentPart = TextContentPart | ImageContentPart
+
+
+@dataclass(frozen=True)
 class Message:
-    """A single text chat message."""
+    """A single canonical chat message.
+
+    Text-only messages use ``content`` (a plain string). Multimodal messages set
+    ``parts`` to an ordered tuple of :class:`TextContentPart`/
+    :class:`ImageContentPart`. ``content`` remains the concatenated text for
+    backward compatibility and text-only token estimation.
+    """
 
     role: str
     content: str
+    parts: tuple[ContentPart, ...] | None = None
+
+    @property
+    def has_images(self) -> bool:
+        return self.parts is not None and any(
+            isinstance(part, ImageContentPart) for part in self.parts
+        )
+
+    @property
+    def images(self) -> tuple[ImageContentPart, ...]:
+        if self.parts is None:
+            return ()
+        return tuple(p for p in self.parts if isinstance(p, ImageContentPart))
 
 
 @dataclass(frozen=True)
@@ -84,5 +128,10 @@ class ChatAdapter(Protocol):
         that enforce token quotas must fail closed rather than substitute a
         generic character/word heuristic. The returned value (when not ``None``)
         is a conservative estimate, never an authoritative provider token count.
+
+        For requests carrying image parts, this returns ``None``: no
+        provider/model-specific, defensible image-input token estimator is
+        available, so token quotas and token-priced budgets fail closed rather
+        than treating bytes/dimensions as fabricated token counts.
         """
         ...

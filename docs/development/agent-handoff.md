@@ -1,12 +1,382 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-027 (Canonical v2 cutover — retire v1)** complete: the current
-  PostgreSQL/Alembic/scheduler implementation under `src/aethergate/` is the only supported
-  AetherGate runtime. The retired v1 SQLModel/SQLite application and its stale operator/agent
-  instructions are removed, a legacy-reintroduction CI guard is wired in, all four workflows
-  push on `v2` + `main`, and a fresh clean-install cutover is proven end-to-end on a disposable
-  stack (real Ollama) with no v1 data imported.
+- Branch: `v2`. **AGV2-028V2 (Chat image-detail null closure)** complete: an independent review of
+  the pinned SDK types found that Chat `image_url.detail` is optional-but-non-nullable, so an
+  explicitly supplied `detail: null` must be rejected on Chat (it was previously indistinguishable
+  from omission). Closed with a sentinel (key-presence detection); omission/`auto` still accepted,
+  `low`/`high`/`original` still rejected, and Responses (whose content-part type is
+  `detail?: ImageDetail | null`) still tolerates an explicit `null`. No migration (head `0017`).
+- **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
+
+## AGV2-028V2 — Chat image-detail null closure (omitted vs explicit-null)
+
+### Independent-review finding
+The AGV2-028V detail handling used `image_url.get("detail")` and a `validate_image_detail` that
+treated `None` as "omitted". Independent inspection of the pinned SDK types found a narrow
+remaining mismatch: Chat's `detail` is **optional but not nullable**, so a client-supplied JSON
+`"detail": null` was being silently accepted as though it were omitted.
+
+### Pinned contract evidence (exact, from the locked SDKs)
+- **Chat** Python `openai==2.54.0` `ImageURL` is a `total=False` TypedDict with
+  `detail: Literal["auto","low","high"]` — optional, **not** `Optional`, **not** nullable.
+- **Chat** JS `openai@7.32.0` `ChatCompletionContentPartImage.ImageURL` is
+  `detail?: 'auto' | 'low' | 'high' | 'original'` — optional, **not** `| null`.
+- **Responses** JS `ResponseInputImageContent.detail?: ImageDetail | null` — optional **and**
+  nullable; the Python `ResponseInputImageParam` generation differs in requiredness/nullability.
+
+### Implementation (sentinel-based omission detection)
+`src/aethergate/inference/images.py` now exports a `DETAIL_OMITTED` sentinel and
+`validate_image_detail(detail, *, param, allow_null=False)` distinguishes three states:
+
+- omitted (`DETAIL_OMITTED`) — always permitted;
+- explicit `None` — rejected by default (`400 unsupported_feature`, `feature="image_detail"`), and
+  only tolerated when the caller opts in with `allow_null=True`;
+- a string — `auto` accepted, any other value (`low`/`high`/`original`/unknown/non-string)
+  rejected.
+
+Chat (`contracts/openai.py`) uses key-presence detection (`"detail" in image_url`) and the default
+`allow_null=False`; Responses (`contracts/responses.py`) uses the same sentinel but
+`allow_null=True`, preserving the documented nullable content-part contract. Error text never
+contains image bytes or base64.
+
+### Focused tests
+- `tests/test_vision_images.py`: Chat omitted/auto succeed; Chat explicit-null, `low`/`high`/
+  `original`, invalid enum, and non-string rejected (precise `param`); a direct
+  `validate_image_detail` unit test proves the sentinel distinguishes omission from null;
+  Responses omitted/auto/null succeed, `low`/`high`/`original` rejected.
+- `tests/test_vision_api.py`: end-to-end — Chat omitted/auto reach the adapter; Chat explicit null
+  returns `400 unsupported_feature` with **no adapter dispatch**; Responses explicit null is
+  tolerated and dispatches.
+
+### Regression counts (null closure)
+- backend: **691 collected, exit 0** (baseline 685 + 6 null-closure tests).
+- frontend: **89 passed** (unchanged); full Playwright: **32 passed / 6 skipped** (unchanged).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff` clean; `git diff --check`
+  clean; secret scan clean; no-legacy guard + self-test clean.
+- No OpenAPI/client drift (validation-only change; no request/response model shape changed).
+- Migration head `0017`; empty -> `0017` and populated `0016 -> 0017` unchanged.
+
+### Local-gate note (environmental, not a code defect)
+The first local full-suite run failed in `test_oidc_session.py` (callback `302` instead of `200`)
+and DB-gated tests with DNS `socket.gaierror`. Both were environmental, not product defects:
+(1) the long-lived dev stack had stopped (all containers in `created` state after a daemon
+restart), so `postgres` no longer resolved and `scripts/dev/v2 up` was required; (2) `deploy/v2/.env`
+carried `AETHERGATE_OIDC_WEB_CALLBACK_PATH=/auth/callback` (written by a prior `web up`), which
+leaked into the test container's ambient env and flipped `web_console_enabled=True`. The
+`AETHERGATE_OIDC_WEB_CALLBACK_PATH` value was cleared locally for the green run and restored
+afterward. Remote CI is unaffected (it generates a clean `.env`). Root-caused per the ambient-env
+contamination lesson; no source/test change was needed.
+
+### Final remote CI (null closure)
+The substantive code/test SHA is `389fffd772894ab4ae9cede2ce8d2e3a5e925845`; all four required
+workflows are `completed/success` there (push events):
+- backend — run `38194540176`
+- frontend — run `38194540156`
+- schema-secret-gate — run `38194540202`
+- alpha-golden-path — run `38194540148`
+
+The independently verified pre-metadata tip is `936cec102d40315c6d5b90c4c05fc4ca3dac3622`
+(handoff/docs-only commit after `389fffd`); all four required workflows are `completed/success`
+there (push events):
+- backend — run `38195202524`
+- frontend — run `38195202501`
+- schema-secret-gate — run `38195202508`
+- alpha-golden-path — run `38195202546`
+
+The AGV2-028V3 metadata-synchronization commit is
+`bb3d58c76222970a3e410b75da9f2244ac5002a0`; all four required workflows are `completed/success`
+there (push events):
+- backend — run `38198302116`
+- frontend — run `38198302136`
+- schema-secret-gate — run `38198302315`
+- alpha-golden-path — run `38198302139`
+
+The final `origin/v2` tip (the documentation-only handoff commit that records this section) is
+verified green on all four workflows; its exact SHA and four exact-SHA workflow IDs are recorded
+in PR #2.
+
+### PR
+PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — open, **unmerged**,
+`mergeable`, head `v2` tracking the AGV2-028V3 final SHA. Its GitHub description was corrected in
+AGV2-028V3 (via the GitHub REST API, not a git commit) to remove the stale `06728b21…` final SHA
+and record the AGV2-028V2 null closure plus the exact final v2 SHA and its four exact-SHA workflow
+IDs.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-028V2`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, and removed only after all criteria were green, the handoff committed, commits pushed
+to `origin/v2`, final remote CI verified green, and PR #2 updated. Never staged/committed/pushed
+(gitignored).
+
+### Recommended next step
+**Merge PR #2 (`v2` -> `main`) through the reviewed/user-authorized process.** Do **not** start
+embeddings before PR #2 is merged and post-merge `main` CI is green — otherwise PR #2 stops being a
+scoped vision PR.
+
+## AGV2-028V — Vision verification closure (strict WebP + explicit image detail)
+
+### Independent-review findings (both closed)
+1. WebP validation was too permissive: `_SIGNATURES["image/webp"] = ((b"RIFF",), (b"WEBP",))`
+   with a generic "any one group matching at offset 0" check accepted **any** RIFF payload
+   (RIFF/WAVE, RIFF/AVI, arbitrary RIFF) as `image/webp`.
+2. The OpenAI image `detail` selector was accepted but never inspected (silently dropped),
+   violating the settled rule that semantic fields are implemented faithfully or rejected.
+
+### Fix 1 — strict per-format signatures (`src/aethergate/inference/images.py`)
+Replaced the generic signature map/matcher with explicit per-format predicates:
+`_is_png` (`89 50 4E 47 0D 0A 1A 0A`), `_is_jpeg` (`FF D8 FF`), and `_is_webp`
+(header length ≥ 12 **and** `bytes 0:4 == b"RIFF"` **and** `bytes 8:12 == b"WEBP"`).
+RIFF alone is no longer accepted. PNG/JPEG strictness unchanged. No decoding library used.
+
+### Fix 2 — explicit image `detail` semantics
+Pinned contract enums inspected from the locked SDKs (not memory):
+- **Chat** `image_url.detail`: Python `openai==2.54.0` `ImageURL` = `Literal['auto','low','high']`;
+  JS `openai@7.32.0` `ChatCompletionContentPartImage.ImageURL` = `'auto'|'low'|'high'|'original'`.
+- **Responses** `input_image.detail`: Python `ResponseInputImageParam` =
+  `Literal['low','high','auto','original']` ("Defaults to `auto`"); JS
+  `ResponseInputImageContent.detail?: ImageDetail | null`.
+
+Chosen policy (identical for Chat and Responses; `validate_image_detail`):
+- **omitted** allowed (Responses defaults to `auto`; Chat `auto` is the neutral provider default);
+- **`auto`** allowed — neutral/default mode, imposes no fidelity semantics on the transport;
+- **`low`/`high`/`original`** explicitly rejected with `400 unsupported_feature`
+  (`param` = `messages[...].content[i].image_url.detail` / `input[i].content[j].detail`), because
+  the pinned LiteLLM/Ollama path has no faithful per-image detail control;
+- any non-string or unrecognized value rejected as a contract violation.
+Rejected detail never reaches the adapter/upstream (validation is pre-enqueue/pre-dispatch).
+
+### Focused regression proof
+- `tests/test_vision_images.py`: valid WebP accepted; RIFF/WAVE, RIFF/AVI, arbitrary RIFF, and
+  `WEBP`-without-`RIFF` rejected; too-short header rejected; error text contains neither the
+  base64 nor the raw `RIFF`/`WAVE` markers (verified to fail against the AGV2-028 logic). Plus
+  Chat + Responses detail matrices: omitted/`auto` succeed; `low`/`high`/`original` rejected with
+  the precise `param`; invalid enum and non-string rejected.
+- `tests/test_vision_api.py`: end-to-end — `auto` succeeds and reaches the adapter; `low`/`high`/
+  `original` return `400 unsupported_feature` with **no adapter dispatch** (Chat and Responses).
+- `scripts/ci/golden_path.py` / `sdk/js/smoke.mjs` / `frontend/e2e/`: official Python + JS SDK
+  proof of default/`auto` detail and an SDK-visible 400 for `low`.
+
+### Invariants preserved (unchanged)
+Inline `data:` only; PNG/JPEG/WebP; no remote URL/file_id; no-fetch/SSRF; image count/byte/payload
+limits; encrypted queue payload; capability enforcement (alias+provider, dispatch-time revalidation);
+same scheduler/accounting/worker; token quota/budget fail-closed; auth/cancellation/recovery;
+text behavior unchanged. **No provider-transport change** was needed, so no live nomnom rerun was
+required by the task; the local fake-Ollama offline golden path was re-run end-to-end.
+
+### Gate counts (AGV2-028V)
+- backend: **685 collected, exit 0** (baseline 657 + 28 new/expanded WebP+detail tests).
+- frontend unit/component: **89 passed**.
+- full Playwright: **32 passed, 6 skipped** (CI-only `alpha-golden.spec.ts`, now +1 detail test).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff` clean; `git diff --check`
+  clean; secret/content/image-data scans clean; no-legacy guard + self-test clean.
+- OpenAPI/client drift: two consecutive generations md5-stable.
+- Migrations empty → `0017`, populated `0016 → 0017`; `config_check` VALID.
+- Offline golden path (fake Ollama) green incl. `sdk_vision_detail_400` and JS
+  `chat_vision_detail_auto`/`chat_vision_detail_400`.
+
+### Playwright root-cause (not a product defect)
+The first full Playwright run after rebuilding the image failed two specs. Root causes, both
+environmental and documented:
+1. `catalog-inference.spec.ts` — the OIDC/JWKS browser cold start (`Sign-in failed`); passes in
+   isolation and on the subsequent full run.
+2. `accounting.spec.ts` budget-unblock — a stale `outcome_unknown` request (from the prior task's
+   live vision runs) held a shared `ollama-endpoint` slot, so its first live SDK call queued and
+   expired. Reconciled through the real operator path (`python -m aethergate.reconcile resolve …
+   --disposition failed`) which released the slot; the full `accounting.spec.ts` then passed 8/8
+   and the full suite passed 32/32. Documented live-data-accumulation defect family.
+
+### Documentation cleanup
+`docs/contracts/vision.md` now documents the exact detail semantics and the strict WebP signature.
+Stale "Responses text-generation subset" wording that AGV2-028 made materially false was corrected
+to "text + inline-image input subset" in `README.md`, `docs/contracts/openai-compatibility-baseline.md`,
+`docs/contracts/responses.md`, `docs/development/README.md`, `docs/releases/alpha1-readiness.md`, and
+the `ResponsesRequest` docstring. Compatibility claims were not broadened.
+
+### Migration
+No migration; head remains `0017`; `0001`–`0017` untouched.
+
+### Final remote CI (AGV2-028V)
+The substantive code/test SHA is `e1d7086` (fix `f9e7619` + tests `e1d7086`; every later commit in
+this task is documentation-only). Because the four workflows use `cancel-in-progress` concurrency,
+rapid successive pushes cancel earlier same-ref runs, so exact-SHA runs are retained only for the
+tips pushed after each verification pause. All four required workflows are `completed/success`
+(push events) on each such verified tip:
+- tip `2f1fb88cb0e4315ddbaaab122198f86770737fb3` — `backend 38186374537`, `frontend 38186374519`,
+  `schema-secret-gate 38186374535`, `alpha-golden-path 38186374541`
+- tip `7b00f50e693c5945990f5cd65ce2b8a209f97ab1` — `backend 38185998082`, `frontend 38185998066`,
+  `schema-secret-gate 38185998076`, `alpha-golden-path 38185998068`
+- tip `f3b465134431915334dbad0c7d2e6eb49d80cc9c` — `backend 38185647257`, `frontend 38185647190`,
+  `schema-secret-gate 38185647180`, `alpha-golden-path 38185647208`
+- tip `5e4c94fd3f5b69a40d1213b0521681d8fb0e8661` — `backend 38183328077`, `frontend 38183328123`,
+  `schema-secret-gate 38183328067`, `alpha-golden-path 38183328081` (that alpha-golden run initially
+  hit the documented transient OIDC/JWKS browser cold-start flake at `loginAs` in the pre-existing
+  remote-URL test; `gh run rerun --failed` then passed)
+- tip `3f93f05d7f9e7850cf23fc15d463a16661196ea2` — `backend 38182977904`, `frontend 38182977886`,
+  `schema-secret-gate 38182977887`, `alpha-golden-path 38182977874`
+
+Every commit after the substantive code/test SHA is documentation-only and is verified green with
+the same four deterministic, offline workflows; the `origin/v2` tip at handoff (this handoff
+commit) is green for all four.
+
+### PR
+PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — open, **unmerged**,
+mergeable, head `v2` now tracking the AGV2-028V tip. Description updated with the strict-WebP
+validation closure, explicit detail behavior, and the final CI evidence.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-028V`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria green, handoff committed, commits pushed to `origin/v2`,
+final remote CI verified green, and PR #2 updated. Never staged/committed/pushed (gitignored).
+
+### Recommended next step
+**Merge PR #2 (`v2` -> `main`) through the reviewed/user-authorized process** once its head is the
+final green AGV2-028V SHA. Do **not** start embeddings before PR #2 is merged and post-merge `main`
+CI is green — otherwise PR #2 stops being a scoped vision PR.
+
+## AGV2-028 — Vision / multimodal image input (Chat Completions + Responses)
+
+### Pinned contract / SDK baseline
+- Request/response shapes derived from the locked official **`openai==2.54.0`** Python SDK
+  (`ChatCompletionContentPartParam` = `text`/`image_url`; `ResponseInputImageParam` =
+  `input_image` with `image_url`/`file_id`) and the pinned upstream OpenAPI baseline; never from
+  memory. JS smoke uses the locked official **`openai` Node SDK `7.32.0`**.
+- Provider transport shape discovered **empirically** against pinned LiteLLM `1.104.0`: a chat
+  content list `[{type:text,text}, {type:image_url,image_url:{url:"data:<mime>;base64,..."}}]`
+  is transformed by `litellm/llms/ollama/...` into a POST to **`/api/generate`** with top-level
+  `images: ["<pure base64>"]` (and `/api/chat` message `images`). It strips the `data:` prefix.
+
+### Supported surface / source form
+- Chat Completions: `messages[].content` = string **or** ordered `text`/`image_url` parts.
+- Responses: `input[].content` = `input_text`/`output_text`/`input_image` parts.
+- Inline `data:` URLs only; media types **PNG/JPEG/WebP** (strict base64 + magic-byte signature).
+- Non-stream + stream on both surfaces; text-only forms unchanged.
+
+### Explicitly rejected (structured 400)
+Remote `http(s)://` image URLs (**never fetched / no DNS+HTTP client**), `file_id`/files,
+provider-local paths, arbitrary URI schemes, SVG/unsupported media types, malformed data URLs,
+bad/non-canonical base64, empty payloads, MIME/signature mismatch.
+
+### Canonical multimodal model + encryption
+- `adapters.base.Message(role, content:str, parts: tuple[ContentPart,...] | None)`;
+  `TextContentPart`/`ImageContentPart(media_type, data:bytes)`. Part order preserved.
+- Chat and Responses map into the **same** canonical messages; adapters receive canonical parts.
+- `serialize_chat_payload` emits a `parts` key only for multimodal messages; image bytes are
+  base64 within the JSON envelope, which is then Fernet-encrypted into `payload_encrypted`.
+  Legacy text payloads (no `parts`) deserialize byte-for-byte as before
+  (`tests/test_vision_images.py::test_legacy_text_payload_deserializes_exactly_as_before`).
+- No plaintext image column `migration`; **no migration** (head `0017`).
+
+### Configurable limits (pre-enqueue)
+`AETHERGATE_MAX_IMAGES_PER_REQUEST=4`, `AETHERGATE_MAX_IMAGE_BYTES=8 MiB`,
+`AETHERGATE_MAX_TOTAL_IMAGE_BYTES=16 MiB`, `AETHERGATE_MAX_QUEUE_PAYLOAD_BYTES=24 MiB`. The
+payload bound applies to text and vision payloads and accounts for base64 expansion. Oversize ->
+`400 image_limit_exceeded` / `400 payload_too_large`, checked in-app (not only nginx).
+
+### Capability enforcement
+Image request requires `Capability.IMAGE` on the public **ModelAlias** and the **Provider**
+(`scheduler/service._enforce_image_capability`), at admission **and** again at dispatch time
+(capability may be revoked while queued). No fallback to a text-only route; images never silently
+removed. Text-only requests are unaffected.
+
+### Adapter / provider mapping
+Pinned `LiteLLMChatAdapter._wire_message` emits the OpenAI `image_url` content union; provider kind
+stays `ollama`; base destination/upstream model remain authoritative; retries/fallback stay
+disabled; image bytes are never logged. Fake Ollama records only `last_image_count` /
+`last_image_byte_lengths` / `image_request_count` (decoded lengths) — never bytes/base64.
+
+### Quota / budget / accounting
+Request quotas unchanged (1 request = 1 unit). Image requests return `estimate_input_tokens=None`,
+so enforced **token** quota / token-priced budget fail closed
+(`quota_token_estimator_unavailable` / `budget_token_estimator_unavailable`) — no fabricated image
+tokens. Request-priced accounting, UsageRecord, signed `usage_debit`, leases/fencing, cancellation,
+`outcome_unknown`, streaming, TTFT, auth + dispatch-time credential revalidation all unchanged.
+
+### Fake-Ollama + offline golden path proof
+- `tests/test_fake_ollama.py` / `tests/test_adapter.py`: real pinned LiteLLM transport reaches the
+  image path; metadata-only capture; wire-mapping assertion.
+- `scripts/ci/golden_path.py` adds a distinct image-capable `golden-vision-model` alias/route and
+  proves: text Chat + Responses still green; Chat/Responses vision non-stream/stream; Python SDK
+  vision; remote-URL + text-only-alias 400; **backup/restore preserves the vision route**;
+  **post-restore vision inference** succeeds. `sdk/js/smoke.mjs` adds JS Chat/Responses vision
+  non-stream/stream + remote-URL 400. Full offline golden path run green locally on a disposable
+  stack (`fake-ollama`): main phase `sdk_chat_vision/…_stream`, `sdk_responses_vision/…_stream`,
+  `sdk_vision_remote_url_400`, `sdk_text_only_image_400` all `ok`; post-restore vision `ok`;
+  JS smoke all `ok`.
+
+### Live nomnom proof (real internal Ollama, bypass=false)
+- Installed vision model positively identified from `/api/tags` capabilities: **`qwen3-vl:latest`**
+  (`capabilities: [completion, vision, tools, thinking]`). Many more vision models installed; none
+  downloaded.
+- Disposable image-capable provider/account/endpoint(`max_concurrency=2`)/alias/route; official
+  Python SDK: Chat vision non-stream **ok**, Chat vision stream **ok** (TTFT ≈ 1.0 s), Responses
+  vision non-stream/stream **ok**, remote URL → **400**, text-only alias image → **400**;
+  six concurrent vision requests / two slots all succeeded (wall times 1.05–6.32 s).
+- Full harness: streaming image request settled **succeeded** with exactly **1 UsageRecord** and
+  **1 signed ledger entry** and **first_token_at recorded** (TTFT); route disabled while queued →
+  **failed** (no dispatch/fallback); queued credential revocation → **failed / authorization_failed**
+  (no upstream dispatch). Real model rejects a 1x1 PNG but accepts a small decodable PNG; fixtures
+  use a tiny deterministic 16x16 solid PNG for live parity.
+
+### OpenAPI drift / migration
+- Regenerated backend OpenAPI + frontend `schema.d.ts` from the contract change; two consecutive
+  generations md5-stable.
+- **No migration**; head remains `0017`; `0001`–`0017` untouched. Empty → `0017` and populated
+  `0016 → 0017` verified; `config_check` VALID.
+
+### Regression counts (AGV2-028)
+- backend: **657 collected, exit 0** (baseline 613 + 44 new/converted vision tests).
+- frontend unit/component: **89 passed** (baseline 87 + 2 image-capability component tests).
+- full Playwright: **32 passed, 5 skipped** (CI-only `alpha-golden.spec.ts`, now including vision).
+- `npm run build`/`npm run lint`/`npx tsc -b --noEmit` clean; `ruff check src tests` clean;
+  `git diff --check` clean; secret/content/image-data scans clean; no-legacy guard + self-test clean.
+
+### Final remote CI (AGV2-028)
+The substantive feature SHA is `7bd9fe5ba25611da0e5e5bf0f5fbaa83f36dcf7f`; all four
+required workflows are `completed/success` there (push events):
+- backend — run `38175168398`
+- frontend — run `38175168385`
+- schema-secret-gate — run `38175168307`
+- alpha-golden-path — run `38175168359`
+
+Every commit after the substantive feature SHA is documentation-only and was verified green
+with the same four deterministic, offline workflows on the then-current `origin/v2` tip
+(e.g. docs SHA `408c9a937268e95e652eca68d2acf952f4eb8640`: `backend 38176875175`,
+`frontend 38176875089`, `schema-secret-gate 38176875240`, `alpha-golden-path 38176875139`).
+The `origin/v2` tip at handoff is green for all four. One PR-event `alpha-golden-path` run
+(`38175613763`, docs SHA `8d67f95`) initially hit the documented transient OIDC/JWKS browser
+cold-start flake at `loginAs` in a non-vision test; `gh run rerun --failed` then passed, and
+the push-event run on the identical SHA was green throughout.
+
+### Known limitations
+- Inline-only; no remote fetch, files/`file_id`, object storage, image generation, audio, video,
+  tools/MCP/computer-use. Not full multimodal/OpenAI compatibility.
+- Image token estimation is unavailable by design; enforced token quotas/budgets fail closed.
+- `deploy/v2`/`scripts/*/v2` retain historical `v2` naming (canonical; do not rename).
+
+### Feature PR
+- PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — created, includes
+  the final SHA and verification summary, **not merged**. (PR #1, the AGV2-027 cutover, was
+  already merged into `main` before this task; this is a new feature PR.)
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-028`, `branch=v2`, UTC start timestamp) created first, kept for the
+whole task, removed only after all criteria were green, the handoff committed, commits pushed to
+`origin/v2`, final remote CI verified green, and PR #2 created. Never staged/committed/pushed
+(gitignored).
+
+### Recommended next step (superseded by AGV2-028V — see the top of this file)
+This section previously recommended resuming embeddings before merging PR #2. That ordering was
+wrong and is reversed by AGV2-028V: **merge PR #2 (`v2` -> `main`) through the reviewed process
+first**; only after that merge and post-merge `main` CI are green should embeddings be queued.
+
+## Prior — AGV2-027 (canonical v2 cutover — retire v1)
+
+- AGV2-027 complete: the current PostgreSQL/Alembic/scheduler implementation under
+  `src/aethergate/` is the only supported AetherGate runtime. The retired v1 SQLModel/SQLite
+  application and its stale operator/agent instructions are removed, a legacy-reintroduction CI
+  guard is wired in, all four workflows push on `v2` + `main`, and a fresh clean-install cutover
+  is proven end-to-end on a disposable stack (real Ollama) with no v1 data imported.
 - Follows the verified AGV2-025 baseline SHA `07ae618` (backend 613 / frontend 87 / Playwright 32).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
 

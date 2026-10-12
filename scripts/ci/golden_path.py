@@ -47,6 +47,22 @@ import httpx
 STATE_FILE = "golden_state.json"
 SECRETS_FILE = "golden_secrets.env"
 
+# Tiny deterministic 16x16 PNG (solid red). Committed bytes only; never a real
+# image. Used to prove inline vision input through the official SDK without any
+# network fetch. A real decodable image so the same fixture also works against a
+# live vision model; it remains tiny and obviously synthetic.
+_TINY_PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000001000000010080200000090916836"
+    "000000164944415478da63f8a0a040126218d530aa61f86a00006e5e30100ce312"
+    "630000000049454e44ae426082"
+)
+
+
+def _png_data_url() -> str:
+    import base64
+
+    return "data:image/png;base64," + base64.b64encode(_TINY_PNG_BYTES).decode("ascii")
+
 
 def _log(message: str) -> None:
     print(f"[golden-path] {message}", flush=True)
@@ -106,11 +122,17 @@ def _create_catalog(
     client: httpx.Client, upstream_base: str, upstream_model: str
 ) -> dict[str, str]:
     # A local Ollama-compatible upstream needs no provider secret, so the account
-    # carries no SecretRef (metadata only; never a raw secret).
+    # carries no SecretRef (metadata only; never a raw secret). The provider
+    # advertises both text and image capability; the text-only ``golden-model``
+    # alias still proves image rejection at the alias capability gate.
     provider = _post(
         client,
         "/admin/v1/providers",
-        {"kind": "ollama", "name": "golden-provider", "capabilities": ["text"]},
+        {
+            "kind": "ollama",
+            "name": "golden-provider",
+            "capabilities": ["text", "image"],
+        },
     )
     account = _post(
         client,
@@ -146,6 +168,25 @@ def _create_catalog(
             "is_active": True,
         },
     )
+    # A distinct image-capable public alias/route (text + image capability) so
+    # vision input has an explicit route rather than pretending every text alias
+    # accepts images.
+    vision_alias = _post(
+        client,
+        "/admin/v1/model-aliases",
+        {"name": "golden-vision-model", "capabilities": ["text", "image"]},
+    )
+    vision_route = _post(
+        client,
+        "/admin/v1/route-bindings",
+        {
+            "model_alias_id": vision_alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": upstream_model,
+            "is_active": True,
+        },
+    )
     # A request-priced policy so a completed inference produces a UsageRecord and
     # a signed LedgerEntry (proving accounting identity survives backup/restore).
     policy = _post(
@@ -159,6 +200,17 @@ def _create_catalog(
             "enabled": True,
         },
     )
+    vision_policy = _post(
+        client,
+        "/admin/v1/price-policies",
+        {
+            "route_binding_id": vision_route["id"],
+            "billing_unit": "request",
+            "currency": "USD",
+            "request_price": "0.000000000123",
+            "enabled": True,
+        },
+    )
     return {
         "provider_id": provider["id"],
         "account_id": account["id"],
@@ -166,6 +218,9 @@ def _create_catalog(
         "alias_id": alias["id"],
         "route_id": route["id"],
         "price_policy_id": policy["id"],
+        "vision_alias_id": vision_alias["id"],
+        "vision_route_id": vision_route["id"],
+        "vision_price_policy_id": vision_policy["id"],
     }
 
 
@@ -290,6 +345,156 @@ def _sdk_responses_inference(
     return "ok_responses"
 
 
+def _sdk_chat_vision(
+    base_url: str, key: str, model: str, *, stream: bool, detail: str | None = None
+) -> str:
+    """Official SDK Chat vision input (non-stream + stream)."""
+    from openai import OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    image_url: dict = {"url": _png_data_url()}
+    if detail is not None:
+        image_url["detail"] = detail
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "golden vision prompt"},
+                {"type": "image_url", "image_url": image_url},
+            ],
+        }
+    ]
+    if stream:
+        chunks = client.chat.completions.create(model=model, messages=messages, stream=True)
+        collected = [
+            c.choices[0].delta.content
+            for c in chunks
+            if c.choices and c.choices[0].delta and c.choices[0].delta.content
+        ]
+        if not collected:
+            _fail("chat vision stream produced no content")
+        return "ok_vision_stream"
+    completion = client.chat.completions.create(model=model, messages=messages)
+    if not completion.choices[0].message.content:
+        _fail("chat vision non-stream produced empty content")
+    return "ok_vision"
+
+
+def _sdk_responses_vision(
+    base_url: str, key: str, model: str, *, stream: bool
+) -> str:
+    """Official SDK Responses vision input (non-stream + stream)."""
+    from openai import OpenAI
+    from openai.types.responses import ResponseCompletedEvent, ResponseTextDeltaEvent
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    input_items = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "golden vision prompt"},
+                {"type": "input_image", "image_url": _png_data_url()},
+            ],
+        }
+    ]
+    if stream:
+        events = client.responses.create(model=model, input=input_items, stream=True)
+        parts: list[str] = []
+        completed = False
+        for event in events:
+            if isinstance(event, ResponseTextDeltaEvent):
+                parts.append(event.delta)
+            if isinstance(event, ResponseCompletedEvent):
+                if event.response.status != "completed":
+                    _fail("responses vision stream status was not completed")
+                completed = True
+        if not parts or not "".join(parts):
+            _fail("responses vision stream produced no output text")
+        if not completed:
+            _fail("responses vision stream did not emit response.completed")
+        return "ok_responses_vision_stream"
+
+    response = client.responses.create(model=model, input=input_items)
+    if response.status != "completed" or not response.output_text:
+        _fail("responses vision non-stream had unexpected status/text")
+    return "ok_responses_vision"
+
+
+def _sdk_chat_vision_rejected_detail_400(base_url: str, key: str, model: str) -> str:
+    """A pinned non-default `detail` mode must be an explicit SDK-visible 400."""
+    from openai import BadRequestError, OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    try:
+        client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _png_data_url(), "detail": "low"},
+                        }
+                    ],
+                }
+            ],
+        )
+    except BadRequestError:
+        return "ok_vision_detail_400"
+    _fail("non-default image detail was not rejected with 400")
+    return "unreachable"
+
+
+def _sdk_chat_vision_remote_url_400(base_url: str, key: str, model: str) -> str:
+    """A remote image URL must be an SDK-visible 400 (never fetched)."""
+    from openai import BadRequestError, OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    try:
+        client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.invalid/x.png"},
+                        }
+                    ],
+                }
+            ],
+        )
+    except BadRequestError:
+        return "ok_vision_remote_400"
+    _fail("remote image URL was not rejected with 400")
+    return "unreachable"
+
+
+def _sdk_chat_image_on_text_only_alias_400(base_url: str, key: str) -> str:
+    """An image request to a text-only alias must be an SDK-visible 400."""
+    from openai import BadRequestError, OpenAI
+
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=key, timeout=60.0)
+    try:
+        client.chat.completions.create(
+            model="golden-model",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": _png_data_url()}}
+                    ],
+                }
+            ],
+        )
+    except BadRequestError:
+        return "ok_text_only_image_400"
+    _fail("image on text-only alias was not rejected with 400")
+    return "unreachable"
+
+
 def _write_secrets(path: Path, values: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in values.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -359,6 +564,53 @@ def phase_main(args: argparse.Namespace) -> int:
     ):
         _fail("Responses stream inference did not return ok_responses_stream")
 
+    _log("official SDK Chat vision non-stream (default + explicit auto detail)")
+    if _sdk_chat_vision(args.base_url, key, "golden-vision-model", stream=False) != "ok_vision":
+        _fail("Chat vision non-stream did not return ok_vision")
+    if (
+        _sdk_chat_vision(
+            args.base_url, key, "golden-vision-model", stream=False, detail="auto"
+        )
+        != "ok_vision"
+    ):
+        _fail("Chat vision non-stream with explicit auto detail failed")
+    _log("official SDK Chat vision stream")
+    if (
+        _sdk_chat_vision(args.base_url, key, "golden-vision-model", stream=True)
+        != "ok_vision_stream"
+    ):
+        _fail("Chat vision stream did not return ok_vision_stream")
+    _log("official SDK Responses vision non-stream")
+    if (
+        _sdk_responses_vision(args.base_url, key, "golden-vision-model", stream=False)
+        != "ok_responses_vision"
+    ):
+        _fail("Responses vision non-stream did not return ok_responses_vision")
+    _log("official SDK Responses vision stream")
+    if (
+        _sdk_responses_vision(args.base_url, key, "golden-vision-model", stream=True)
+        != "ok_responses_vision_stream"
+    ):
+        _fail("Responses vision stream did not return ok_responses_vision_stream")
+    _log("image rejection: remote URL (400) and text-only alias (400)")
+    if (
+        _sdk_chat_vision_remote_url_400(args.base_url, key, "golden-vision-model")
+        != "ok_vision_remote_400"
+    ):
+        _fail("remote image URL was not rejected with 400")
+    if (
+        _sdk_chat_image_on_text_only_alias_400(args.base_url, key)
+        != "ok_text_only_image_400"
+    ):
+        _fail("image on text-only alias was not rejected with 400")
+    if (
+        _sdk_chat_vision_rejected_detail_400(
+            args.base_url, key, "golden-vision-model"
+        )
+        != "ok_vision_detail_400"
+    ):
+        _fail("non-default image detail was not rejected with 400")
+
     # Record safe state (IDs/counts only; no secrets).
     with _admin_client(args.base_url, admin_key) as client:
         usage = client.get("/admin/v1/usage-records?limit=200").json()
@@ -374,6 +626,13 @@ def phase_main(args: argparse.Namespace) -> int:
         "sdk_stream": "ok_stream",
         "sdk_responses_non_stream": "ok_responses",
         "sdk_responses_stream": "ok_responses_stream",
+        "sdk_chat_vision": "ok_vision",
+        "sdk_chat_vision_stream": "ok_vision_stream",
+        "sdk_responses_vision": "ok_responses_vision",
+        "sdk_responses_vision_stream": "ok_responses_vision_stream",
+        "sdk_vision_remote_url_400": "ok_vision_remote_400",
+        "sdk_text_only_image_400": "ok_text_only_image_400",
+        "sdk_vision_detail_400": "ok_vision_detail_400",
     }
     (workdir / STATE_FILE).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     _write_secrets(
@@ -408,6 +667,9 @@ def phase_post_restore(args: argparse.Namespace) -> int:
 
     if state["catalog"]["route_id"] not in route_ids:
         _fail("restored catalog route binding not found")
+    # The distinct image-capable vision route must also survive restore.
+    if state["catalog"]["vision_route_id"] not in route_ids:
+        _fail("restored vision route binding not found")
     if usage.get("total", 0) != state["usage_records"]:
         _fail(
             f"usage record count changed across restore: "
@@ -426,6 +688,22 @@ def phase_post_restore(args: argparse.Namespace) -> int:
     _log("post-restore official SDK stream")
     if _sdk_inference(args.base_url, inference_key, "golden-model", stream=True) != "ok_stream":
         _fail("post-restore stream inference failed")
+
+    # Post-restore vision inference proves the vision route/alias still works.
+    _log("post-restore official SDK Chat vision non-stream")
+    if (
+        _sdk_chat_vision(args.base_url, inference_key, "golden-vision-model", stream=False)
+        != "ok_vision"
+    ):
+        _fail("post-restore Chat vision non-stream failed")
+    _log("post-restore official SDK Responses vision stream")
+    if (
+        _sdk_responses_vision(
+            args.base_url, inference_key, "golden-vision-model", stream=True
+        )
+        != "ok_responses_vision_stream"
+    ):
+        _fail("post-restore Responses vision stream failed")
 
     _log("golden path post-restore verification complete")
     print(

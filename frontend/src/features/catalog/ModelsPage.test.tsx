@@ -28,4 +28,29 @@ describe("ModelsPage", () => {
       }),
     );
   });
+
+  it("creates a model alias advertising image capability", async () => {
+    vi.spyOn(api, "listModelAliases").mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+    const createModelAlias = vi.spyOn(api, "createModelAlias").mockResolvedValue({
+      id: "m2",
+      name: "vision-model",
+      capabilities: ["text", "image"],
+      is_active: true,
+    });
+
+    render(<ModelsPage />, { wrapper: wrap({ session: systemAdminSession(), roles: ["system_admin"] }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "New alias" }));
+    fireEvent.change(screen.getByLabelText("Alias name"), { target: { value: "vision-model" } });
+    fireEvent.click(screen.getByLabelText("image"));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(createModelAlias).toHaveBeenCalledWith({
+        name: "vision-model",
+        capabilities: ["text", "image"],
+        is_active: true,
+      }),
+    );
+  });
 });

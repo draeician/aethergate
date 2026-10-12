@@ -13,7 +13,16 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
+from aethergate.adapters.base import ImageContentPart, Message, TextContentPart
 from aethergate.contracts.common import ContractModel
+from aethergate.errors import UnsupportedFeature
+from aethergate.inference.images import (
+    DETAIL_OMITTED,
+    ImageLimits,
+    enforce_request_image_limits,
+    parse_inline_image,
+    validate_image_detail,
+)
 
 _TRANSPORT_CONTROL_FIELDS = (
     "api_base",
@@ -33,12 +42,20 @@ _TRANSPORT_CONTROL_FIELDS = (
 
 
 class ChatMessage(ContractModel):
-    """A single chat message. Multimodal/tool payloads are unsupported and rejected."""
+    """A single Chat Completions message.
+
+    ``content`` is either a plain string (text-only) or the pinned multimodal
+    content-parts union: an ordered list of ``{"type": "text", "text": ...}`` and
+    ``{"type": "image_url", "image_url": {"url": "data:..."}}`` parts. Only inline
+    ``data:`` image sources are accepted; remote URLs, ``file_id``/file inputs,
+    and other part types are explicitly rejected. Tool/function payloads remain
+    unsupported and are rejected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     role: str
-    content: str
+    content: str | list[Any]
 
     @field_validator("role")
     @classmethod
@@ -48,6 +65,70 @@ class ChatMessage(ContractModel):
                 f"unsupported message role {value!r}; only system/user/assistant are supported"
             )
         return value
+
+    def to_canonical(
+        self, *, limits: ImageLimits, images_seen: list[ImageContentPart]
+    ) -> Message:
+        """Map into the canonical multimodal message.
+
+        Text-only content maps to ``Message(role, content:str)``. A content-parts
+        list maps to ordered canonical parts; each inline image is strictly
+        validated and image count/byte limits are enforced across the request via
+        the shared ``images_seen`` accumulator.
+        """
+        if isinstance(self.content, str):
+            return Message(role=self.role, content=self.content)
+
+        parts: list[TextContentPart | ImageContentPart] = []
+        for index, part in enumerate(self.content):
+            param = f"messages[{self.role}].content[{index}]"
+            if not isinstance(part, dict):
+                raise UnsupportedFeature("chat_content_part", param=param)
+            part_type = part.get("type")
+            if part_type == "text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    raise UnsupportedFeature("chat_text_part", param=param)
+                parts.append(TextContentPart(text=text))
+            elif part_type == "image_url":
+                image_url = part.get("image_url")
+                if isinstance(image_url, dict):
+                    url = image_url.get("url")
+                    # Distinguish omission from an explicitly supplied null: the
+                    # pinned Chat contract is optional-but-non-nullable
+                    # (`detail: auto|low|high`; JS also `original`), so an
+                    # explicit `null` must be rejected while omission is allowed.
+                    detail = (
+                        image_url["detail"]
+                        if "detail" in image_url
+                        else DETAIL_OMITTED
+                    )
+                else:
+                    url = image_url
+                    detail = DETAIL_OMITTED
+                if not isinstance(url, str):
+                    raise UnsupportedFeature("image_source", param=param)
+                # Never silently ignore the semantic detail selector: only the
+                # neutral `auto`/omitted mode is supported (Chat is non-nullable).
+                validate_image_detail(detail, param=f"{param}.image_url.detail")
+                image = parse_inline_image(
+                    url, max_image_bytes=limits.max_image_bytes, param=param
+                )
+                images_seen.append(image)
+                enforce_request_image_limits(
+                    images_seen,
+                    max_images_per_request=limits.max_images_per_request,
+                    max_total_image_bytes=limits.max_total_image_bytes,
+                )
+                parts.append(image)
+            else:
+                raise UnsupportedFeature(
+                    f"chat_content_part:{part_type}", param=param
+                )
+        content_text = "".join(
+            p.text for p in parts if isinstance(p, TextContentPart)
+        )
+        return Message(role=self.role, content=content_text, parts=tuple(parts))
 
 
 class StreamOptions(ContractModel):
@@ -119,6 +200,22 @@ class ChatCompletionRequest(ContractModel):
         if self.max_completion_tokens is not None:
             return self.max_completion_tokens
         return self.max_tokens
+
+    def to_canonical_messages(
+        self, limits: ImageLimits | None = None
+    ) -> list[Message]:
+        """Map messages into the canonical multimodal representation.
+
+        Image count/byte limits are enforced across the whole request (a single
+        shared accumulator), so multiple messages cannot combine to bypass the
+        per-request bounds.
+        """
+        effective = limits or ImageLimits()
+        images_seen: list[ImageContentPart] = []
+        return [
+            message.to_canonical(limits=effective, images_seen=images_seen)
+            for message in self.messages
+        ]
 
 
 # --- Response DTOs -----------------------------------------------------------

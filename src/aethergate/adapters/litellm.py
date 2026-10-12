@@ -7,6 +7,7 @@ admission controls are never bypassed for throughput.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator
 
 import litellm
@@ -15,7 +16,10 @@ from litellm.utils import huggingface_tokenizer_kind
 from aethergate.adapters.base import (
     ChatRequest,
     CompletionResult,
+    ImageContentPart,
+    Message,
     StreamChunk,
+    TextContentPart,
     Usage,
 )
 from aethergate.errors import ProviderError, UnsupportedProvider
@@ -52,8 +56,38 @@ class LiteLLMChatAdapter:
             raise UnsupportedProvider(request.provider_kind)
         return f"{prefix}/{request.upstream_model}"
 
-    def _messages(self, request: ChatRequest) -> list[dict[str, str]]:
-        return [{"role": m.role, "content": m.content} for m in request.messages]
+    def _wire_message(self, message: Message) -> dict[str, object]:
+        """Map one canonical message to the pinned OpenAI chat wire form.
+
+        Text-only messages keep the string ``content`` shape (unchanged from the
+        text-only adapter). Image-bearing messages use the pinned content-parts
+        union: ``{"type": "text", ...}`` and
+        ``{"type": "image_url", "image_url": {"url": "data:<mime>;base64,..."}}``.
+        The pinned LiteLLM 1.104.0 ollama ``/api/generate`` transformer extracts
+        this inline image into the ``images`` field as pure base64; image bytes
+        are never logged by this adapter.
+        """
+        if message.parts is None:
+            return {"role": message.role, "content": message.content}
+        parts: list[dict[str, object]] = []
+        for part in message.parts:
+            if isinstance(part, ImageContentPart):
+                encoded = base64.b64encode(part.data).decode("ascii")
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{part.media_type};base64,{encoded}"
+                        },
+                    }
+                )
+            else:
+                assert isinstance(part, TextContentPart)
+                parts.append({"type": "text", "text": part.text})
+        return {"role": message.role, "content": parts}
+
+    def _messages(self, request: ChatRequest) -> list[dict[str, object]]:
+        return [self._wire_message(m) for m in request.messages]
 
     def _messages_text(self, request: ChatRequest) -> str:
         return "\n".join(m.content for m in request.messages)
@@ -69,6 +103,11 @@ class LiteLLMChatAdapter:
         returns ``None`` so the scheduler can fail a token-quota request closed
         instead of masquerading a generic heuristic as TPM protection.
         """
+        # Image input has no provider/model-specific, defensible token estimator;
+        # fail closed for enforced token quotas/budgets rather than substituting
+        # bytes/base64/dimensions as fabricated token counts.
+        if any(m.has_images for m in request.messages):
+            return None
         model = self._litellm_model(request)
         if not self._has_model_specific_tokenizer(model):
             return None

@@ -6,9 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from aethergate.adapters.base import ChatRequest, GenerationParams, Message
+from aethergate.adapters.base import (
+    ChatRequest,
+    GenerationParams,
+    ImageContentPart,
+    Message,
+    TextContentPart,
+)
 from aethergate.adapters.litellm import LiteLLMChatAdapter
 from aethergate.errors import ProviderError, UnsupportedProvider
+from vision_fixtures import PNG_BYTES, PNG_DATA_URL
 
 
 def _request(**overrides) -> ChatRequest:
@@ -92,6 +99,54 @@ def test_estimate_input_tokens_unavailable_for_ollama_without_tokenizer():
     """No provider/model-specific tokenizer -> fail closed, no char heuristic."""
     adapter = LiteLLMChatAdapter()
     assert adapter.estimate_input_tokens(_request()) is None
+
+
+def test_estimate_input_tokens_fails_closed_for_image_requests():
+    """Image input has no defensible token estimator -> fail closed (None)."""
+    adapter = LiteLLMChatAdapter()
+    message = Message(
+        role="user",
+        content="describe ",
+        parts=(
+            TextContentPart(text="describe "),
+            ImageContentPart(media_type="image/png", data=PNG_BYTES),
+        ),
+    )
+    request = _request(messages=(message,))
+    assert adapter.estimate_input_tokens(request) is None
+
+
+async def test_adapter_maps_image_parts_to_openai_content_union(monkeypatch):
+    """Canonical image parts map to the pinned OpenAI chat content-parts union.
+
+    The adapter must not send image meaning as a text placeholder; it uses an
+    ``image_url`` part carrying the inline ``data:`` URL. The pinned LiteLLM
+    ollama adapter then extracts the pure base64 into ``images``.
+    """
+    captured: dict = {}
+    monkeypatch.setattr(
+        "aethergate.adapters.litellm.litellm.acompletion",
+        _make_capture_acompletion(captured, _fake_response()),
+    )
+    message = Message(
+        role="user",
+        content="describe ",
+        parts=(
+            TextContentPart(text="describe "),
+            ImageContentPart(media_type="image/png", data=PNG_BYTES),
+        ),
+    )
+    await LiteLLMChatAdapter().complete(_request(messages=(message,)), None)
+    sent = captured["messages"]
+    assert sent[0]["role"] == "user"
+    content = sent[0]["content"]
+    assert content[0] == {"type": "text", "text": "describe "}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"] == PNG_DATA_URL
+    # No text placeholder substitutes for the image.
+    assert all(
+        "image" not in part.get("text", "") for part in content if part["type"] == "text"
+    )
 
 
 async def test_adapter_non_stream_result(monkeypatch):

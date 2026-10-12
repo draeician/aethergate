@@ -1,4 +1,4 @@
-"""OpenAI-compatible Responses API request/response DTOs (text subset).
+"""OpenAI-compatible Responses API request/response DTOs (text + inline-image subset).
 
 These shapes are pinned to the OpenAI compatibility baseline
 (``docs/contracts/openai-compatibility-baseline.md``) and verified against the
@@ -7,10 +7,13 @@ unknown *additive* fields but explicitly rejects transport/provider-control fiel
 and every known semantic feature this milestone does not faithfully implement
 (never silently dropping a semantic field).
 
-The implemented surface is the text-generation subset: string or text
-message/input-item ``input``, ``instructions``, ``max_output_tokens``,
-``temperature``, ``top_p``, and ``stream``. Everything else in the pinned request
-schema is explicitly unsupported until a shared internal model exists.
+The implemented surface is the text + inline-image input subset that produces
+text output: string or text message/input-item ``input`` (``input_text``/
+``output_text``) plus inline ``input_image`` (``data:`` PNG/JPEG/WebP),
+``instructions``, ``max_output_tokens``, ``temperature``, ``top_p``, and
+``stream``. Everything else in the pinned request schema — including image
+*output*, remote/``file_id`` image sources, and non-default image detail modes —
+is explicitly unsupported (`docs/contracts/vision.md`).
 """
 
 from __future__ import annotations
@@ -20,9 +23,16 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
-from aethergate.adapters.base import Message
+from aethergate.adapters.base import ImageContentPart, Message, TextContentPart
 from aethergate.contracts.common import ContractModel
 from aethergate.errors import UnsupportedFeature
+from aethergate.inference.images import (
+    DETAIL_OMITTED,
+    ImageLimits,
+    enforce_request_image_limits,
+    parse_inline_image,
+    validate_image_detail,
+)
 
 # Reused from the Chat Completions surface: transport/provider-control fields may
 # never be supplied by a client. Declared only so their presence is detectable.
@@ -54,35 +64,74 @@ _INPUT_ROLE_MAP = {
 }
 
 
-def _content_text(content: Any, *, param: str) -> str:
-    """Extract canonical text from an input message's content.
+def _content_parts(
+    content: Any,
+    *,
+    param: str,
+    limits: ImageLimits,
+    images_seen: list[ImageContentPart],
+) -> tuple[str, tuple[TextContentPart | ImageContentPart, ...] | None]:
+    """Map input-item content into canonical text + ordered parts.
 
-    Supports a plain string and the ``input_text``/``output_text`` text content
-    parts. Image/audio/file content parts are unsupported semantics and rejected.
+    Text-only content (a plain string, or ``input_text``/``output_text`` parts)
+    maps to text. ``input_image`` parts are accepted only with an inline
+    ``data:`` ``image_url``; remote URLs, ``file_id`` inputs, and other part
+    types are explicit unsupported features. Returns ``(text, parts)`` where
+    ``parts`` is ``None`` for pure-text content.
     """
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for index, part in enumerate(content):
-            if not isinstance(part, dict):
-                raise UnsupportedFeature("input_content", param=param)
-            part_type = part.get("type")
-            if part_type in ("input_text", "output_text"):
-                text = part.get("text")
-                if not isinstance(text, str):
-                    raise UnsupportedFeature("input_content", param=param)
-                parts.append(text)
-            else:
-                raise UnsupportedFeature(
-                    f"input_content:{part_type}", param=f"{param}[{index}]"
-                )
-        return "".join(parts)
-    raise UnsupportedFeature("input_content", param=param)
+        return content, None
+    if not isinstance(content, list):
+        raise UnsupportedFeature("input_content", param=param)
+
+    text_parts: list[str] = []
+    parts: list[TextContentPart | ImageContentPart] = []
+    for index, part in enumerate(content):
+        part_param = f"{param}[{index}]"
+        if not isinstance(part, dict):
+            raise UnsupportedFeature("input_content", param=part_param)
+        part_type = part.get("type")
+        if part_type in ("input_text", "output_text"):
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise UnsupportedFeature("input_content", param=part_param)
+            text_parts.append(text)
+            parts.append(TextContentPart(text=text))
+        elif part_type == "input_image":
+            if part.get("file_id") is not None:
+                raise UnsupportedFeature("image_file_id", param=part_param)
+            url = part.get("image_url")
+            if not isinstance(url, str):
+                raise UnsupportedFeature("image_source", param=part_param)
+            # Never silently ignore the semantic detail selector. The pinned
+            # Responses content-part contract is `detail?: ImageDetail | null`
+            # (optional AND nullable), so an explicit `null` is tolerated here
+            # (unlike Chat); only the neutral `auto`/omitted mode is supported.
+            validate_image_detail(
+                part["detail"] if "detail" in part else DETAIL_OMITTED,
+                param=f"{part_param}.detail",
+                allow_null=True,
+            )
+            image = parse_inline_image(
+                url, max_image_bytes=limits.max_image_bytes, param=part_param
+            )
+            images_seen.append(image)
+            enforce_request_image_limits(
+                images_seen,
+                max_images_per_request=limits.max_images_per_request,
+                max_total_image_bytes=limits.max_total_image_bytes,
+            )
+            parts.append(image)
+        else:
+            raise UnsupportedFeature(
+                f"input_content:{part_type}", param=part_param
+            )
+    has_image = any(isinstance(p, ImageContentPart) for p in parts)
+    return "".join(text_parts), tuple(parts) if has_image else None
 
 
 class ResponsesRequest(ContractModel):
-    """Pinned Responses API request surface (text-generation subset)."""
+    """Pinned Responses API request surface (text + inline-image subset)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -201,13 +250,18 @@ class ResponsesRequest(ContractModel):
             raise UnsupportedFeature("user", param="user")
         return self
 
-    def to_canonical_messages(self) -> list[Message]:
+    def to_canonical_messages(
+        self, limits: ImageLimits | None = None
+    ) -> list[Message]:
         """Map the request into the canonical provider-neutral message list.
 
         ``instructions`` becomes the leading ``system`` message (highest
         precedence), followed by the input items in order. A ``developer`` role is
-        mapped to ``system`` (documented canonical mapping).
+        mapped to ``system`` (documented canonical mapping). Image count/byte
+        limits are enforced across the whole request via one shared accumulator.
         """
+        effective = limits or ImageLimits()
+        images_seen: list[ImageContentPart] = []
         messages: list[Message] = []
         if self.instructions is not None:
             messages.append(Message(role="system", content=self.instructions))
@@ -232,8 +286,15 @@ class ResponsesRequest(ContractModel):
                 raise UnsupportedFeature(
                     f"input_role:{role}", param=f"input[{index}].role"
                 )
-            content = _content_text(item.get("content"), param=f"input[{index}].content")
-            messages.append(Message(role=canonical_role, content=content))
+            text, parts = _content_parts(
+                item.get("content"),
+                param=f"input[{index}].content",
+                limits=effective,
+                images_seen=images_seen,
+            )
+            messages.append(
+                Message(role=canonical_role, content=text, parts=parts)
+            )
         return messages
 
 
