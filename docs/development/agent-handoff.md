@@ -1,16 +1,137 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-029 (OpenAI Embeddings API)** complete: `POST /v1/embeddings` implemented as
-  a non-streaming inference operation through the same durable scheduler/accounting authority as
-  Chat/Responses. String/list-of-strings input, `float`/`base64` encoding, operation-aware encrypted
-  payload/result, and alias/provider/adapter embedding-capability enforcement at admission and
-  dispatch. Token-ID input, `dimensions`, and `user` rejected `400 unsupported_feature`. Official
-  Python (`openai==2.54.0`) and JS (`openai@7.32.0`) SDK proofs green, including the mandatory JS
-  default-base64 decode path. No migration (head `0017`).
+- Branch: `v2`. **AGV2-029 (OpenAI Embeddings API)** complete, and **AGV2-029V** (independent-review
+  verification closure) complete: `POST /v1/embeddings` is a non-streaming inference operation
+  through the same durable scheduler/accounting authority as Chat/Responses. String/list-of-strings
+  input (bounded at 2048), `float`/`base64` encoding, operation-aware encrypted payload/result, and
+  alias/provider/adapter embedding-capability enforcement at admission and dispatch. AGV2-029V
+  closed three narrow gaps: strict provider index integrity, omitted-vs-explicit-null semantics, and
+  the bounded input cardinality. Official Python (`openai==2.54.0`) and JS (`openai@7.32.0`) SDK
+  proofs green, including the mandatory JS default-base64 decode path. No migration (head `0017`).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
 - All four required remote workflows are `completed/success` on the final `origin/v2` SHA (recorded
   below); feature PR **#3** (`v2` -> `main`) is open/unmerged.
+
+## AGV2-029V — Embeddings verification closure (index integrity, null semantics, bounded inputs)
+
+### Independent-review findings (all three closed)
+1. **Provider index integrity.** The LiteLLM embedding adapter read each provider `index` and
+   checked only that the entry count equalled the input count, then sorted by index. Malformed
+   indexes (`[0,0]`, `[1,1]`, `[1,2]` for two inputs, negative/out-of-range) could survive the count
+   check and be silently renumbered by the public API, corrupting input → vector correspondence.
+2. **Optional does not mean nullable.** The request DTO treated explicit JSON `null` for the pinned
+   optional-but-non-nullable fields as omission: `"encoding_format": null` silently defaulted to
+   `float`, and `dimensions`/`user` null bypassed the required `unsupported_feature` rejection.
+3. **Unbounded input cardinality.** `_normalize_embedding_input` accepted any-length `list[str]`;
+   only the general queue payload byte bound constrained it.
+
+### Provider index policy (adapter boundary, `src/aethergate/adapters/litellm.py`)
+Provider entries may arrive in any order. Each `index` must be a genuine Python `int` (bool, float,
+numeric string, `None`, and missing keys are malformed), and after sorting the index sequence must
+equal exactly `0, 1, …, len(inputs)-1`. Duplicates, gaps, negative indexes, and out-of-range indexes
+are rejected with a safe `ProviderError` (no vectors or input text in the message) instead of being
+silently renumbered. Wrong-count, non-finite, and malformed-vector rejections are unchanged.
+
+### Optional vs explicit-null semantics (pinned evidence)
+Pinned: Python `openai==2.54.0` `EmbeddingCreateParams` is `total=False` (`dimensions: int`,
+`encoding_format: Literal["float","base64"]`, `user: str`); JS `openai@7.32.0` uses `?` without
+`| null`. So optional ≠ nullable. `EmbeddingCreateRequest` now uses a `model_validator(mode="before")`
+to distinguish key absence from explicit `null`:
+
+- `encoding_format` omitted — accepted (server default `float`, unchanged);
+- `encoding_format` `"float"` / `"base64"` — accepted;
+- `encoding_format: null` — rejected `400 invalid_request` (never silently defaults to `float`);
+- `dimensions` omitted — accepted as omission;
+- `dimensions` present with any value, **including `null`** — rejected `400 unsupported_feature`;
+- `user` omitted — accepted as omission;
+- `user` present with any value, **including `null`** — rejected `400 unsupported_feature`.
+
+Unknown additive-field tolerance and transport-control handling are unchanged. A rejected request is
+rejected before durable enqueue and never dispatches upstream.
+
+### Bounded embedding input cardinality
+Maximum: **2048 inputs per request**, as the explicit constant
+`MAX_EMBEDDING_INPUTS = 2048` in `src/aethergate/contracts/embeddings.py`.
+Compatibility source: the pinned upstream OpenAI OpenAPI reference
+(`docs/contracts/openai-compatibility-baseline.md`, commit
+`f7bc81b7f30e834bbdb6bcc3370903e49fe7e5b1`), schema `CreateEmbeddingRequest.input`, whose array forms
+declare `minItems: 1` / `maxItems: 2048`. This is the provider-neutral, OpenAI-compatible
+request-shape bound (deliberately not an Ollama-specific limit). It is enforced in
+`to_canonical_inputs()` before durable enqueue: a single string is one input, a list of exactly 2048
+succeeds, 2049 returns `400 invalid_request`. The separate `AETHERGATE_MAX_QUEUE_PAYLOAD_BYTES`
+limit is retained as an independent safety bound.
+
+### Focused tests
+- `tests/test_adapter.py`: valid in-order accepted; out-of-order `[1,0]` restored to input order;
+  duplicate / negative / out-of-range(gapped) / non-integer (`None`/`"1"`/`1.5`/`True`) indexes
+  rejected; index error message contains neither input text nor vector values; existing
+  wrong-count / non-finite / malformed-vector cases still rejected.
+- `tests/test_embeddings_contract.py`: encoding omitted/`float`/`base64` accepted; `encoding_format:
+  null` rejected `InvalidRequest`; `dimensions`/`user` rejected for `null` as well as values; omitted
+  dimensions/user accepted; input count at 2048 accepted and 2049 rejected.
+- `tests/test_embeddings_api.py`: `encoding_format: null`, `dimensions: null`, `user: null`, and
+  count 2049 all return structured 400 with **no dispatch** (`embed_calls == 0`); count exactly 2048
+  succeeds end-to-end.
+- New focused tests were verified to fail against the pre-fix behavior; a forced-ordering probe
+  proved the provider backstop and transaction-abort interactions where relevant.
+
+### Full regression counts (AGV2-029V)
+- backend: **758 passed / 758 collected** via the canonical `scripts/dev/v2 test` (baseline 734 +
+  24 new focused tests); `ruff check src tests` clean.
+- frontend unit/component: **89 passed** (22 files, unchanged).
+- full Playwright: **32 passed / 6 skipped** (CI-only `alpha-golden.spec.ts`), run locally against
+  the dev stack (web console served on loopback 8081 because loopback 8080 is held by an unrelated
+  local service; this is environmental only).
+- offline golden path (`scripts/ci/golden_path.py` main + backup + restore + post-restore on a
+  disposable fake-Ollama stack): all `ok`, including `sdk_embedding`, `sdk_embedding_multi`,
+  `sdk_embedding_base64`, and the `dimensions`/`user`/token-id/text-only `400` embeddings cases; the
+  official JS SDK smoke reported all Models + Chat + Responses + Embeddings checks `ok`.
+- `npm run build` / `npm run lint` / `npx tsc -b --noEmit` clean; OpenAPI/client regeneration run
+  twice produced zero diff; `git diff --check` clean; `scripts/ci/secret_scan.sh` clean;
+  `no_legacy_v1.sh` + `--self-test` clean; migrations empty -> `0017` and populated `0016 -> 0017`;
+  `config_check` clean (all within the 758 backend suite plus targeted runs).
+
+### Unrelated CI root-cause (not an embeddings change)
+The first push on `e8b763a` had a red `backend` workflow:
+`test_accounting_admin.py::test_concurrent_price_policy_enable_race` intermittently raised
+`InvalidRequestError: Can't operate on closed transaction` after the price-policy partial unique
+index backstop aborted the loser's transaction. Root cause: the race tests caught
+`PricePolicyConflictError` *inside* `async with session.begin()`, so the context manager attempted to
+commit the already-aborted transaction. Fixed in `d32c8db` by catching the domain error outside
+`session.begin()` (repository conflict translation unchanged); a deterministic forced-ordering probe
+confirmed the backstop/abort behaviour. No embeddings code was involved.
+
+### Migration / OpenAPI
+- No migration; head remains `0017`; `0001`–`0017` untouched.
+- Request-schema/validator changes did not alter generated OpenAPI; two consecutive generations
+  produced zero diff for `frontend/src/generated/openapi.json` and `schema.d.ts`.
+
+### Final remote CI (AGV2-029V)
+Substantive code/test SHA `d32c8dbe0c4d0ce20ff2a9455d9e1f63e43c4f51`; all four required push-event
+workflows are `completed/success`:
+- backend — run `38256553204`
+- frontend — run `38256553189`
+- alpha-golden-path — run `38256553253`
+- schema-secret-gate — run `38256553198`
+
+The final `origin/v2` tip (this documentation-only handoff commit) is independently verified green
+on all four workflows; its exact SHA and four exact-SHA workflow IDs are recorded in PR #3's
+description.
+
+### Feature PR
+PR **#3** (`v2` -> `main`): open, **unmerged**, `mergeable`; head tracks the AGV2-029V final
+`origin/v2` SHA. Its description records this closure (three review findings), the exact final SHA,
+and the four exact-SHA workflow IDs.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-029V`, `branch=v2`, UTC start timestamp) created as the first local
+action, kept for the whole task, and removed only after all criteria were green, the handoff
+committed, commits pushed to `origin/v2`, final remote CI verified green, and PR #3 updated. Never
+staged/committed/pushed (gitignored).
+
+### Recommended next step
+**Merge PR #3 (`v2` -> `main`) through the reviewed/user-authorized process.**
 
 ## AGV2-029 — OpenAI Embeddings API through the durable scheduler/accounting authority
 
