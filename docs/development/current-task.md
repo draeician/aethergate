@@ -69,6 +69,43 @@ Current green baseline:
 
 This task begins Beta hardening. It is deliberately security-focused and does NOT declare Beta 1 complete.
 
+## 0. Required preflight - OIDC browser-login race before security implementation
+
+This task branch is the replacement for the historical `v2` queue. The historical
+`v2` branch remains available for audit; it is **not** a development base.
+AGV2-030 production security implementation must not begin until this narrow
+golden-path blocker is investigated, corrected, and verified.
+
+Evidence from the 2026-10-12 docs-only `v2` run:
+- `alpha-golden-path` run `38263913698` failed in the **second** Playwright
+  test, `catalog route to the fake Ollama upstream exists`, before its actual
+  catalog assertion: `loginAs()` timed out at the Dashboard heading.
+- The **first** OIDC login/dashboard browser test passed. Four subsequent
+  browser tests passed, as did earlier SDK, backup/restore, and smoke phases.
+- During the failed second login (about 14:38:42 UTC), nginx showed
+  `GET /admin/v1/auth/session -> 401`, but no subsequent request for
+  `/admin/v1/auth/oidc/login`. Later tests did make that redirect successfully.
+- `frontend/e2e/fixtures.ts:loginAs` calls `page.goto("/")` and immediately
+  uses `link.isVisible()`, which can return false while the client is still
+  discovering that the session is unauthenticated; the helper then waits
+  for Dashboard without ever clicking sign-in. This is a **supported race
+  hypothesis**, not yet a verified fix.
+- The later exact-SHA handoff run `38312457044` passed, along with backend
+  `38312457242`, frontend `38312457133`, and schema-secret
+  `38312457067` on `b715f780573b43d4046ddfbb6a6979c7fa368826`.
+  The earlier red run remains an observed defect, not "flaky" by decree.
+
+**Preflight action for the implementer:** preserve the first-local-action
+`.aethergate-wip` protocol; reproduce the suspect authentication loading
+transition deterministically (delay the session/auth-state response or use an
+equivalent controlled fixture), inspect safe test artifacts, and fix only the
+login readiness race if confirmed. Wait until either an authenticated Dashboard
+or a visible OIDC sign-in link appears; never silently skip the click based on
+an immediate visibility poll. Add a focused regression proof and require all
+four offline PR CI workflows green on the exact corrected head before beginning
+provider-secret/egress changes. If evidence instead reveals another root cause,
+fix that cause and document it. No timeout inflation or rerun-only disposition.
+
 ## Why This Task Exists
 
 Independent architectural review of the current canonical main found two explicit production-boundary
