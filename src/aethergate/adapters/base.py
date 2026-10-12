@@ -96,6 +96,31 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class EmbeddingRequest:
+    """A fully resolved upstream embedding request.
+
+    ``inputs`` are ordered, non-empty text strings in client order. ``base_destination``
+    and ``secret`` are only ever derived from persisted administrator-controlled
+    configuration and the trusted secret resolver.
+    """
+
+    provider_kind: str
+    base_destination: str
+    upstream_model: str
+    inputs: tuple[str, ...]
+    timeout_seconds: float = 120.0
+
+
+@dataclass(frozen=True)
+class EmbeddingResult:
+    """A validated upstream embedding result (ordered numeric vectors)."""
+
+    vectors: tuple[tuple[float, ...], ...]
+    usage: Usage
+    upstream_request_id: str | None
+
+
+@dataclass(frozen=True)
 class CompletionResult:
     content: str
     finish_reason: str | None
@@ -119,6 +144,10 @@ class ChatAdapter(Protocol):
     def stream(
         self, request: ChatRequest, secret: str | None
     ) -> AsyncIterator[StreamChunk]: ...
+
+    async def embed(
+        self, request: EmbeddingRequest, secret: str | None
+    ) -> EmbeddingResult: ...
 
     def estimate_input_tokens(self, request: ChatRequest) -> int | None:
         """Return a conservative upper bound on input tokens, or ``None``.

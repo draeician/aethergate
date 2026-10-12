@@ -1,9 +1,10 @@
 """Deterministic, test-only Ollama-compatible upstream client.
 
 This helper starts a real local HTTP server that speaks the minimum Ollama
-``/api/chat`` surface consumed by the pinned LiteLLM ollama adapter, so the
-**real** AetherGate scheduler + adapter transport can be exercised fully offline
-(no Internet, no model download, no provider credentials).
+``/api/chat`` and ``/api/embed`` surfaces consumed by the pinned LiteLLM ollama
+adapter, so the **real** AetherGate scheduler + adapter transport can be
+exercised fully offline (no Internet, no model download, no provider
+credentials).
 
 It is strictly test/CI tooling:
 
@@ -19,6 +20,7 @@ The fixture supports:
 - deterministic streaming with several chunks;
 - deterministic upstream request ID;
 - usage metadata (``prompt_eval_count``/``eval_count``);
+- deterministic ordered embedding vectors via ``/api/embed``;
 - configurable delay (for queue/concurrency tests);
 - configurable status failure (e.g. 404, 429, and other provider errors).
 """
@@ -67,6 +69,18 @@ class FakeOllamaConfig:
     last_image_count: int = 0
     last_image_byte_lengths: tuple[int, ...] = field(default_factory=tuple)
     image_request_count: int = 0
+
+    # Embedding transport (``/api/embed``). Only safe counts/metadata are
+    # recorded; never input text or vector contents.
+    embedding_dimension: int = 3
+    embedding_prompt_tokens: int = 5
+    # Failure injection for the embedding transport.
+    embedding_wrong_count: bool = False
+    embedding_non_finite: bool = False
+    embedding_malformed: bool = False
+
+    embedding_request_count: int = 0
+    last_embedding_input_count: int | None = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -125,6 +139,8 @@ class _Handler(BaseHTTPRequestHandler):
             mode = "chat"
         elif path == "/api/generate":
             mode = "generate"
+        elif path == "/api/embed":
+            mode = "embed"
         else:
             self._send_json(404, {"error": "not found"})
             return
@@ -139,7 +155,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         self._maybe_delay()
-        if stream:
+        if mode == "embed":
+            self._embed_response(body)
+        elif stream:
             self._stream_response(mode)
         else:
             self._non_stream_response(mode)
@@ -187,6 +205,42 @@ class _Handler(BaseHTTPRequestHandler):
         if mode == "chat":
             return {"message": {"role": "assistant", "content": text}}
         return {"response": text}
+
+    def _embed_response(self, body: dict[str, Any]) -> None:
+        """Emit a deterministic ``/api/embed`` response (Ollama shape).
+
+        The pinned LiteLLM ollama embedding transport POSTs ``{"model", "input"}``
+        to ``{base_url}/api/embed`` and reads ``{"embeddings": [...],
+        "prompt_eval_count": <int>}``. Vectors are ordered and distinguishable by
+        input position so order/count preservation is observable. Only safe counts
+        are recorded; input text and vector contents are never persisted/logged.
+        """
+        config = self.config
+        config.embedding_request_count += 1
+        raw_input = body.get("input")
+        input_count = len(raw_input) if isinstance(raw_input, list) else 0
+        config.last_embedding_input_count = input_count
+
+        if config.embedding_malformed:
+            self._send_json(200, {"embeddings": "not-a-list"})
+            return
+
+        count = input_count + 1 if config.embedding_wrong_count else input_count
+        dim = config.embedding_dimension
+        vectors: list[list[float]] = []
+        for index in range(count):
+            if config.embedding_non_finite:
+                vector: list[float] = [float("inf")] * dim
+            else:
+                vector = [float(index + 1)] * dim
+            vectors.append(vector)
+        self._send_json(
+            200,
+            {
+                "embeddings": vectors,
+                "prompt_eval_count": config.embedding_prompt_tokens,
+            },
+        )
 
     def _non_stream_response(self, mode: str) -> None:
         config = self.config

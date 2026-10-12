@@ -68,7 +68,11 @@ from aethergate.errors import (
 )
 from aethergate.identity import service as identity_service
 from aethergate.inference.images import enforce_request_image_limits
-from aethergate.inference.service import InferenceService, PreparedDispatch
+from aethergate.inference.service import (
+    InferenceService,
+    PreparedDispatch,
+    PreparedEmbeddingDispatch,
+)
 from aethergate.logging_config import log_event
 from aethergate.persistence import models
 from aethergate.scheduler import repository as scheduler_repository
@@ -217,6 +221,80 @@ def deserialize_result(data: bytes) -> dict:
     return json.loads(data.decode("utf-8"))
 
 
+# --- operation-aware encrypted payload --------------------------------------
+#
+# The durable scheduler payload is operation-aware. Chat payloads keep their
+# legacy shape (no ``operation`` discriminator), so every pre-AGV2-029 payload —
+# text-only and multimodal alike — deserializes as chat. Embedding payloads carry
+# an ``"operation": "embedding"`` discriminator inside the encrypted envelope;
+# the discriminator is never a plaintext DB column.
+
+
+@dataclass(frozen=True)
+class QueuedPayload:
+    """A decrypted, operation-aware scheduler payload.
+
+    Exactly one of ``messages``/``params`` (chat) or ``embedding_inputs``
+    (embedding) is populated, according to ``operation``.
+    """
+
+    operation: str
+    messages: list[Message] | None = None
+    params: GenerationParams | None = None
+    embedding_inputs: tuple[str, ...] | None = None
+
+
+def serialize_embedding_payload(inputs: tuple[str, ...]) -> bytes:
+    """Serialize an ordered embedding input list into an encrypted payload."""
+    data = {"operation": "embedding", "inputs": list(inputs)}
+    return json.dumps(data).encode("utf-8")
+
+
+def deserialize_payload(data: bytes) -> QueuedPayload:
+    """Deserialize an encrypted payload into a typed operation-aware variant.
+
+    A payload with ``operation == "embedding"`` deserializes to an embedding
+    payload; any other (including legacy chat payloads with no discriminator)
+    deserializes as chat.
+    """
+    obj = json.loads(data.decode("utf-8"))
+    if obj.get("operation") == "embedding":
+        raw_inputs = obj.get("inputs")
+        if not isinstance(raw_inputs, list) or not all(
+            isinstance(item, str) for item in raw_inputs
+        ):
+            raise ValueError("malformed embedding inputs in scheduler payload")
+        return QueuedPayload(operation="embedding", embedding_inputs=tuple(raw_inputs))
+    messages, params = deserialize_chat_payload(data)
+    return QueuedPayload(operation="chat", messages=messages, params=params)
+
+
+def serialize_embedding_result(
+    vectors: list[list[float]],
+    usage: Usage,
+    upstream_request_id: str | None,
+) -> bytes:
+    """Serialize an embedding result (vectors stay inside the encrypted envelope)."""
+    data = {
+        "operation": "embedding",
+        "embeddings": vectors,
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+        },
+        "upstream_request_id": upstream_request_id,
+    }
+    return json.dumps(data).encode("utf-8")
+
+
+def deserialize_embedding_result(data: bytes) -> dict:
+    obj = json.loads(data.decode("utf-8"))
+    if obj.get("operation") != "embedding":
+        raise ValueError("result is not an embedding result")
+    return obj
+
+
 def serialize_event(
     content: str | None, finish_reason: str | None, usage: Usage | None
 ) -> bytes:
@@ -263,6 +341,15 @@ class TerminalResult:
 
 
 @dataclass(frozen=True)
+class EmbeddingTerminalResult:
+    state: str
+    vectors: list[list[float]] | None
+    usage: Usage | None
+    upstream_request_id: str | None
+    error_code: str | None
+
+
+@dataclass(frozen=True)
 class ClaimedWork:
     request_id: str
     attempt_id: str
@@ -272,7 +359,8 @@ class ClaimedWork:
     endpoint_id: str
     public_alias: str
     stream: bool
-    prepared: PreparedDispatch
+    operation: str
+    prepared: PreparedDispatch | PreparedEmbeddingDispatch
     quota_group_id: str | None = None
 
 
@@ -334,6 +422,28 @@ def _enforce_image_capability(resolved: ResolvedRoute, messages: list[Message]) 
     if Capability.IMAGE not in resolved.provider.capabilities:
         raise ResourceInactive(
             "provider image capability", str(resolved.provider.id)
+        )
+
+
+def _enforce_embedding_capability(
+    resolved: ResolvedRoute, adapter_supports_embedding: bool
+) -> None:
+    """Require embedding capability on the alias, provider, and adapter.
+
+    An embedding request must be routed to a public ModelAlias and Provider that
+    both advertise ``Capability.EMBEDDING``, and the selected adapter must
+    actually implement embedding. There is no fallback to a text/image-only
+    route, and embedding capability is never inferred from provider kind.
+    """
+    if Capability.EMBEDDING not in resolved.alias.capabilities:
+        raise ResourceInactive("model alias embedding capability", resolved.alias.name)
+    if Capability.EMBEDDING not in resolved.provider.capabilities:
+        raise ResourceInactive(
+            "provider embedding capability", str(resolved.provider.id)
+        )
+    if not adapter_supports_embedding:
+        raise ResourceInactive(
+            "adapter embedding capability", resolved.provider.kind
         )
 
 
@@ -508,12 +618,48 @@ class SchedulingService:
             resolved = await resolve_model_alias(session, alias_name)
             self._inference.validate_destination(resolved)
             _enforce_image_capability(resolved, messages)
+            serialized = serialize_chat_payload(messages, params)
             request_id, queue_wait_until, expires_at = await self._enqueue(
                 session,
                 resolved=resolved,
-                messages=messages,
-                params=params,
+                serialized=serialized,
                 stream=stream,
+                project_id=project_id,
+                principal_id=principal_id,
+                api_credential_id=api_credential_id,
+            )
+            await session.commit()
+        return EnqueuedRequest(
+            request_id=request_id,
+            endpoint_id=resolved.endpoint.id,
+            alias_name=alias_name,
+            queue_wait_until=queue_wait_until,
+            expires_at=expires_at,
+        )
+
+    async def admit_embedding_and_enqueue(
+        self,
+        *,
+        alias_name: str,
+        inputs: tuple[str, ...],
+        context: RequestContext,
+    ) -> EnqueuedRequest:
+        """Validate/resolve an embedding request, then enqueue it durably."""
+        project_id = context.project_id
+        principal_id = context.principal_id
+        api_credential_id = context.api_credential_id
+        async with self._session_factory() as session:
+            resolved = await resolve_model_alias(session, alias_name)
+            self._inference.validate_destination(resolved)
+            _enforce_embedding_capability(
+                resolved, self._inference.supports_embedding(resolved)
+            )
+            serialized = serialize_embedding_payload(inputs)
+            request_id, queue_wait_until, expires_at = await self._enqueue(
+                session,
+                resolved=resolved,
+                serialized=serialized,
+                stream=False,
                 project_id=project_id,
                 principal_id=principal_id,
                 api_credential_id=api_credential_id,
@@ -566,6 +712,47 @@ class SchedulingService:
             await asyncio.sleep(self._settings.scheduler_poll_interval_seconds)
         await self.request_cancellation(request_id)
         return TerminalResult(RequestState.EXPIRED, None, None, None, None, "timeout")
+
+    async def wait_for_terminal_embedding(
+        self, request_id: str, deadline: datetime
+    ) -> EmbeddingTerminalResult:
+        """Poll until an embedding request reaches a terminal state or ``deadline``.
+
+        Mirrors :meth:`wait_for_terminal` but exposes an unambiguous typed result:
+        ordered numeric vectors (never chat content) plus usage. Vectors are read
+        only from the encrypted result envelope and never logged.
+        """
+        while utcnow() < deadline:
+            async with self._session_factory() as session:
+                row = await scheduler_repository.get_request(session, request_id)
+            if row is None:
+                return EmbeddingTerminalResult(
+                    RequestState.EXPIRED, None, None, None, "not_found"
+                )
+            if row.state in TERMINAL_STATES:
+                vectors: list[list[float]] | None = None
+                usage: Usage | None = None
+                upstream_request_id = None
+                if row.result_encrypted is not None:
+                    data = deserialize_embedding_result(
+                        self._encryptor.decrypt(row.result_encrypted)
+                    )
+                    vectors = data.get("embeddings")
+                    upstream_request_id = data.get("upstream_request_id")
+                    raw_usage = data.get("usage") or {}
+                    usage = Usage(**raw_usage)
+                return EmbeddingTerminalResult(
+                    row.state,
+                    vectors,
+                    usage,
+                    upstream_request_id,
+                    row.error_code,
+                )
+            await asyncio.sleep(self._settings.scheduler_poll_interval_seconds)
+        await self.request_cancellation(request_id)
+        return EmbeddingTerminalResult(
+            RequestState.EXPIRED, None, None, None, "timeout"
+        )
 
     @property
     def poll_interval(self) -> float:
@@ -806,14 +993,19 @@ class SchedulingService:
                     return "processed"
 
                 resolved_endpoint_id = resolved.endpoint.id
-                messages, params = deserialize_chat_payload(
+                payload = deserialize_payload(
                     self._encryptor.decrypt(request.payload_encrypted)
                 )
-                # Re-enforce image capability at dispatch time: capability may
-                # have been revoked while the request was queued, and an image
-                # request must never reach a text-only route.
+                # Re-enforce operation capability at dispatch time: capability may
+                # have been revoked while the request was queued, and an image or
+                # embedding request must never reach a non-capable route.
                 try:
-                    _enforce_image_capability(resolved, messages)
+                    if payload.operation == "embedding":
+                        _enforce_embedding_capability(
+                            resolved, self._inference.supports_embedding(resolved)
+                        )
+                    else:
+                        _enforce_image_capability(resolved, payload.messages or [])
                 except DomainError:
                     await scheduler_repository.fail_request_direct(
                         session,
@@ -823,7 +1015,7 @@ class SchedulingService:
                         finished_at=now,
                     )
                     logger.info(
-                        "request=%s failed image capability revalidation", request_id
+                        "request=%s failed capability revalidation", request_id
                     )
                     return "processed"
                 effective_group_id = (
@@ -836,8 +1028,7 @@ class SchedulingService:
                     session,
                     resolved=resolved,
                     project_id=request.project_id,
-                    messages=messages,
-                    params=params,
+                    payload=payload,
                     now=now,
                 )
                 if budget_eval.outcome == "too_large":
@@ -885,8 +1076,7 @@ class SchedulingService:
                         session,
                         resolved=resolved,
                         quota_group_id=effective_group_id,
-                        messages=messages,
-                        params=params,
+                        payload=payload,
                         now=now,
                     )
                     if quota_eval.outcome == "too_large":
@@ -1078,9 +1268,18 @@ class SchedulingService:
                     )
 
         async with self._session_factory() as session:
-            prepared = await self._inference.prepare_from_resolved(
-                session, resolved, messages, params
-            )
+            if payload.operation == "embedding":
+                assert payload.embedding_inputs is not None
+                prepared: PreparedDispatch | PreparedEmbeddingDispatch = (
+                    await self._inference.prepare_embedding_from_resolved(
+                        session, resolved, payload.embedding_inputs
+                    )
+                )
+            else:
+                assert payload.messages is not None and payload.params is not None
+                prepared = await self._inference.prepare_from_resolved(
+                    session, resolved, payload.messages, payload.params
+                )
 
         return ClaimedWork(
             request_id=request_id,
@@ -1091,9 +1290,37 @@ class SchedulingService:
             endpoint_id=resolved_endpoint_id,
             public_alias=public_alias,
             stream=stream,
+            operation=payload.operation,
             prepared=prepared,
             quota_group_id=effective_group_id,
         )
+
+    def _token_plan(
+        self, resolved: ResolvedRoute, payload: QueuedPayload
+    ) -> tuple[int | None, int | None]:
+        """Return ``(input_estimate, output_bound)`` for token reservation.
+
+        Embedding requests reserve summed input tokens with a zero output bound
+        (never a chat max-output/default-output requirement); the estimator is
+        unavailable for the pinned transport, so an enforced token limit fails
+        closed. Chat requests keep the existing input + output-bound reservation.
+        """
+        if payload.operation == "embedding":
+            assert payload.embedding_inputs is not None
+            return (
+                self._inference.estimate_embedding_tokens(
+                    resolved, payload.embedding_inputs
+                ),
+                0,
+            )
+        assert payload.messages is not None and payload.params is not None
+        input_estimate = self._inference.estimate_tokens(
+            resolved, payload.messages, payload.params
+        )
+        output_bound = payload.params.max_tokens
+        if output_bound is None:
+            output_bound = resolved.route_binding.default_output_tokens
+        return input_estimate, output_bound
 
     async def _evaluate_quota(
         self,
@@ -1101,8 +1328,7 @@ class SchedulingService:
         *,
         resolved: ResolvedRoute,
         quota_group_id: str,
-        messages: list[Message],
-        params: GenerationParams,
+        payload: QueuedPayload,
         now: datetime,
     ) -> _QuotaEvaluation:
         """Evaluate (lock, never mutate) a request's shared-quota constraints.
@@ -1129,12 +1355,9 @@ class SchedulingService:
         requested: dict[str, int] = {}
         token_units = 0
         if has_token:
-            input_estimate = self._inference.estimate_tokens(resolved, messages, params)
+            input_estimate, output_bound = self._token_plan(resolved, payload)
             if input_estimate is None:
                 return _QuotaEvaluation(outcome="estimator_unavailable")
-            output_bound = params.max_tokens
-            if output_bound is None:
-                output_bound = resolved.route_binding.default_output_tokens
             if output_bound is None:
                 return _QuotaEvaluation(outcome="unbounded_output")
             token_units = input_estimate + output_bound
@@ -1159,8 +1382,7 @@ class SchedulingService:
         *,
         resolved: ResolvedRoute,
         project_id: str | None,
-        messages: list[Message],
-        params: GenerationParams,
+        payload: QueuedPayload,
         now: datetime,
     ) -> _BudgetEvaluation:
         """Evaluate (lock, never mutate) a request's monetary budget constraints.
@@ -1169,7 +1391,8 @@ class SchedulingService:
         a locked price policy and locked budget windows otherwise. Token-priced
         routes with an active budget fail closed when the token estimator is
         unavailable or no output bound exists, because a monetary reservation
-        cannot be computed without them.
+        cannot be computed without them. Embedding requests fail closed on
+        token-priced budgets for the same reason (estimator unavailable).
         """
         if project_id is None:
             return _BudgetEvaluation(outcome="none")
@@ -1194,14 +1417,11 @@ class SchedulingService:
         input_units: int | None = None
         output_units: int | None = None
         if price_policy.billing_unit == BillingUnit.TOKEN.value:
-            input_estimate = self._inference.estimate_tokens(resolved, messages, params)
+            input_estimate, output_bound = self._token_plan(resolved, payload)
             if input_estimate is None:
                 return _BudgetEvaluation(
                     outcome="estimator_unavailable", price_policy=price_policy
                 )
-            output_bound = params.max_tokens
-            if output_bound is None:
-                output_bound = resolved.route_binding.default_output_tokens
             if output_bound is None:
                 return _BudgetEvaluation(
                     outcome="unbounded_output", price_policy=price_policy
@@ -1285,6 +1505,28 @@ class SchedulingService:
         """Dispatch a non-streaming completion and settle, renewing its lease."""
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
         try:
+            if claim.operation == "embedding":
+                embedding = await claim.prepared.adapter.embed(
+                    claim.prepared.request, claim.prepared.secret
+                )
+                if await self.is_cancelled(claim.request_id):
+                    await self._settle(claim, state=RequestState.CANCELLED)
+                    return
+                result_encrypted = self._encryptor.encrypt(
+                    serialize_embedding_result(
+                        embedding.vectors,
+                        embedding.usage,
+                        embedding.upstream_request_id,
+                    )
+                )
+                await self._settle(
+                    claim,
+                    state=RequestState.SUCCEEDED,
+                    result_encrypted=result_encrypted,
+                    upstream_request_id=embedding.upstream_request_id,
+                    usage=embedding.usage,
+                )
+                return
             result = await claim.prepared.adapter.complete(
                 claim.prepared.request, claim.prepared.secret
             )
@@ -1610,8 +1852,7 @@ class SchedulingService:
         session: AsyncSession,
         *,
         resolved: ResolvedRoute,
-        messages: list[Message],
-        params: GenerationParams,
+        serialized: bytes,
         stream: bool,
         project_id: ProjectId,
         principal_id: PrincipalId,
@@ -1624,7 +1865,6 @@ class SchedulingService:
         if queued >= self._settings.queue_max_requests:
             raise QueueFull("the inference queue is at capacity")
 
-        serialized = serialize_chat_payload(messages, params)
         if len(serialized) > self._settings.max_queue_payload_bytes:
             raise PayloadTooLarge()
         payload = self._encryptor.encrypt(serialized)
