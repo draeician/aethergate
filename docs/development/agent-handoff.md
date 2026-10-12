@@ -1,3 +1,45 @@
+# Resume checkpoint — 2026-10-12
+
+- Repository: `draeician/aethergate`; default/canonical branch: `main`.
+- Core OpenAI surface is merged to `main`: Models, Chat Completions text+inline vision, Responses
+  text+inline vision subset, and Embeddings.
+- PR #1, #2, and #3 are merged. Latest merge: PR #3 -> `main` at
+  `7c47cd8575dc96265c02e17333ee88bda920de99`.
+- Exact post-merge `main` CI is green:
+  backend `38263020817`, frontend `38263020743`,
+  schema-secret-gate `38263020802`, alpha-golden-path `38263020770`.
+- Migration head remains `0017`.
+- AGV2-030 (Beta 1 security foundation: production provider-secret backend + egress
+  DNS/redirect closure) is queued but **has not started**.
+- Important workflow issue: the operator explicitly flagged that OpenCode still reports branch
+  `v2` after the v2 cutover. The long-lived `v2` development-branch name is now historical and
+  must be normalized before AGV2-030 is dispatched. Do not silently choose the replacement policy;
+  ask the operator whether to use a neutral long-lived development branch or per-task branches from
+  `main`, then update `current-task.md`/agent prompts accordingly.
+- At the pre-checkpoint state, `v2` was `df6ac9ec8e6a218ab214ebb93f268f0f4038b2d9`: a docs-only
+  AGV2-030 queue commit based on the former feature branch. It is not the canonical product base and
+  is behind the merged `main` history.
+- That docs-only `v2` queue SHA had backend/frontend/schema-secret-gate green but
+  alpha-golden-path `38263913698` failed at the browser OIDC login/dashboard assertion. All earlier
+  golden-path phases (setup, SDK, backup/restore, post-restore, JS SDK smoke) succeeded. Per the
+  project rule, this red gate is a real defect until root-caused; do not dismiss it as flaky.
+- Canonical communication files remain `AGENTS.md`, `project_spec.md`,
+  `docs/development/current-task.md`, and `docs/development/agent-handoff.md`.
+- Architect/reviewer workflow remains: implementation agent reads repo instructions/task/handoff,
+  implements fully, updates handoff, commits/pushes to the authorized development branch, and
+  satisfies exact-SHA CI. When the operator says `done`, ChatGPT independently inspects the remote
+  branch, actual changed code/tests, handoff, commits, PRs, and exact-SHA CI before PASS/FAIL.
+- WIP marker protocol remains mandatory: `.aethergate-wip` is the first local repository action for
+  an active task, contains only task/branch/UTC start, is gitignored, is never staged/committed/pushed,
+  stays present while incomplete, and is removed only after all completion criteria and remote
+  verification are green.
+- Never push directly to `main` without explicit user authorization. Merges to `main` require
+  reviewed PR/head-SHA verification and post-merge CI verification.
+- Next action: resolve the development-branch policy and the queued-branch red golden-path state,
+  then dispatch AGV2-030 from canonical `main` under the corrected branch policy.
+
+---
+
 # AetherGate Agent Handoff
 
 ## Current State
