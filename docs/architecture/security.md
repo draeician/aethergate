@@ -297,6 +297,30 @@ or token in browser storage, and it never calls legacy `/admin/*` endpoints.
 - Existing random client API keys may remain hash-verified; password hashing is not automatically
   required for high-entropy random tokens. (Direction)
 
+### Production provider-secret backend (AGV2-030)
+
+Provider credential material is never persisted in PostgreSQL. The trusted runtime resolves a
+`SecretRef` through `build_secret_resolver(settings)`, the single factory used by both the API and
+the worker:
+
+- `AETHERGATE_SECRET_BACKEND=env` resolves `AETHERGATE_SECRET_*` and is a **development/test
+  convenience only**; it is rejected in `prod` (fail closed at runtime construction, and reported
+  INVALID by `python -m aethergate.config_check`).
+- `AETHERGATE_SECRET_BACKEND=file` resolves read-only externally projected secrets from
+  `AETHERGATE_SECRET_DIRECTORY` (Docker/Kubernetes projected secrets, systemd credentials, or an
+  operator-managed read-only mount; production example `/run/secrets/aethergate-provider`).
+- `FileSecretResolver` uses the stable opaque `SecretRef.id` as the filename (never the
+  user-controlled display name), so names cannot become path-traversal primitives. Safety:
+  absolute root; the resolved target must stay inside the root (rejects traversal and symlink
+  escape, permits in-root symlinks for rotation-style projections); regular files only; a 64 KiB
+  bound; UTF-8 only, no NUL, non-empty; exactly one trailing `LF`/`CRLF` removed (arbitrary
+  whitespace preserved). Errors carry only safe `SecretRef` metadata, never file contents.
+- There is **no implicit fallback**: a file-backend deployment never consults `AETHERGATE_SECRET_*`,
+  and a `prod` deployment never falls back to env. Direct unit tests may still instantiate
+  `EnvSecretResolver` explicitly, but no client request or database row selects a resolver.
+- Secret resolution runs only **after** the resolved route's destination has passed dispatch-time
+  egress validation, so a denied destination never receives provider credentials. (Settled — AGV2-030)
+
 ## Authorization strictness
 
 - Strict, standards-aware Bearer parsing; malformed and wrong-scheme headers fail predictably. (Settled — AG-020.)
@@ -344,6 +368,28 @@ the upstream provider request ID.
   signature), bounded by explicit count/byte/payload limits, and encrypted while queued. The adapter
   and worker never log image bytes/base64. (Settled — AGV2-028; see `docs/contracts/vision.md`.)
 
+### DNS-rebinding and redirect closure (AGV2-030)
+
+- **DNS rebinding.** The current supported production provider is Ollama on a private LAN. In
+  `prod`, `build_destination_policy` requires the configured upstream `base_destination` host to be
+  a **literal IPv4/IPv6 address**: the validated address is the connected address, so DNS cannot be
+  swapped between validation and connect. Authorized private-LAN literal IPs are allowed when
+  allowlisted (RFC1918 is not rejected generally). Production DNS-name upstreams remain disabled
+  until transport-level address pinning exists; dev/test may keep service DNS names for
+  deterministic Compose CI. There is no insecure "allow unsafe DNS" override.
+- **Redirect escape.** Empirically, pinned LiteLLM `1.104.0` creates its httpx clients with
+  `follow_redirects=True`, so a provider `3xx` could steer the client to another destination. The
+  LiteLLM adapter installs a redirect guard that forces `follow_redirects=False` on LiteLLM's HTTP
+  handlers (class + already-created/cached instances), so completion, streaming, and embedding
+  transports never contact a redirect target: every `301/302/303/307/308` surfaces as a safe
+  provider error, and the `Location` target is never requested. Proven with a real local HTTP
+  redirect fixture whose canary target records zero hits.
+- **Shared policy.** Endpoint catalog create/update, dev seeding, and dispatch-time route
+  preparation all use the same environment-aware `DestinationPolicy`, so a destination denied at
+  configuration time is never persisted and a route persisted under dev/test rules is still denied
+  at dispatch if the production policy requires a literal IP. Metadata/link-local literals remain
+  denied even if mistakenly allowlisted. (Settled — AGV2-030)
+
 ## Transport
 
 - TLS on management access, including LAN deployments; support a private management listener or
@@ -352,7 +398,9 @@ the upstream provider request ID.
 
 ## Deferred
 
-- Choice of secrets backend (KMS/HashiCorp Vault/envelope encryption library) — direction requires
-  "secrets service or envelope encryption with keys outside the DB", specific tooling deferred.
+- Cloud secret-manager integrations (KMS/HashiCorp Vault/AWS/GCP SDKs). The production boundary for
+  externally projected provider secrets is the read-only file backend (`AGV2-030`); a
+  cloud-secret-manager matrix and transport-level egress address pinning (which would allow
+  production DNS-name upstreams) remain future work.
 - Exact retention/redaction schedule for personal information and prompt content.
 - Whether password hashing is applied beyond high-entropy random tokens.

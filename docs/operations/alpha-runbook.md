@@ -89,8 +89,28 @@ python -m aethergate.config_check
 
 Exit 0 = valid; nonzero = invalid. It validates DB config, the queue key, rejects
 prod inference-auth bypass, checks OIDC prod issuer rules (https:// in prod),
-validates the bootstrap-token shape, and warns when the upstream allowlist is
-empty or optional features are disabled. It never prints secret values.
+validates the bootstrap-token shape, reports the provider-secret backend state,
+and warns when the upstream allowlist is empty or optional features are disabled.
+It never prints secret values.
+
+### Beta 1 security foundation (AGV2-030)
+
+- **Provider-secret backend.** For any deployment where provider credentials are
+  real, set `AETHERGATE_SECRET_BACKEND=file` and `AETHERGATE_SECRET_DIRECTORY` to
+  an absolute, read-only directory of per-`SecretRef.id` files (for example a
+  Kubernetes/Docker projected secret or systemd credential mount such as
+  `/run/secrets/aethergate-provider`). The `env` backend
+  (`AETHERGATE_SECRET_*`) is **dev/test only** and is rejected in `prod`. A file
+  backend never falls back to environment variables. Keep projection files
+  read-only; one trailing newline (shell/systemd/Kubernetes artifact) is ignored.
+- **Production egress / DNS.** In `prod`, the upstream allowlist entries must be
+  **literal IPv4/IPv6 addresses** (the validated address is the connected
+  address, so DNS rebinding cannot occur); production DNS-name upstreams remain
+  disabled until transport-level address pinning exists. Dev/test may keep
+  service DNS names. Provider HTTP redirects are never followed, so a `3xx`
+  cannot steer a request to another destination.
+- Run `python -m aethergate.config_check` before starting: prod + `env` backend
+  and a missing/non-absolute/unusable secret directory are reported INVALID.
 
 ## Clean install
 

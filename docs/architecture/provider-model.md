@@ -65,9 +65,14 @@ the invariants above at configuration time rather than only at dispatch:
   states are prevented at write time, not merely rejected by the runtime resolver.
 - `route_binding.provider_account_id` must match the endpoint's account and any attached quota group's
   account.
-- Endpoint destinations are egress-validated on create/update using the same `DestinationPolicy` as
-  dispatch, so an endpoint that dispatch would reject is never persisted.
-- `SecretRef` is metadata only; the production secret backend remains deferred.
+- Endpoint destinations are egress-validated on create/update using the same environment-aware
+  `DestinationPolicy` as dispatch, so an endpoint that dispatch would reject is never persisted.
+  In `prod` that policy requires a literal-IP host (DNS-name upstreams are disabled until
+  transport-level address pinning exists); dev/test may use service DNS names.
+- `SecretRef` is metadata only. Provider credentials resolve through the runtime secret-resolver
+  factory: `env` (`AETHERGATE_SECRET_*`) is a dev/test convenience rejected in `prod`, and
+  `file` projects read-only secrets from `AETHERGATE_SECRET_DIRECTORY`. See `security.md`
+  (AGV2-030). `EnvSecretResolver` is no longer the only runtime resolver.
 - Quota limit edits take effect on future admission without rewriting historical reservation/window
   rows.
 
