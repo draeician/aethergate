@@ -8,6 +8,7 @@ import pytest
 
 from aethergate.adapters.base import (
     ChatRequest,
+    EmbeddingRequest,
     GenerationParams,
     ImageContentPart,
     Message,
@@ -205,3 +206,98 @@ def _make_capture_acompletion(captured: dict, response):
         return response
 
     return fake
+
+
+def _embedding_request(**overrides) -> EmbeddingRequest:
+    base = dict(
+        provider_kind="ollama",
+        base_destination="http://192.168.22.50:11434",
+        upstream_model="nomic-embed-text",
+        inputs=("a", "b"),
+        timeout_seconds=10.0,
+    )
+    base.update(overrides)
+    return EmbeddingRequest(**base)
+
+
+def _fake_embed_response(
+    vectors, *, prompt_tokens: int = 5, model: str = "embed"
+) -> SimpleNamespace:
+    data = [{"index": i, "embedding": v} for i, v in enumerate(vectors)]
+    return SimpleNamespace(
+        id="upstream-embed-1",
+        model=model,
+        data=data,
+        usage=SimpleNamespace(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens),
+    )
+
+
+async def test_adapter_embed_sends_model_input_and_disables_retries(monkeypatch):
+    captured: dict = {}
+
+    async def fake(model, input, **kwargs):
+        captured.update(kwargs)
+        captured["model"] = model
+        captured["input"] = input
+        return _fake_embed_response([[1.0], [2.0]])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    await LiteLLMChatAdapter().embed(_embedding_request(), None)
+    assert captured["model"] == "ollama/nomic-embed-text"
+    assert captured["input"] == ["a", "b"]
+    assert captured["api_base"] == "http://192.168.22.50:11434"
+    assert captured["num_retries"] == 0
+    assert captured["max_retries"] == 0
+    assert captured["drop_params"] is False
+
+
+async def test_adapter_embed_returns_ordered_vectors_and_usage(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response([[1.0, 2.0], [3.0, 4.0]], prompt_tokens=9)
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    result = await LiteLLMChatAdapter().embed(_embedding_request(), None)
+    assert result.vectors == ((1.0, 2.0), (3.0, 4.0))
+    assert result.usage.prompt_tokens == 9
+    assert result.upstream_request_id == "upstream-embed-1"
+
+
+async def test_adapter_embed_rejects_wrong_count(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response([[1.0]])  # one fewer than the two inputs
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+async def test_adapter_embed_rejects_non_finite_vector(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response([[float("inf")], [2.0]])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+async def test_adapter_embed_rejects_malformed_vector(monkeypatch):
+    async def fake(model, input, **kwargs):
+        return _fake_embed_response([["not-a-number"], [2.0]])
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError):
+        await LiteLLMChatAdapter().embed(_embedding_request(), None)
+
+
+async def test_adapter_embed_maps_provider_error_safely(monkeypatch):
+    async def fake(model, input, **kwargs):
+        exc = Exception("boom http://secret.example.com sk-live-abcdefgh")
+        exc.status_code = 429
+        raise exc
+
+    monkeypatch.setattr("aethergate.adapters.litellm.litellm.aembedding", fake)
+    with pytest.raises(ProviderError) as excinfo:
+        await LiteLLMChatAdapter().embed(_embedding_request(), "sk-secret")
+    assert "secret" not in str(excinfo.value.message)
+    assert "http" not in str(excinfo.value.message)
+    assert excinfo.value.status_code == 429
