@@ -39,7 +39,7 @@ from aethergate.domain.ids import (
     RouteBindingId,
     SecretRefId,
 )
-from aethergate.egress import DestinationPolicy
+from aethergate.egress import build_destination_policy
 from aethergate.persistence import repository
 from aethergate.persistence.db import get_session_factory
 
@@ -315,7 +315,7 @@ async def _seed(args: argparse.Namespace) -> dict[str, str]:
     kind: str = args.kind
     base_destination: str = args.base_destination
     settings = get_settings()
-    DestinationPolicy(settings.upstream_allowlist_hosts).validate(base_destination)
+    build_destination_policy(settings).validate(base_destination)
 
     async with get_session_factory()() as session:
         async with session.begin():

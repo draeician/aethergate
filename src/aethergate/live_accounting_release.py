@@ -61,7 +61,7 @@ from aethergate.domain.ids import (
     ProviderId,
     RouteBindingId,
 )
-from aethergate.egress import DestinationPolicy
+from aethergate.egress import build_destination_policy
 from aethergate.encryption import encryptor_from_key
 from aethergate.inference.service import InferenceService
 from aethergate.persistence import models, repository
@@ -105,7 +105,7 @@ def _build_service(adapter: NoopAdapter) -> SchedulingService:
     )
     inference = InferenceService(
         EnvSecretResolver(),
-        DestinationPolicy(settings.upstream_allowlist_hosts),
+        build_destination_policy(settings),
         adapter_factory=lambda kind: adapter,
     )
     return SchedulingService(

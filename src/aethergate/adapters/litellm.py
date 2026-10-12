@@ -25,7 +25,12 @@ from aethergate.adapters.base import (
     TextContentPart,
     Usage,
 )
+from aethergate.egress import install_redirect_safety
 from aethergate.errors import ProviderError, UnsupportedProvider
+
+# Close the redirect-escape class for the pinned LiteLLM transport: force its
+# httpx clients to stop following provider redirects. Idempotent; applied once.
+install_redirect_safety()
 
 _PROVIDER_PREFIX = {
     "ollama": "ollama",

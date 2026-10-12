@@ -39,7 +39,7 @@ from aethergate.domain.ids import (
     RouteBindingId,
     SecretRefId,
 )
-from aethergate.egress import DestinationPolicy
+from aethergate.egress import build_destination_policy
 from aethergate.errors import (
     AdminResourceNotFound,
     AdminValidationError,
@@ -87,7 +87,7 @@ def _authorize_write(context: domain.AdminRequestContext) -> None:
 def _validate_destination(base_destination: str) -> None:
     """Validate an endpoint destination against the runtime egress policy."""
     try:
-        DestinationPolicy(get_settings().upstream_allowlist_hosts).validate(base_destination)
+        build_destination_policy(get_settings()).validate(base_destination)
     except DestinationDenied as exc:
         raise CatalogDestinationDenied(exc.reason) from exc
 
