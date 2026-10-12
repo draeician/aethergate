@@ -48,6 +48,10 @@ AetherGate may be called Alpha 1 because all of the following hold:
   semantics are rejected with `400 unsupported_feature` (see
   `docs/contracts/responses.md`); this is **not** full Responses or multimodal
   compatibility.
+- OpenAI: `POST /v1/embeddings` (non-streaming; string/list-of-strings input,
+  `float`/`base64` encoding) through the same durable scheduler/accounting
+  authority. Token-ID input, `dimensions`, and `user` are rejected with `400
+  unsupported_feature` (see `docs/contracts/embeddings.md`).
 - Admin API `/admin/v1`: identity/RBAC, catalog/routing, accounting, queue/
   operator, observability, OIDC/session, CLI/device flow.
 - Linux CLI (thin `/admin/v1` client; OAuth device flow).
@@ -58,7 +62,7 @@ AetherGate may be called Alpha 1 because all of the following hold:
 Responses rich semantics (tools/function/MCP/computer-use, image *output*,
 structured outputs, reasoning, `previous_response_id`/conversations, background,
 stored responses), **remote/file image input** (inline `data:` image input is
-supported; see `docs/contracts/vision.md`), audio, embeddings, image generation,
+supported; see `docs/contracts/vision.md`), audio, image generation,
 production secret-backend selection, production-grade HA/failover, external
 Prometheus/OpenTelemetry/TSDB exporters, paging/alerting,
 billing/invoice/payment semantics, hosted SaaS tenancy, and broad visual

@@ -28,6 +28,16 @@ validated -> queued -> reserved -> dispatched -> streaming -> succeeded/failed/c
 
 Also represent `outcome_unknown` for ambiguous failures. (Direction)
 
+## Operation-aware queueing
+
+The scheduler serves **two** operations through the single state machine above: **chat**
+(Chat Completions / Responses, streaming or non-streaming) and **embedding**
+(`POST /v1/embeddings`, non-streaming only). The operation discriminator lives **inside** the
+encrypted `payload_encrypted` envelope (never a plaintext column); legacy payloads/results without a
+discriminator deserialize as chat. Embeddings never enter `streaming` and never fabricate a
+`first_token_at`/TTFT sample. Embedding-specific capability, quota, budget, and accounting semantics
+are documented in `docs/contracts/embeddings.md`. (Direction)
+
 ## Phase 1 — implemented (durable endpoint concurrency)
 
 Scheduler phase 1 (AGV2-005) enforces **physical endpoint concurrency only**. It establishes durable

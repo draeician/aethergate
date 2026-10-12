@@ -84,6 +84,10 @@ scripts/dev/v2 <command>
   `input_text`/`input_image` vision input. Uses the same durable scheduler/accounting/worker authority
   as Chat. Unsupported semantic features return a structured `400 unsupported_feature`; see
   `docs/contracts/responses.md` and `docs/contracts/vision.md`.
+- `POST /v1/embeddings` — non-streaming embeddings (string/list-of-strings input, `float`/`base64`
+  encoding) through the same durable scheduler/accounting/worker authority. Token-ID input,
+  `dimensions`, and `user` return a structured `400 unsupported_feature`; see
+  `docs/contracts/embeddings.md`.
 
 Admin control-plane endpoints (AGV2-013/014):
 
