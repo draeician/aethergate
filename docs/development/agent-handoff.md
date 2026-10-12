@@ -1,7 +1,7 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-028V (Chat image-detail null closure)** complete: an independent review of
+- Branch: `v2`. **AGV2-028V2 (Chat image-detail null closure)** complete: an independent review of
   the pinned SDK types found that Chat `image_url.detail` is optional-but-non-nullable, so an
   explicitly supplied `detail: null` must be rejected on Chat (it was previously indistinguishable
   from omission). Closed with a sentinel (key-presence detection); omission/`auto` still accepted,
@@ -9,7 +9,7 @@
   `detail?: ImageDetail | null`) still tolerates an explicit `null`. No migration (head `0017`).
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
 
-## AGV2-028V — Chat image-detail null closure (omitted vs explicit-null)
+## AGV2-028V2 — Chat image-detail null closure (omitted vs explicit-null)
 
 ### Independent-review finding
 The AGV2-028V detail handling used `image_url.get("detail")` and a `validate_image_detail` that
@@ -76,14 +76,22 @@ workflows are `completed/success` there (push events):
 - schema-secret-gate — run `38194540202`
 - alpha-golden-path — run `38194540148`
 
+The independently verified pre-metadata tip is `936cec102d40315c6d5b90c4c05fc4ca3dac3622`
+(handoff/docs-only commit after `389fffd`); all four required workflows are `completed/success`
+there (push events):
+- backend — run `38195202524`
+- frontend — run `38195202501`
+- schema-secret-gate — run `38195202508`
+- alpha-golden-path — run `38195202546`
+
 ### PR
 PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — open, **unmerged**,
-`mergeable`, head `v2` = `389fffd`. Description updated with the null-closure finding, the exact
-pinned evidence, the sentinel implementation, the updated regression counts, and the final CI
-evidence.
+`mergeable`, head `v2` = `936cec102d40315c6d5b90c4c05fc4ca3dac3622` (pre-metadata). Its GitHub
+description was stale (still named `06728b21...` as the final SHA and did not mention the
+explicit-null closure); it is corrected in AGV2-028V3.
 
 ### WIP marker lifecycle
-`.aethergate-wip` (`task=AGV2-028V`, `branch=v2`, UTC start timestamp) created first, kept for the
+`.aethergate-wip` (`task=AGV2-028V2`, `branch=v2`, UTC start timestamp) created first, kept for the
 whole task, and removed only after all criteria were green, the handoff committed, commits pushed
 to `origin/v2`, final remote CI verified green, and PR #2 updated. Never staged/committed/pushed
 (gitignored).
