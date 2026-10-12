@@ -424,37 +424,39 @@ Run the complete current gate:
 Every red test must be root-caused.
 Do not weaken tests to accept redirects or prod env secrets.
 
-## 15. Remote CI gate
+## 15. Feature PR + remote CI gate
 
 Push completed work to `origin/feat/agv2-030-beta1-security`.
 
-On the EXACT FINAL task-branch SHA require:
+Create or update a PR from `feat/agv2-030-beta1-security` -> `main` (expected PR #4 if no other PR intervenes)
+before the final remote-CI decision. The repository's current push filters historically name `main`/`v2`,
+so task-branch CI may be supplied by the `pull_request` event. Do not wait forever for a branch-push run
+that is not configured to exist.
+
+On the EXACT FINAL PR HEAD SHA require all four workflows, from the PR event and/or any applicable push event:
 - backend = completed/success
 - frontend = completed/success
 - schema-secret-gate = completed/success
 - alpha-golden-path = completed/success.
+
+The workflow run's `head_sha` must equal the exact final task-branch SHA.
 
 If any is red:
 - inspect logs;
 - root-cause;
 - fix;
 - push;
-- require all four green on the new final SHA.
+- wait for the PR workflows on the new head;
+- require all four green again on that exact new SHA.
+
+Update the PR description with the final SHA, security design choice, verification summary, and exact run IDs.
+Verify mergeable and leave it open/unmerged.
 
 Do not declare completion from local evidence alone.
-
-## 16. Feature PR to main
-
-After final task-branch CI is green:
-- create a new PR from `feat/agv2-030-beta1-security` -> `main` (expected PR #4 if no other PR intervenes);
-- include final SHA, security design choice, and verification summary;
-- verify mergeable;
-- leave open/unmerged.
-
 Do NOT merge automatically.
 Never push directly to main.
 
-## 17. No New Scope
+## 16. No New Scope
 
 Do not implement:
 - production HA/failover;
@@ -470,7 +472,7 @@ Do not implement:
 The file resolver is the production boundary for externally projected provider secrets; do not add a
 cloud-secret-manager matrix in this milestone.
 
-## 18. Handoff
+## 17. Handoff
 
 Record:
 - implementation commits;
