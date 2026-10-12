@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { loginAs } from './fixtures'
 
 /**
  * Web-console browser E2E against the deterministic local OIDC provider.
@@ -46,14 +47,8 @@ test('OIDC sign-in reaches the operator dashboard without leaking secrets', asyn
 })
 
 test('signed-in console renders live queue data', async ({ page }) => {
-  await page.goto('/')
-  // If not authenticated, complete login first.
-  if (await page.getByRole('link', { name: /sign in with oidc/i }).isVisible()) {
-    await page.getByRole('link', { name: /sign in with oidc/i }).click()
-  }
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({
-    timeout: 30_000,
-  })
+  await loginAs(page, 'dev-user')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
   await expect(page.getByText('Queued', { exact: true })).toBeVisible()
   await expect(page.getByText('In Flight', { exact: true })).toBeVisible()
   // The former "Not yet instrumented" placeholders are replaced by real metrics.
@@ -64,13 +59,8 @@ test('signed-in console renders live queue data', async ({ page }) => {
 })
 
 test('logout revokes the server session and returns to login', async ({ page }) => {
-  await page.goto('/')
-  if (await page.getByRole('link', { name: /sign in with oidc/i }).isVisible()) {
-    await page.getByRole('link', { name: /sign in with oidc/i }).click()
-  }
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({
-    timeout: 30_000,
-  })
+  await loginAs(page, 'dev-user')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
 
   await page.getByRole('button', { name: 'Sign Out' }).click()
   await expect(page.getByRole('link', { name: /sign in with oidc/i })).toBeVisible({

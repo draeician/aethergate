@@ -36,6 +36,21 @@ test.describe("alpha golden path (offline CI)", () => {
     expect(page.url()).not.toContain("code=");
   });
 
+  test("login readiness survives a delayed unauthenticated session probe", async ({ page }) => {
+    // Regression for the golden-path loginAs race: the client renders
+    // "Loading…" while its /auth/session probe is in flight, so a single
+    // immediate isVisible() poll after goto() can see neither the sign-in
+    // link nor the Dashboard and skip the click. Delay the probe to force that
+    // transition deterministically; the helper must wait for the sign-in link
+    // and click it rather than timing out.
+    await page.route("**/admin/v1/auth/session", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue();
+    });
+    await loginAs(page, SYSTEM_ADMIN_SUBJECT);
+    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+  });
+
   test("catalog route to the fake Ollama upstream exists", async ({ page, context }) => {
     await loginAs(page, SYSTEM_ADMIN_SUBJECT);
     const aliases = await adminJson<{ items: Array<{ id: string; name: string }> }>(
