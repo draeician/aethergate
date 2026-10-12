@@ -1,5 +1,8 @@
 # Resume checkpoint - 2026-10-12 (per-task branch policy)
 
+> Superseded: this checkpoint predates the AGV2-030 implementation. See the
+> **AGV2-030** section below for the current, complete state.
+
 - **Policy decided by operator:** new work uses per-task branches created from
   the latest reviewed/verified `main`. Historical long-lived `v2` is retired
   for development (preserved for audit), and must not be rebased, force-pushed,
@@ -53,17 +56,122 @@
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-029 (OpenAI Embeddings API)** complete, and **AGV2-029V** (independent-review
-  verification closure) complete: `POST /v1/embeddings` is a non-streaming inference operation
-  through the same durable scheduler/accounting authority as Chat/Responses. String/list-of-strings
-  input (bounded at 2048), `float`/`base64` encoding, operation-aware encrypted payload/result, and
-  alias/provider/adapter embedding-capability enforcement at admission and dispatch. AGV2-029V
-  closed three narrow gaps: strict provider index integrity, omitted-vs-explicit-null semantics, and
-  the bounded input cardinality. Official Python (`openai==2.54.0`) and JS (`openai@7.32.0`) SDK
-  proofs green, including the mandatory JS default-base64 decode path. No migration (head `0017`).
+- Branch: `feat/agv2-030-beta1-security`, created from canonical `main`
+  `7c47cd8575dc96265c02e17333ee88bda920de99`. **AGV2-030 (Beta 1 security foundation)** is
+  implemented: the production file-backed provider-secret backend and the DNS-rebinding/redirect-
+  escape egress closure. The historical persistent `v2` branch is retired for new work.
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
-- All four required remote workflows are `completed/success` on the final `origin/v2` SHA (recorded
-  below); feature PR **#3** (`v2` -> `main`) is open/unmerged.
+- All four required remote workflows are `completed/success` on the AGV2-030 head (recorded below);
+  feature PR **#4** (`feat/agv2-030-beta1-security` -> `main`) is open/unmerged.
+- **Open item:** the live nomnom production-policy proof (task section 11) has not yet been
+  executed. nomnom is reachable (Ollama `192.168.22.50:11434` open; dev IdP `:8090` down). All
+  deterministic/offline proof is green; this live proof is the sole remaining AGV2-030 item.
+
+## AGV2-030 — Beta 1 security foundation (provider-secret backend + egress DNS/redirect closure)
+
+### Implementation commits
+- `65984bac391eebf9f0419558788a1a7608b1a7e6` — fix(e2e): wait for resolved auth state before OIDC sign-in
+- `0978438786505fc88a3de201d9188733df76c666` — feat(security): add production provider-secret backend and egress closure
+- `6b9907fcb78da61258e65904c4594c0d81434e3d` — docs: document beta 1 provider-secret backend and egress closure
+
+### Preflight — OIDC golden-path loginAs race (root-caused and fixed)
+- **Root cause:** `frontend/e2e/fixtures.ts:loginAs` polled `isVisible()` once immediately after
+  `page.goto("/")`. The console renders a `Loading…` placeholder while its async
+  `/admin/v1/auth/session` probe is in flight, so the poll could observe neither the sign-in link
+  nor the Dashboard, skip the OIDC click, and time out waiting for a Dashboard it never reached.
+  This matches the golden-path failure where the session probe returned 401 with no subsequent
+  `/admin/v1/auth/oidc/login` redirect.
+- **Fix:** a `waitForAuthState(page)` helper polls until a terminal auth state resolves (Dashboard
+  heading or sign-in link) before `loginAs` acts; the same helper replaced the duplicated racy
+  polls in `web-console.spec.ts`. No timeout inflation, no rerun-only disposition.
+- **Regression:** `alpha-golden.spec.ts` adds `login readiness survives a delayed unauthenticated
+  session probe`, which `page.route`s `**/admin/v1/auth/session` with a 1500 ms delay so the race
+  is forced deterministically; the helper must still reach the Dashboard. Verified to fail (30 s
+  timeout) pre-fix and pass post-fix.
+
+### Production provider-secret backend
+- `FileSecretResolver` resolves a `SecretRef` by its stable opaque `id` (never the display name) from
+  `AETHERGATE_SECRET_DIRECTORY`. Safety: absolute root; resolved target must stay inside the root
+  (traversal and symlink escape rejected, in-root symlinks permitted for rotation projection);
+  regular files only; 64 KiB bound; UTF-8 only, no NUL, non-empty; exactly one trailing `LF`/`CRLF`
+  removed (arbitrary whitespace preserved). Errors carry only safe `SecretRef` metadata, never file
+  contents.
+- `build_secret_resolver(settings)` is the single API/worker factory: `env` is a dev/test convenience
+  rejected in `prod`; `prod` requires `file`; no implicit fallback (a file deployment never consults
+  `AETHERGATE_SECRET_*`, and prod never falls back to env). `runtime.build_inference_service` now
+  uses it. No resolver choice comes from a client request or database row.
+- `config_check` reports prod `env` backend INVALID, and a missing/non-absolute/unusable file
+  directory INVALID, without printing secret material.
+
+### Egress / DNS / redirect closure
+- **DNS rebinding (literal-IP prod policy):** `build_destination_policy(settings)` enables
+  `DestinationPolicy(require_literal_ip=True)` in `prod`, so the configured upstream host must be a
+  literal IPv4/IPv6 address — the validated address is the connected address, so DNS cannot be
+  swapped between validation and connect. Authorized private-LAN literal IPs remain allowed when
+  allowlisted (RFC1918 is not rejected generally). Dev/test may keep service DNS names; no insecure
+  "allow unsafe DNS" override.
+- **Redirect escape:** pinned LiteLLM `1.104.0` was found to construct its httpx clients with
+  `follow_redirects=True`. `install_redirect_safety()` (invoked once at adapter import) patches the
+  `AsyncHTTPHandler` constructor to force `follow_redirects=False` and mutates already-created/cached
+  module-level and in-memory-cache handlers, so completion/streaming/embedding transports never
+  contact a redirect target: every `301/302/303/307/308` surfaces as a safe provider error and the
+  `Location` target is never requested.
+- **Shared policy:** endpoint catalog create/update, dev seeding, and dispatch-time route
+  preparation all use the same environment-aware `DestinationPolicy`; secret resolution runs only
+  after dispatch-time destination validation, so a denied destination never receives credentials.
+
+### Deterministic / offline proof
+- File-resolver safety matrix (traversal, symlink escape, size, UTF-8/NUL/empty, newline) in
+  `tests/test_secrets.py`; factory prod/dev selection and no-env-fallback in `tests/test_runtime_secrets.py`.
+- Prod literal-IP policy and shared catalog/dispatch policy in `tests/test_egress.py` and
+  `tests/test_inference_boundary.py`.
+- Real-transport redirect canary (completion + streaming + embedding; silent for all five redirect
+  classes, canary hit count zero) in `tests/test_redirect_safety.py`.
+- `config_check` prod/dev cases in `tests/test_config_check.py`.
+
+### Regression counts (AGV2-030)
+- backend: **825 collected / exit 0** (baseline 758 + 67 new/expanded security tests) via canonical
+  `scripts/dev/v2 test`; `ruff check src tests` clean.
+- frontend unit/component: **89 passed** (22 files, unchanged).
+- full Playwright: **32 passed / 7 skipped** locally (6 CI-only `alpha-golden.spec.ts` + 1 new
+  login-readiness regression); CI `alpha-golden.spec.ts` runs **7 passed**.
+- migration head `0017` (empty -> `0017` and populated `0016 -> 0017` unchanged); `git diff --check`
+  clean; secret scan clean; no-legacy guard clean; config_check dev VALID and prod security cases
+  correct.
+
+### Final remote CI (AGV2-030 substantive head `6b9907f`)
+All four required PR-event workflows are `completed/success` on the substantive head:
+- backend — run `38321153016`
+- frontend — run `38321152978`
+- schema-secret-gate — run `38321152973`
+- alpha-golden-path — run `38321152997`
+
+The exact final task-branch tip (including this documentation-only handoff commit) is re-verified on
+all four workflows; its exact SHA and four exact-SHA workflow IDs are recorded in PR #4's description.
+
+### Live nomnom proof — PENDING
+Not yet executed in this resume. nomnom is reachable (Ollama `192.168.22.50:11434` open; dev IdP
+`:8090` down). Remaining section-11 checks: inspect installed models; launch a disposable
+production-policy stack (literal-IP allowlist, `AETHERGATE_SECRET_BACKEND=file`, `bypass=false`);
+official Python SDK Models + Chat against the literal private IP; vision/embeddings only if the
+installed models still support them (do not download); hostname-form rejected in prod;
+metadata/link-local denied; tear down disposable resources. `FileSecretResolver` may be proven
+deterministically since the real Ollama route has no provider credential.
+
+### Feature PR
+PR **#4** (`feat/agv2-030-beta1-security` -> `main`): open, `mergeable`, **unmerged**; head tracks
+the AGV2-030 tip. Description records the preflight root-cause/fix, the security design choice, the
+verification summary, the exact final SHA, and the four exact-SHA workflow IDs.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-030`, `branch=feat/agv2-030-beta1-security`, UTC start timestamp)
+created as the first local action and kept until every criterion is green. Because the live nomnom
+proof is still pending, the marker is left in place. Never staged/committed/pushed (gitignored).
+
+### Recommended next step
+**Execute the live nomnom production-policy proof (task section 11) to close the last AGV2-030 item,
+then begin AGV2-031 Beta 1 release hardening (production deployment profile, architecture/CODEOWNERS
+enforcement, fault-injection/recovery release gates, Beta readiness documentation).**
 
 ## AGV2-029V — Embeddings verification closure (index integrity, null semantics, bounded inputs)
 
