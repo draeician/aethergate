@@ -93,18 +93,20 @@ No migration; head remains `0017`; `0001`–`0017` untouched.
 ### Final remote CI (AGV2-028V)
 The substantive code/test SHA is `e1d7086` (fix `f9e7619` + tests `e1d7086`; later commits are
 docs-only). All four required workflows are `completed/success` on the verified `origin/v2` tip
-`7b00f50e693c5945990f5cd65ce2b8a209f97ab1` (push events):
-- backend — run `38185998082`
-- frontend — run `38185998066`
-- schema-secret-gate — run `38185998076`
-- alpha-golden-path — run `38185998068`
+`2f1fb88cb0e4315ddbaaab122198f86770737fb3` (push events):
+- backend — run `38186374537`
+- frontend — run `38186374519`
+- schema-secret-gate — run `38186374535`
+- alpha-golden-path — run `38186374541`
 
-Earlier verified green tips during this task (push events): `f3b465134431915334dbad0c7d2e6eb49d80cc9c`
-— `backend 38185647257`, `frontend 38185647190`, `schema-secret-gate 38185647180`,
-`alpha-golden-path 38185647208`; `5e4c94fd3f5b69a40d1213b0521681d8fb0e8661` — `backend 38183328077`,
-`frontend 38183328123`, `schema-secret-gate 38183328067`, `alpha-golden-path 38183328081` (that
-alpha-golden run initially hit the documented transient OIDC/JWKS browser cold-start flake at
-`loginAs` in the pre-existing remote-URL test; `gh run rerun --failed` then passed); and
+Earlier verified green tips during this task (push events): `7b00f50e693c5945990f5cd65ce2b8a209f97ab1`
+— `backend 38185998082`, `frontend 38185998066`, `schema-secret-gate 38185998076`,
+`alpha-golden-path 38185998068`; `f3b465134431915334dbad0c7d2e6eb49d80cc9c` — `backend 38185647257`,
+`frontend 38185647190`, `schema-secret-gate 38185647180`, `alpha-golden-path 38185647208`;
+`5e4c94fd3f5b69a40d1213b0521681d8fb0e8661` — `backend 38183328077`, `frontend 38183328123`,
+`schema-secret-gate 38183328067`, `alpha-golden-path 38183328081` (that alpha-golden run initially hit
+the documented transient OIDC/JWKS browser cold-start flake at `loginAs` in the pre-existing
+remote-URL test; `gh run rerun --failed` then passed); and
 `3f93f05d7f9e7850cf23fc15d463a16661196ea2` — `backend 38182977904`, `frontend 38182977886`,
 `schema-secret-gate 38182977887`, `alpha-golden-path 38182977874`.
 
