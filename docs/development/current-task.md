@@ -1,406 +1,519 @@
 # AetherGate - Current Task
 
 ## Task ID
-AGV2-029V
+AGV2-030
 
 ## Title
-Embeddings verification closure - strict optional-field semantics, bounded inputs, provider index integrity
-
-## Why This Verification Task Exists
-
-AGV2-029 is substantially complete and its architecture is correct:
-- embeddings use the existing durable scheduler/accounting authority;
-- operation discriminator is inside encrypted payload/result envelopes;
-- official Python/JS SDK proofs are green;
-- JS default-base64 compatibility is proven;
-- migration head remains 0017;
-- PR #3 is open/unmerged/mergeable.
-
-Independent review found three narrow requirements that current green CI does not cover.
-
-Do NOT merge PR #3 until this verification task is complete.
-
-## Starting Point
-
-AGV2-029 final feature tip before this correction:
-
-fb9be76c665ae249dcab1001babfa929deaf1f68
-
-All four required workflows are completed/success on that exact SHA, including:
-- backend: 38206979640 (duplicate later green run also exists)
-- frontend: 38206979781
-- schema-secret-gate: 38206979661
-- alpha-golden-path: 38206979769
-
-Current regression baseline:
-- backend: 734 passed
-- frontend: 89 passed
-- Playwright: 32 passed / 6 skipped
-- migration head: 0017
-
-PR #3:
-- v2 -> main
-- open
-- unmerged
-- mergeable
-- head currently fb9be76c...
+Beta 1 security foundation - production provider-secret backend + egress DNS/redirect closure
 
 ## WIP Marker - FIRST LOCAL ACTION
 
 Immediately after entering the repository, before pull/read/implementation work, create:
 
-.aethergate-wip
+`.aethergate-wip`
 
 Safe contents:
-- task=AGV2-029V
-- branch=v2
+- task=AGV2-030
+- branch=develop
 - started_at=<UTC timestamp>
 
+The marker is gitignored.
 Never stage, commit, or push it.
 Keep it present for the entire incomplete task.
-Remove it only after final exact-SHA CI, handoff, and PR #3 are updated and verified.
+If context is compacted/restarted and the task is incomplete, recreate it if missing.
+If blocked/incomplete, leave it present.
 
-## Gap 1 - provider embedding indexes are not validated strongly enough
+Remove it only after:
+1. every local/live criterion below is green;
+2. all task commits are pushed to origin/develop;
+3. the exact final origin/develop SHA has all four required GitHub Actions green;
+4. the handoff is committed/pushed and remotely verified;
+5. the feature PR to main exists and is updated.
 
-Current LiteLLM adapter behavior:
-- reads each provider data item's index + embedding;
-- sorts entries by index;
-- checks only that entry count equals input count;
-- then returns vectors without verifying the provider indexes are exactly 0..N-1, unique, and in-range.
+## Starting Point
 
-That means malformed responses such as:
-- indexes [0, 0];
-- indexes [1, 1];
-- indexes [1, 2] for two inputs;
-- negative/out-of-range indexes;
+The complete core OpenAI surface is now merged to main:
+- Models
+- Chat Completions text + inline-image input
+- Responses text + inline-image input subset
+- Embeddings
 
-can have the correct vector count, survive sorting, and then be silently re-numbered by the public API
-as indexes 0..N-1. That can corrupt input -> vector correspondence.
+Embeddings PR #3 is merged.
 
-AGV2-029 explicitly required:
-- result count equals input count;
-- input order/index correspondence is preserved.
+Canonical main merge commit:
+`7c47cd8575dc96265c02e17333ee88bda920de99`
 
-### Required fix
+All four post-merge main workflows are completed/success on that exact SHA:
+- backend: `38263020817`
+- frontend: `38263020743`
+- schema-secret-gate: `38263020802`
+- alpha-golden-path: `38263020770`
 
-At the provider adapter boundary:
+Current green baseline:
+- backend: **758 passed**
+- frontend: **89 passed**
+- Playwright: **32 passed / 6 skipped**
+- migration head: **0017**
+- Python OpenAI SDK: `openai==2.54.0`
+- JavaScript OpenAI SDK: `openai@7.32.0`
+- LiteLLM: `1.104.0`
 
-1. Parse provider indexes as today.
-2. Reject malformed/non-integer indexes safely.
-3. Permit provider response order to differ IF indexes are valid.
-4. Sort by provider index.
-5. Require the sorted provider index sequence to equal exactly:
+This task begins Beta hardening. It is deliberately security-focused and does NOT declare Beta 1 complete.
 
-   0, 1, ..., len(inputs)-1
+## Why This Task Exists
 
-6. Reject:
-   - duplicates;
-   - gaps;
-   - negative indexes;
-   - out-of-range indexes;
-   - any otherwise invalid index mapping.
+Independent architectural review of the current canonical main found two explicit production-boundary
+gaps that are already acknowledged in repository docs:
 
-Do not silently reindex malformed provider results.
+1. `src/aethergate/scheduler/runtime.py` unconditionally constructs `EnvSecretResolver()`, while
+   `src/aethergate/secrets.py` and architecture docs explicitly say environment resolution is a
+   dev/test convenience and NOT the production provider-secret backend.
 
-ProviderError text must remain safe and contain no vectors or inputs.
+2. `src/aethergate/egress.py` explicitly says redirect-following hardening is deferred. The current
+   policy validates only the configured URL host; it does not close DNS rebinding at the actual
+   connection boundary and does not prove a provider redirect cannot escape the allowed destination.
 
-### Required tests
+Both conflict with settled security requirements in `project_spec.md`:
+- provider credentials live outside PostgreSQL behind a secret service/envelope boundary;
+- metadata destinations, DNS rebinding, and redirect escapes are blocked.
 
-Add adapter tests proving:
-- valid in-order indexes accepted;
-- valid out-of-order provider entries [1,0] are sorted back to input order;
-- duplicate index rejected;
-- negative index rejected;
-- out-of-range/gapped index rejected;
-- existing wrong-count/malformed/non-finite cases remain rejected.
+AGV2-030 closes these production security gaps for the CURRENT supported provider path (Ollama /
+pinned LiteLLM). Do not broaden to new provider kinds.
 
-Where useful extend fake-provider injection to prove this through the real pinned LiteLLM boundary, but
-do not add unnecessary complexity if direct adapter tests plus existing real-transport tests are stronger.
+## 1. Compatibility / authority to read first
 
-## Gap 2 - optional-but-non-null OpenAI fields collapse explicit null into omission
+Before implementation read:
+- `AGENTS.md`
+- `project_spec.md`
+- `docs/architecture/security.md`
+- `docs/architecture/provider-model.md`
+- `docs/operations/alpha-runbook.md`
+- `src/aethergate/secrets.py`
+- `src/aethergate/egress.py`
+- `src/aethergate/scheduler/runtime.py`
+- `src/aethergate/adapters/litellm.py`
+- pinned LiteLLM `1.104.0` transport implementation actually used by `acompletion` and `aembedding`.
 
-Pinned SDK evidence:
+Do not guess redirect/DNS behavior from generic httpx defaults; inspect and prove the exact pinned
+LiteLLM path.
 
-Python openai==2.54.0 EmbeddingCreateParams is total=False with:
-- dimensions: int
-- encoding_format: Literal["float", "base64"]
-- user: str
+## 2. Production provider-secret backend
 
-These fields are optional because the TypedDict is total=False, but their values are not Optional/null.
+Keep the `SecretResolver` protocol.
 
-JavaScript openai@7.32.0:
-- dimensions?: number
-- encoding_format?: "float" | "base64"
-- user?: string
+Add a production-suitable file-backed resolver intended for read-only secret projection from an
+external orchestrator/secret manager, e.g. Docker Secrets, Kubernetes projected secrets, systemd
+credentials, or an operator-managed read-only mount.
 
-Again optional, not nullable.
+Recommended shape:
+- `FileSecretResolver`
+- runtime resolver factory such as `build_secret_resolver(settings)`.
 
-Current AetherGate request DTO uses:
-- encoding_format: Literal["float","base64"] | None = None
-- dimensions: Any = None
-- user: Any = None
+### Configuration
 
-and validators use value != None tests.
+Add typed settings with explicit environment aliases:
 
-Therefore explicit JSON null is currently treated as omission/default:
-- "encoding_format": null silently becomes float behavior;
-- "dimensions": null bypasses the required unsupported-feature rejection;
-- "user": null bypasses the required unsupported-feature rejection.
+- `AETHERGATE_SECRET_BACKEND`
+  - allowed: `env` | `file`
+  - dev/test default may remain `env`
+  - **prod MUST NOT use env**
 
-This violates the pinned request contract and AetherGate's settled rule:
-known semantic fields are implemented faithfully or explicitly rejected, never silently dropped.
+- `AETHERGATE_SECRET_DIRECTORY`
+  - required/validated when backend=file
+  - use an absolute path
+  - production documentation should use a read-only mounted directory, for example
+    `/run/secrets/aethergate-provider`.
 
-### Required fix
+No implicit fallback:
+- if prod is configured for file backend and the file is missing/invalid, fail closed;
+- never check an environment variable as a backup;
+- a canary secret present in `AETHERGATE_SECRET_*` must not rescue a missing file in prod.
 
-Distinguish KEY ABSENCE from EXPLICIT NULL.
+### Stable file identity
 
-Use model_fields_set, a before-validator, or an explicit sentinel.
+Use the stable opaque `SecretRef.id` as the secret filename, not the human display name.
 
-Required semantics:
+Reason:
+- IDs are unique;
+- display-name normalization can collide;
+- user-controlled names must not become path traversal primitives.
 
-- encoding_format omitted:
-  accepted; server/public behavior remains current.
-  Note: locked JS SDK still sends base64 explicitly on its default wire path.
+Example:
+`<secret_directory>/<secret_ref_id>`
 
-- encoding_format "float":
-  accepted.
+Validate the path component and resolved path safely.
 
-- encoding_format "base64":
-  accepted.
-
-- encoding_format explicit null:
-  reject with an OpenAI-compatible structured request error.
-  Prefer the same 400 invalid_request/unsupported-or-invalid contract style used elsewhere rather
-  than silently defaulting to float.
-
-- dimensions omitted:
-  accepted as omission.
-
-- dimensions present with any value, INCLUDING null:
-  explicitly reject 400 unsupported_feature until dimensions is faithfully implemented.
-
-- user omitted:
-  accepted as omission.
-
-- user present with any value, INCLUDING null:
-  explicitly reject 400 unsupported_feature until user is faithfully implemented.
-
-Do not change unknown purely-additive field tolerance.
-
-Do not make transport/provider override fields a new scope unless a concrete security issue is found;
-this closure is about pinned known embedding semantic fields.
-
-### Required tests
-
-Contract + API tests:
-- encoding_format omitted succeeds;
-- float succeeds;
-- base64 succeeds;
-- explicit encoding_format:null rejected;
-- dimensions numeric rejected;
-- dimensions:null rejected;
-- user string rejected;
-- user:null rejected;
-- rejected cases never enqueue/dispatch upstream.
-
-If the official Python/JS SDK type system cannot naturally emit null for these fields, raw API contract
-tests are appropriate for the null edge; keep the official SDK happy-path/rejection proofs already present.
-
-Document the omission-vs-null behavior in docs/contracts/embeddings.md.
-
-## Gap 3 - required bounded multi-input cardinality is missing
-
-AGV2-029 explicitly required a provider-neutral bounded multi-input cardinality.
-
-Current _normalize_embedding_input accepts any non-empty list[str] with no count bound. Only the general
-serialized queue payload byte limit eventually constrains it.
-
-That does not satisfy the request-shape requirement.
-
-### Required fix
-
-Inspect the exact pinned OpenAI compatibility source/SDK schema and establish the supported maximum
-number of embedding inputs for this gateway.
-
-The locked Python/JS SDK documentation states the input array is bounded; confirm the exact pinned
-maximum from the authoritative schema/reference before coding.
-
-Then:
-- define one explicit constant/configured request-shape bound in the embedding contract;
-- enforce it before durable enqueue;
-- single string remains one input;
-- exactly-at-limit list succeeds;
-- limit+1 fails with structured HTTP 400;
-- do not rely on queue payload bytes as the cardinality policy;
-- preserve the existing global payload byte bound as a separate safety limit.
-
-Do not invent an Ollama-specific maximum.
-This is an OpenAI-compatible gateway request-shape bound.
-
-Document the exact supported max.
-
-## Preserve all AGV2-029 invariants
-
-Do not alter or regress:
-
-- POST /v1/embeddings uses durable scheduler, never direct dispatch;
-- same endpoint max_concurrency;
-- same quota/budget/accounting authority;
-- same credential/auth path;
-- same leases/fencing/cancellation/recovery/outcome_unknown;
-- operation discriminator inside payload_encrypted only;
-- no plaintext operation/content DB column;
-- legacy chat payloads/results remain readable;
-- embedding inputs/vectors encrypted at rest;
-- Capability.EMBEDDING on alias/provider/adapter;
-- dispatch-time capability and credential revalidation;
-- no fallback;
-- non-stream only;
-- no stream events;
-- no fabricated TTFT;
-- token quota/budget estimator-unavailable fail-closed;
-- request-priced accounting exactly once;
-- token-priced output_units=0;
-- JS default-base64 compatibility;
-- Float32 base64 format;
-- public alias response model;
-- fake Ollama /api/embed transport;
-- no input/vector logging.
-
-No migration.
-Keep head at 0017.
-Do not modify migrations 0001-0017.
-
-## Focused verification
-
-Run new focused tests first.
+### File safety
 
 At minimum:
-- embedding contract null/presence tests;
-- embedding API no-dispatch tests for invalid null/cardinality;
-- adapter index integrity tests.
+- configured root must be absolute;
+- reject path escape/traversal;
+- candidate must resolve inside the configured root;
+- regular files only;
+- symlinks are permitted only when the resolved target remains inside the configured root
+  (needed for common secret projections);
+- reject symlink escape;
+- bounded file size (choose/document a conservative limit, e.g. 64 KiB);
+- UTF-8 text only;
+- reject empty secret material;
+- no NUL;
+- operator-friendly terminal newline handling must be explicit and tested
+  (removing one trailing LF/CRLF is acceptable if documented; never arbitrary whitespace stripping);
+- errors contain only safe SecretRef metadata, never file contents.
 
-Prove the new tests fail against the pre-fix AGV2-029 behavior where practical.
+Never return or log secret material except to the trusted adapter call that already consumes it.
 
-## Full regression gate
+## 3. Runtime resolver factory
 
-Then run the established full gate:
+Replace the production/runtime hard-coded `EnvSecretResolver()` in
+`src/aethergate/scheduler/runtime.py` with the typed resolver factory.
 
-- backend full suite >= 734 and all pass;
-- frontend >= 89 pass;
-- full Playwright >= 32 pass (expected CI-only skips allowed);
-- npm build;
-- npm lint;
-- npx tsc -b --noEmit;
-- OpenAPI/client drift;
-- ruff check src tests;
-- git diff --check;
-- secret/content/vector-data scan;
-- no-legacy-v1 guard + self-test;
-- migration empty -> 0017;
-- populated 0016 -> 0017;
-- config_check;
-- fake Ollama Chat + vision + embeddings;
-- official Python Models + Chat + Responses + Embeddings;
-- official JS Models + Chat + Responses + Embeddings;
-- offline golden path.
+Requirements:
+- API and worker construct the same resolver policy;
+- dev/test existing behavior remains easy;
+- prod cannot instantiate EnvSecretResolver through normal runtime configuration;
+- direct unit tests may instantiate EnvSecretResolver explicitly;
+- dev-only utilities may remain explicit if clearly dev-only and tested;
+- no secret resolver choice comes from a client request or database row.
 
-A full live nomnom rerun is NOT required merely for these request/provider-response validation fixes,
-because no provider transport behavior should change.
+Add tests proving API/worker runtime construction selects the expected resolver.
 
-If you change the real LiteLLM/Ollama wire transport unexpectedly, rerun the relevant live/provider
-proof or root-cause why transport changed.
+## 4. Config preflight
 
-## OpenAPI / generated client
+Extend `python -m aethergate.config_check` without printing secrets.
 
-If request DTO/schema changes affect generated OpenAPI:
-- regenerate backend OpenAPI;
-- regenerate frontend openapi.json/schema.d.ts;
-- do not hand-edit generated artifacts;
-- two consecutive generations must produce zero additional diff.
+Prod:
+- env provider-secret backend = INVALID;
+- file backend with missing/non-absolute/unusable directory = INVALID;
+- file backend correctly configured = VALID (subject to existing config rules).
 
-Keep the locked dependencies unchanged unless genuinely required.
+Dev/test:
+- env remains supported;
+- file may also be selected for deterministic tests.
 
-## Documentation
+Preflight output may name the backend/directory state, but never file names containing sensitive
+operator conventions if avoidable and never secret contents.
 
-Update narrowly:
-- docs/contracts/embeddings.md;
-- docs/contracts/openai-compatibility-baseline.md only if its support matrix needs the input bound/null clarification;
-- docs/development/agent-handoff.md.
+## 5. DNS rebinding closure - fail closed, do not overclaim
 
-Do not perform unrelated cleanup.
+The current `DestinationPolicy` allowlists host strings and blocks literal metadata/link-local/etc.
+That is not sufficient to claim DNS-rebinding resistance.
 
-## Remote CI
+For CURRENT production Ollama support, choose ONE of these designs and prove it:
 
-Push completed corrections to origin/v2.
+### Preferred if pinned LiteLLM supports a safe custom transport
+Implement connection-level resolution/pinning such that:
+- the exact resolved IP used for the connection is validated;
+- DNS cannot change between validation and connect;
+- HTTPS semantics/SNI remain correct where applicable;
+- every address is checked against the destination policy.
 
-On the EXACT FINAL v2 SHA require:
+### Acceptable narrow Beta policy if safe connection-level pinning is not cleanly available
+Fail closed in `prod` by requiring the configured upstream `base_destination` host to be a literal
+IPv4/IPv6 address.
+
+This is acceptable for the current supported Ollama provider and the nomnom/private-LAN deployment.
+It eliminates the DNS-rebinding class rather than pretending a pre-connect lookup is sufficient.
+
+If this narrow policy is chosen:
+- dev/test may continue to use service DNS names for deterministic Compose CI;
+- docs must explicitly say production DNS upstream names remain disabled until transport-level
+  pinning exists;
+- do not add an insecure override such as "allow unsafe DNS" in prod.
+
+In all environments preserve:
+- explicit host allowlist;
+- supported schemes only;
+- no URL userinfo;
+- no missing host;
+- metadata/link-local/loopback/multicast/unspecified/reserved literal destinations;
+- explicitly allow authorized private-LAN literal IPs when allowlisted.
+
+Do not start rejecting RFC1918 private addresses generally: private Ollama is an intended deployment.
+
+## 6. Redirect escape closure
+
+Empirically inspect the pinned LiteLLM transport used by BOTH:
+- `acompletion` (Chat / Responses / vision);
+- `aembedding` (Embeddings).
+
+A provider HTTP redirect MUST NOT be able to make the client contact a different destination.
+
+Requirements:
+- prove whether redirects are followed today;
+- configure/replace the pinned client path so redirects are NOT followed, or enforce an equally strong
+  per-hop policy;
+- no hidden second request to the redirect target;
+- 301/302/303/307/308 must fail safely as provider/upstream errors unless the transport returns a
+  non-followed response that is safely mapped;
+- never follow a redirect to loopback, metadata, link-local, a non-allowlisted host, or another
+  private host;
+- do not trust the `Location` header merely because the original host was allowed;
+- redirect Location contents must not be reflected into logs/client errors.
+
+### Required real-transport proof
+
+Use a real local HTTP redirect fixture with the pinned LiteLLM transport, not only a monkeypatched
+adapter method.
+
+Create:
+- allowed origin fixture;
+- disallowed/canary target fixture that records hit count safely.
+
+For completion AND embedding transports:
+1. origin responds with each relevant redirect class;
+2. Location points to canary target;
+3. gateway/provider adapter returns safe failure;
+4. canary hit count remains **zero**.
+
+No network access outside the test environment.
+
+## 7. Catalog + dispatch share the same policy
+
+Endpoint create/update and dispatch-time route preparation must apply the same environment-aware
+destination policy.
+
+Prove:
+- destination denied at catalog create/update is never persisted;
+- if policy/config changes after a request was queued, dispatch-time validation still denies;
+- prod hostname destination cannot slip through because it was persisted under dev/test rules;
+- metadata/link-local literal destinations remain denied even if mistakenly present in the allowlist.
+
+No direct DB-policy duplication in routers.
+
+## 8. Provider-secret + egress interaction
+
+Secret resolution occurs only AFTER the route/destination has passed the appropriate dispatch-time
+security checks, or otherwise in an order that never exposes secret material to a denied destination.
+
+Prove a denied destination does not receive provider credentials.
+
+Do not log whether a particular secret value existed; safe "secret resolution failed" / "destination
+denied" categories are sufficient.
+
+## 9. Logging / diagnostics canaries
+
+Extend redaction/security tests with:
+- file-backed provider secret canary;
+- redirect Location canary;
+- secret directory/path canary where appropriate.
+
+No logs/diagnostics/handoff may contain:
+- provider secret contents;
+- raw Authorization header;
+- redirect Location if it contains sensitive query/userinfo;
+- file contents;
+- queue encryption key;
+- OIDC/DB/bootstrap secrets.
+
+Safe metadata:
+- secret backend kind;
+- SecretRef ID if existing policy already treats opaque IDs as safe;
+- destination-denied reason family;
+- HTTP status.
+
+## 10. Deterministic offline CI
+
+Extend existing deterministic tests/golden tooling without requiring Internet.
+
+The normal offline golden path may continue in dev/test mode with service DNS and env fixture secrets.
+
+Add explicit production-boundary tests that prove:
+- prod + env SecretResolver configuration rejected;
+- prod + file resolver works;
+- no env fallback in prod;
+- file path escape rejected;
+- prod egress DNS policy is enforced;
+- redirect canary never contacted by completion transport;
+- redirect canary never contacted by embedding transport.
+
+Do not weaken the existing fully offline CI requirement.
+
+## 11. Live nomnom proof
+
+Use nomnom for the real deployment check.
+
+Do not download models.
+
+Because the currently supported real provider is Ollama on the private LAN, verify using the actual
+allowlisted literal-IP endpoint.
+
+At minimum:
+1. inspect current installed models/resources;
+2. launch/recreate a disposable current AetherGate stack using the new production egress policy
+   (or a production-policy test mode that exercises the identical policy object);
+3. `bypass=false`;
+4. real official Python SDK Models + one Chat request succeeds against the literal private IP;
+5. existing vision request succeeds if the installed proven vision model is still available;
+6. embeddings live proof only if an embedding-capable model is installed - do not download one;
+7. hostname form of the same upstream is rejected in prod if the literal-IP policy was selected;
+8. metadata/link-local target denied;
+9. no unrelated services/resources touched;
+10. tear down only disposable resources.
+
+FileSecretResolver functionality may be proven deterministically if the real Ollama route has no
+provider credential. Do not invent a fake live credential requirement merely to satisfy a checklist.
+
+## 12. No migration
+
+Expected: **NO migration**.
+
+Migration head remains `0017`.
+Do not modify migrations `0001`-`0017`.
+
+Secret material remains outside PostgreSQL.
+No new plaintext credential columns.
+
+## 13. Documentation
+
+Update:
+- `docs/architecture/security.md`
+- `docs/architecture/provider-model.md`
+- `docs/architecture/v2-overview.md`
+- `docs/operations/alpha-runbook.md` (or add a clearly named Beta security section)
+- `docs/development/README.md`
+- README if its security/deferred statements become stale
+- `docs/development/agent-handoff.md`.
+
+Remove stale statements saying:
+- EnvSecretResolver is the only runtime resolver;
+- production secret backend is wholly deferred;
+- redirect hardening is still deferred,
+but only after the implementation/proof exists.
+
+Do NOT declare Beta 1 complete in this task.
+
+Document the exact chosen production DNS policy honestly:
+- transport-level pinning if actually implemented and proven; OR
+- literal-IP-only production upstreams until pinning is implemented.
+
+## 14. Regression gate
+
+Run the complete current gate:
+
+- backend full suite; baseline **758**
+- frontend unit/component; baseline **89**
+- full Playwright; baseline **32 passed / 6 skipped**
+- npm build
+- npm lint
+- `npx tsc -b --noEmit`
+- OpenAPI/client drift
+- ruff check src tests
+- git diff --check
+- secret/content/image/vector/redirect canary scans
+- no-legacy-v1 guard + self-test
+- migration empty -> 0017
+- populated 0016 -> 0017
+- config_check dev valid
+- config_check prod security cases
+- fake Ollama Chat + Responses + vision + embeddings
+- official Python SDK full supported surface
+- official JS SDK full supported surface
+- offline golden path
+- new redirect real-transport tests.
+
+Every red test must be root-caused.
+Do not weaken tests to accept redirects or prod env secrets.
+
+## 15. Remote CI gate
+
+Push completed work to `origin/develop`.
+
+On the EXACT FINAL develop SHA require:
 - backend = completed/success
 - frontend = completed/success
 - schema-secret-gate = completed/success
-- alpha-golden-path = completed/success
+- alpha-golden-path = completed/success.
 
 If any is red:
 - inspect logs;
 - root-cause;
 - fix;
-- push a new SHA;
+- push;
 - require all four green on the new final SHA.
 
-## PR #3
+Do not declare completion from local evidence alone.
 
-PR #3 must remain open and unmerged.
+## 16. Feature PR to main
 
-After final CI:
-- verify PR #3 head equals the exact final v2 SHA;
+After final v2 CI is green:
+- create a new PR from `develop` -> `main` (expected PR #4 if no other PR intervenes);
+- include final SHA, security design choice, and verification summary;
 - verify mergeable;
-- update its description with AGV2-029V closure details;
-- update backend/frontend/Playwright counts if changed;
-- update exact final SHA and exact four workflow IDs.
+- leave open/unmerged.
 
-Do NOT merge PR #3.
+Do NOT merge automatically.
+Never push directly to main.
 
-## Handoff
+## 17. No New Scope
 
-Update docs/development/agent-handoff.md with:
+Do not implement:
+- production HA/failover;
+- new provider kinds;
+- Prometheus/OpenTelemetry exporters;
+- paging/alerting;
+- billing/invoice/payment;
+- hosted SaaS tenancy;
+- image generation/audio/tools/MCP/files;
+- unrelated UI redesign;
+- generic Vault/AWS/GCP SDK integrations.
 
-- the three independent-review findings;
-- provider index validation policy;
-- pinned optional-but-non-null field evidence;
-- exact null semantics;
-- exact max embedding input count and source;
-- focused tests;
-- full regression counts;
+The file resolver is the production boundary for externally projected provider secrets; do not add a
+cloud-secret-manager matrix in this milestone.
+
+## 18. Handoff
+
+Record:
+- implementation commits;
+- exact provider-secret backend design;
+- file naming/path safety/newline/size semantics;
+- proof there is no prod env fallback;
+- exact production DNS policy selected and why;
+- pinned LiteLLM redirect behavior discovered;
+- exact mechanism preventing redirect follow;
+- completion + embedding redirect canary proof;
+- catalog + dispatch policy proof;
+- denied-destination/no-secret-exposure proof;
+- logging/canary results;
+- live nomnom result;
 - migration head 0017;
-- final v2 SHA;
-- exact four remote workflow IDs/conclusions;
-- PR #3 head/status;
+- backend/frontend/Playwright counts;
+- exact final develop SHA + four workflow IDs/conclusions;
+- PR status/head;
 - WIP lifecycle;
 - exactly one recommended next step:
 
-  Merge PR #3 (v2 -> main) through the reviewed/user-authorized process.
+  **Begin AGV2-031 Beta 1 release hardening: production deployment profile, architecture/CODEOWNERS
+  enforcement, fault-injection/recovery release gates, and Beta readiness documentation.**
 
-Never include raw embedding input, vectors/base64, credentials, encrypted bytes, or large logs.
+Never include secret contents, file contents, credentials, provider/session tokens, prompt/output
+content, encrypted payloads, redirect query contents, or large logs.
 
 ## Commit / Push
 
-Use a narrow conventional commit such as:
+Use scoped conventional commits, for example:
+- `feat(security): add production provider secret resolver`
+- `fix(security): close upstream redirect and dns escape paths`
+- `test(security): prove production inference boundaries`
+- `docs: document beta security foundation`
 
-fix(embeddings): tighten request and provider validation
+Use fewer/more commits if cleaner.
 
-Additional focused tests/docs commits are fine if useful.
-
-Push to origin/v2.
+Push all completed work to origin/develop.
 Never push directly to main.
-Do not ask whether to commit/push/continue.
+Do not ask whether to continue/commit/push.
 
 The task is complete only when:
-- malformed provider indexes cannot corrupt input/vector correspondence;
-- explicit null cannot masquerade as omission for pinned embedding semantic fields;
-- the documented embedding input-count bound is enforced before enqueue;
-- all existing embeddings/Chat/Responses/vision behavior remains green;
+- production runtime cannot use env provider-secret resolution;
+- file-backed projected provider secrets work without DB persistence or env fallback;
+- DNS rebinding is actually closed for the supported production provider path (not merely
+  pre-resolved and claimed safe);
+- provider redirects cannot escape the configured destination for completion or embedding;
+- catalog and dispatch enforce the same destination policy;
+- denied destinations never receive provider credentials;
+- existing Chat/Responses/vision/embeddings regressions remain green;
 - migration head remains 0017;
-- all four remote workflows are green on the exact final v2 SHA;
-- PR #3 is updated, mergeable, open, and unmerged;
-- the handoff is truthful;
-- .aethergate-wip is removed only after final remote verification.
+- all four remote workflows are green on the exact final origin/develop SHA;
+- a new develop -> main PR exists and remains unmerged;
+- handoff is complete;
+- `.aethergate-wip` is removed only after final remote verification.

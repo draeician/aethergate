@@ -77,7 +77,7 @@ generic interactive workflow boilerplate below.
   staged/committed/pushed, and must contain no secrets. Safe contents are the task ID, branch, and a
   start timestamp. If context is compacted/restarted and the task is still incomplete, recreate the
   marker if it is missing. Remove `.aethergate-wip` only after all task completion criteria are green,
-  the handoff is updated, all required commits are pushed to `origin/v2`, and the remote branch has
+  the handoff is updated, all required commits are pushed to `origin/develop`, and the remote branch has
   been verified. If the task is blocked or incomplete, leave the marker in place.
 - `docs/development/agent-handoff.md` is the canonical previous-task state.
 - After any context compaction, summarization, restart, or uncertainty about what remains to do,
@@ -89,7 +89,7 @@ generic interactive workflow boilerplate below.
   Then inspect `git status` / recent history and continue the task from repo state.
 - Do not ask the user to choose among commit/push/stop options when the active task already specifies
   the required completion behavior.
-- If the active task says to commit and push to `origin/v2`, do that automatically after required
+- If the active task says to commit and push to `origin/develop`, do that automatically after required
   verification succeeds. Never push directly to `main`.
 - Do not invoke the generic `commit` shortcut/version-bump workflow merely because a scoped v2 task
   is ready to commit. Follow the active task's explicit conventional-commit instructions instead.
@@ -99,7 +99,7 @@ generic interactive workflow boilerplate below.
   genuine blocker remains after best effort, record it in `agent-handoff.md`, commit/push the
   truthful state if the task permits, and stop.
 - A task is complete only when its stated completion criteria are satisfied, the handoff is updated,
-  commits are created, and required pushes are present on `origin/v2`.
+  commits are created, and required pushes are present on `origin/develop`.
 
 ## Common Principles
 - Don't assume. Don't hide confusion. Surface tradeoffs.

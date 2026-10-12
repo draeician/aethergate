@@ -1,6 +1,34 @@
 # AetherGate Agent Handoff
 
 ## Current State
+- Canonical product/release branch: `main`.
+- Active development/integration branch: `develop`.
+- Historical `v2` branch is retired from active development after the canonical cutover; do not use it for new tasks.
+- PR #3 (Embeddings, historical `v2` -> `main`) merged successfully at main commit `7c47cd8575dc96265c02e17333ee88bda920de99`.
+- All four post-merge workflows are green on that exact main SHA:
+  - backend `38263020817`
+  - frontend `38263020743`
+  - schema-secret-gate `38263020802`
+  - alpha-golden-path `38263020770`
+- Core OpenAI surface merged to main: Models, Chat Completions text + inline-image input, Responses text + inline-image input subset, Embeddings.
+- Current queued task: **AGV2-030 — Beta 1 security foundation** on `develop`.
+- Migration head remains `0017`.
+- New work targets `develop`, satisfies exact-SHA CI there, then opens a reviewed `develop` -> `main` PR. Never push directly to `main`.
+
+## Branch Workflow Transition
+The long-lived development lane is now `develop`; `v2` is historical only.
+
+Rules:
+- `main` = canonical/release branch.
+- `develop` = active integration/development branch.
+- `v2` = historical branch only; do not base new work on it.
+- `deploy/v2/`, `scripts/dev/v2`, and `scripts/ops/v2` remain canonical runtime/tooling paths; the `v2` path component is historical naming and is intentionally not renamed.
+- WIP markers for new work record `branch=develop`.
+- Required task commits push to `origin/develop`.
+- Reviewed/user-authorized merge remains required for `develop` -> `main`.
+
+## Historical Handoff Record
+## Current State
 - Branch: `v2`. **AGV2-029 (OpenAI Embeddings API)** complete, and **AGV2-029V** (independent-review
   verification closure) complete: `POST /v1/embeddings` is a non-streaming inference operation
   through the same durable scheduler/accounting authority as Chat/Responses. String/list-of-strings

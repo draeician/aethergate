@@ -3,7 +3,7 @@ name: backend
 on:
   pull_request:
   push:
-    branches: [v2, main]
+    branches: [develop, main]
   workflow_dispatch:
 
 permissions:
