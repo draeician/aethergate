@@ -849,6 +849,38 @@
         "title": "CliSessionRead",
         "type": "object"
       },
+      "CreateEmbeddingResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/EmbeddingData"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "object": {
+            "const": "list",
+            "default": "list",
+            "title": "Object",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/EmbeddingUsage"
+          }
+        },
+        "required": [
+          "data",
+          "model",
+          "usage"
+        ],
+        "title": "CreateEmbeddingResponse",
+        "type": "object"
+      },
       "CredentialAudience": {
         "description": "Which surface a scoped API credential may authenticate against.",
         "enum": [
@@ -996,6 +1028,140 @@
           "device_code"
         ],
         "title": "DevicePollRequest",
+        "type": "object"
+      },
+      "EmbeddingCreateRequest": {
+        "description": "Pinned Embeddings request surface (string input, float/base64 encoding).",
+        "properties": {
+          "api_base": {
+            "title": "Api Base"
+          },
+          "api_key": {
+            "title": "Api Key"
+          },
+          "api_token": {
+            "title": "Api Token"
+          },
+          "base_url": {
+            "title": "Base Url"
+          },
+          "custom_api_base": {
+            "title": "Custom Api Base"
+          },
+          "deployment": {
+            "title": "Deployment"
+          },
+          "dimensions": {
+            "title": "Dimensions"
+          },
+          "encoding_format": {
+            "anyOf": [
+              {
+                "enum": [
+                  "float",
+                  "base64"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encoding Format"
+          },
+          "endpoint": {
+            "title": "Endpoint"
+          },
+          "extra_headers": {
+            "title": "Extra Headers"
+          },
+          "headers": {
+            "title": "Headers"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "model": {
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "organization": {
+            "title": "Organization"
+          },
+          "project": {
+            "title": "Project"
+          },
+          "provider": {
+            "title": "Provider"
+          },
+          "upstream_model": {
+            "title": "Upstream Model"
+          },
+          "user": {
+            "title": "User"
+          }
+        },
+        "required": [
+          "model",
+          "input"
+        ],
+        "title": "EmbeddingCreateRequest",
+        "type": "object"
+      },
+      "EmbeddingData": {
+        "additionalProperties": false,
+        "description": "A single embedding entry (numeric floats or a base64 Float32 string).",
+        "properties": {
+          "embedding": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Embedding"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "object": {
+            "const": "embedding",
+            "default": "embedding",
+            "title": "Object",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "embedding"
+        ],
+        "title": "EmbeddingData",
+        "type": "object"
+      },
+      "EmbeddingUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt_tokens",
+          "total_tokens"
+        ],
+        "title": "EmbeddingUsage",
         "type": "object"
       },
       "EndpointCreate": {
@@ -10406,6 +10572,47 @@
         "summary": "Chat Completions",
         "tags": [
           "chat"
+        ]
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "operationId": "embeddings_v1_embeddings_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbeddingCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateEmbeddingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Embeddings",
+        "tags": [
+          "embeddings"
         ]
       }
     },
