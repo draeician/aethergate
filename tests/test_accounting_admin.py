@@ -571,10 +571,15 @@ async def test_concurrent_price_policy_create_race(acct_engine, acct_factory):
     barrier = asyncio.Barrier(2)
 
     async def attempt(name: str) -> str:
+        # The partial unique index backstop aborts the loser's transaction when
+        # the create pre-check races. Catch the domain error *outside*
+        # ``session.begin()`` so the context manager rolls the aborted
+        # transaction back on the exception path (a raw ``IntegrityError`` must
+        # not escape, per this test's docstring).
         async with acct_factory() as session:
-            async with session.begin():
-                await barrier.wait()
-                try:
+            try:
+                async with session.begin():
+                    await barrier.wait()
                     await repository.create_price_policy(
                         session,
                         domain.PricePolicy(
@@ -586,9 +591,9 @@ async def test_concurrent_price_policy_create_race(acct_engine, acct_factory):
                             enabled=True,
                         ),
                     )
-                except PricePolicyConflictError:
-                    return "conflict"
-                return "winner"
+            except PricePolicyConflictError:
+                return "conflict"
+            return "winner"
 
     results = await asyncio.gather(attempt("a"), attempt("b"))
     assert sorted(results) == ["conflict", "winner"]
@@ -649,10 +654,15 @@ async def test_concurrent_price_policy_enable_race(acct_engine, acct_factory):
     barrier = asyncio.Barrier(2)
 
     async def enable(policy_id: str, price: str) -> str:
+        # The conflict may be detected either by the service pre-check (clean
+        # transaction) or by the partial unique index backstop, whose
+        # ``IntegrityError`` aborts the transaction. Catching the domain error
+        # *outside* ``session.begin()`` lets the context manager roll the aborted
+        # transaction back on the exception path instead of committing a dead one.
         async with acct_factory() as session:
-            async with session.begin():
-                await barrier.wait()
-                try:
+            try:
+                async with session.begin():
+                    await barrier.wait()
                     await repository.update_price_policy(
                         session,
                         PricePolicyId(policy_id),
@@ -665,9 +675,9 @@ async def test_concurrent_price_policy_enable_race(acct_engine, acct_factory):
                         enabled=True,
                         name=None,
                     )
-                except PricePolicyConflictError:
-                    return "conflict"
-                return "winner"
+            except PricePolicyConflictError:
+                return "conflict"
+            return "winner"
 
     results = await asyncio.gather(enable("pp-a", "0.05"), enable("pp-b", "0.06"))
     assert sorted(results) == ["conflict", "winner"]
