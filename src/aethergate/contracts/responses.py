@@ -27,6 +27,7 @@ from aethergate.adapters.base import ImageContentPart, Message, TextContentPart
 from aethergate.contracts.common import ContractModel
 from aethergate.errors import UnsupportedFeature
 from aethergate.inference.images import (
+    DETAIL_OMITTED,
     ImageLimits,
     enforce_request_image_limits,
     parse_inline_image,
@@ -102,11 +103,14 @@ def _content_parts(
             url = part.get("image_url")
             if not isinstance(url, str):
                 raise UnsupportedFeature("image_source", param=part_param)
-            # Never silently ignore the semantic detail selector: the pinned
-            # Responses contract is `detail: low|high|auto|original` (defaults
-            # to `auto`); only the neutral `auto`/omitted mode is supported.
+            # Never silently ignore the semantic detail selector. The pinned
+            # Responses content-part contract is `detail?: ImageDetail | null`
+            # (optional AND nullable), so an explicit `null` is tolerated here
+            # (unlike Chat); only the neutral `auto`/omitted mode is supported.
             validate_image_detail(
-                part.get("detail"), param=f"{part_param}.detail"
+                part["detail"] if "detail" in part else DETAIL_OMITTED,
+                param=f"{part_param}.detail",
+                allow_null=True,
             )
             image = parse_inline_image(
                 url, max_image_bytes=limits.max_image_bytes, param=part_param

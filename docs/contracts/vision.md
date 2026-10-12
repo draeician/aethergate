@@ -54,20 +54,33 @@ locked official SDKs (not from memory):
 | Chat Completions | `image_url.detail` | `auto` \| `low` \| `high` (`openai==2.54.0` Python `ImageURL`); `openai@7.32.0` JS `ChatCompletionContentPartImage.ImageURL` also `original` | not stated |
 | Responses | `input_image.detail` | `low` \| `high` \| `auto` \| `original` (`ResponseInputImageParam`); JS `ResponseInputImageContent.detail?: ImageDetail \| null` | `auto` |
 
-AetherGate policy (identical for Chat and Responses):
+AetherGate policy — **omission is distinct from an explicit `null`**. The pinned
+contracts are optional in both surfaces, but only the Responses content-part
+type is additionally nullable (`detail?: ImageDetail | null`). AetherGate uses
+key-presence detection (a sentinel) to honor that distinction per surface:
 
-- **omitted** detail is accepted (the pinned Responses contract defaults to
-  `auto`; Chat's `auto` is the neutral provider default);
-- **`auto`** is accepted: it is the neutral/default mode and imposes no
-  additional fidelity semantics on the transport;
+- **omitted** detail is accepted on both surfaces (the pinned Responses contract
+  defaults to `auto`; Chat's `auto` is the neutral provider default);
+- **`auto`** is accepted on both surfaces: it is the neutral/default mode and
+  imposes no additional fidelity semantics on the transport;
+- **explicit `detail: null`**:
+  - **Chat** — rejected (`400 unsupported_feature`). The pinned Chat
+    `image_url.detail` is optional-but-non-nullable (Python `ImageURL` is a
+    `total=False` TypedDict with `detail: Literal['auto','low','high']`; JS
+    `detail?: 'auto'|'low'|'high'|'original'`), so a client-supplied `null` is a
+    contract violation and is never silently accepted;
+  - **Responses** — tolerated. The pinned Responses content-part type is
+    `detail?: ImageDetail | null`, so `null` is a valid value and is treated like
+    the omitted/`auto` default. This cross-SDK tolerance is intentional and is
+    documented here;
 - **`low`**, **`high`**, and **`original`** are recognized non-default semantic
   modes. The pinned LiteLLM/Ollama path has no faithful per-image detail control,
-  so they are **explicitly rejected** with structured HTTP `400
+  so they are **explicitly rejected** on both surfaces with structured HTTP `400
   unsupported_feature` (`param` = the precise `image_url.detail` /
   `input_image.detail` path). They are never silently ignored and the request
   never reaches the adapter/upstream.
 - any other (unrecognized) value or non-string value is likewise rejected as a
-  contract violation.
+  contract violation on both surfaces.
 
 This preserves the settled compatibility rule: a semantic field is either
 implemented faithfully or explicitly rejected, never silently dropped.

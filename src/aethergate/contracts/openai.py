@@ -17,6 +17,7 @@ from aethergate.adapters.base import ImageContentPart, Message, TextContentPart
 from aethergate.contracts.common import ContractModel
 from aethergate.errors import UnsupportedFeature
 from aethergate.inference.images import (
+    DETAIL_OMITTED,
     ImageLimits,
     enforce_request_image_limits,
     parse_inline_image,
@@ -93,15 +94,22 @@ class ChatMessage(ContractModel):
                 image_url = part.get("image_url")
                 if isinstance(image_url, dict):
                     url = image_url.get("url")
-                    detail = image_url.get("detail")
+                    # Distinguish omission from an explicitly supplied null: the
+                    # pinned Chat contract is optional-but-non-nullable
+                    # (`detail: auto|low|high`; JS also `original`), so an
+                    # explicit `null` must be rejected while omission is allowed.
+                    detail = (
+                        image_url["detail"]
+                        if "detail" in image_url
+                        else DETAIL_OMITTED
+                    )
                 else:
                     url = image_url
-                    detail = None
+                    detail = DETAIL_OMITTED
                 if not isinstance(url, str):
                     raise UnsupportedFeature("image_source", param=param)
-                # Never silently ignore the semantic detail selector: the pinned
-                # Chat contract is `detail: auto|low|high` (JS also `original`);
-                # only the neutral `auto`/omitted mode is supported.
+                # Never silently ignore the semantic detail selector: only the
+                # neutral `auto`/omitted mode is supported (Chat is non-nullable).
                 validate_image_detail(detail, param=f"{param}.image_url.detail")
                 image = parse_inline_image(
                     url, max_image_bytes=limits.max_image_bytes, param=param

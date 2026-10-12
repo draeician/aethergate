@@ -344,6 +344,33 @@ async def test_chat_auto_detail_succeeds_and_reaches_adapter(vision_client):
     assert adapter.requests  # reached the adapter
 
 
+async def test_chat_omitted_detail_succeeds_and_reaches_adapter(vision_client):
+    client, adapter = vision_client
+    resp = await client.post("/v1/chat/completions", json=_chat_vision_body())
+    assert resp.status_code == 200
+    assert adapter.requests
+
+
+async def test_chat_explicit_null_detail_returns_400_without_dispatch(vision_client):
+    # Explicit JSON null is distinct from omission; Chat is non-nullable.
+    client, adapter = vision_client
+    body = _chat_vision_body()
+    body["messages"][0]["content"][1]["image_url"]["detail"] = None
+    resp = await client.post("/v1/chat/completions", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_feature"
+    assert adapter.requests == []  # never reached the adapter/upstream
+
+
+async def test_responses_explicit_null_detail_tolerated_and_dispatches(vision_client):
+    client, adapter = vision_client
+    body = _responses_vision_body()
+    body["input"][0]["content"][1]["detail"] = None
+    resp = await client.post("/v1/responses", json=body)
+    assert resp.status_code == 200
+    assert adapter.requests
+
+
 @pytest.mark.parametrize("detail", ["low", "high", "original"])
 async def test_chat_non_default_detail_returns_400_without_dispatch(
     vision_client, detail

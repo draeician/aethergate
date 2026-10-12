@@ -11,9 +11,11 @@ from aethergate.contracts.openai import ChatCompletionRequest
 from aethergate.contracts.responses import ResponsesRequest
 from aethergate.errors import ImageLimitExceeded, UnsupportedFeature
 from aethergate.inference.images import (
+    DETAIL_OMITTED,
     ImageLimits,
     enforce_request_image_limits,
     parse_inline_image,
+    validate_image_detail,
 )
 from aethergate.scheduler.service import (
     deserialize_chat_payload,
@@ -285,14 +287,31 @@ def _chat_image(image_url: str, **image_url_extra) -> dict:
     return {"type": "image_url", "image_url": inner}
 
 
-@pytest.mark.parametrize("detail", [None, "auto"])
-def test_chat_omitted_and_auto_detail_succeed(detail):
+def test_chat_omitted_detail_succeeds():
+    # Omission (key absent) is legal: the pinned Chat contract is total=False.
     part = _chat_image(PNG_DATA_URL)
-    if detail is not None:
-        part["image_url"]["detail"] = detail
+    assert "detail" not in part["image_url"]
     req = _chat([{"role": "user", "content": [part]}])
-    messages = req.to_canonical_messages()
-    assert messages[0].has_images
+    assert req.to_canonical_messages()[0].has_images
+
+
+def test_chat_auto_detail_succeeds():
+    req = _chat(
+        [{"role": "user", "content": [_chat_image(PNG_DATA_URL, detail="auto")]}]
+    )
+    assert req.to_canonical_messages()[0].has_images
+
+
+def test_chat_explicit_null_detail_rejected():
+    # Explicit JSON null is distinct from omission and is a contract violation:
+    # the pinned Chat `ImageURL.detail` is optional-but-non-nullable.
+    req = _chat(
+        [{"role": "user", "content": [_chat_image(PNG_DATA_URL, detail=None)]}]
+    )
+    with pytest.raises(UnsupportedFeature) as info:
+        req.to_canonical_messages()
+    assert info.value.feature == "image_detail"
+    assert info.value.param == "messages[user].content[0].image_url.detail"
 
 
 @pytest.mark.parametrize("detail", ["low", "high", "original"])
@@ -324,22 +343,55 @@ def test_chat_non_string_detail_rejected():
     assert "image_detail" in info.value.feature
 
 
+def test_validate_image_detail_sentinel_distinguishes_omission_from_null():
+    # Direct unit proof of the sentinel contract: omission allowed, null rejected
+    # unless the caller opts into nullable (Responses) semantics.
+    validate_image_detail(DETAIL_OMITTED, param="p")
+    validate_image_detail("auto", param="p")
+    with pytest.raises(UnsupportedFeature):
+        validate_image_detail(None, param="p")
+    validate_image_detail(None, param="p", allow_null=True)
+
+
 def _responses_image(url: str, **part_extra) -> dict:
     part = {"type": "input_image", "image_url": url}
     part.update(part_extra)
     return part
 
 
-@pytest.mark.parametrize("detail", [None, "auto"])
-def test_responses_omitted_and_auto_detail_succeed(detail):
+def test_responses_omitted_detail_succeeds():
     part = _responses_image(PNG_DATA_URL)
-    if detail is not None:
-        part["detail"] = detail
+    assert "detail" not in part
     req = ResponsesRequest.model_validate(
         {"model": "m", "input": [{"role": "user", "content": [part]}]}
     )
-    messages = req.to_canonical_messages()
-    assert messages[0].has_images
+    assert req.to_canonical_messages()[0].has_images
+
+
+def test_responses_auto_detail_succeeds():
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "m",
+            "input": [
+                {"role": "user", "content": [_responses_image(PNG_DATA_URL, detail="auto")]}
+            ],
+        }
+    )
+    assert req.to_canonical_messages()[0].has_images
+
+
+def test_responses_explicit_null_detail_tolerated():
+    # The pinned Responses content-part contract is `detail?: ImageDetail | null`
+    # (optional AND nullable), so an explicit null is tolerated here — unlike Chat.
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "m",
+            "input": [
+                {"role": "user", "content": [_responses_image(PNG_DATA_URL, detail=None)]}
+            ],
+        }
+    )
+    assert req.to_canonical_messages()[0].has_images
 
 
 @pytest.mark.parametrize("detail", ["low", "high", "original"])

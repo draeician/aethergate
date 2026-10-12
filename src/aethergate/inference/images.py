@@ -63,6 +63,15 @@ _ALLOWED_MEDIA_TYPES = ("image/png", "image/jpeg", "image/webp")
 # rejected (never silently dropped). Any unrecognized value is rejected too.
 _NEUTRAL_IMAGE_DETAILS = ("auto",)
 
+# Sentinel distinguishing an *omitted* ``detail`` key from an explicitly
+# supplied ``null``. The pinned Chat contracts are optional-but-non-nullable
+# (Python `ImageURL` is ``total=False`` with
+# ``detail: Literal['auto','low','high']``; JS
+# ``detail?: 'auto'|'low'|'high'|'original'``), so omission is legal but an
+# explicit ``null`` is a contract violation on Chat.
+_DETAIL_OMITTED = object()
+DETAIL_OMITTED = _DETAIL_OMITTED
+
 _DATA_URL_RE = re.compile(r"^data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,(.+)$", re.DOTALL)
 
 
@@ -107,18 +116,36 @@ def _decoded_signature_matches(media_type: str, data: bytes) -> bool:
     return False
 
 
-def validate_image_detail(detail: object, *, param: str) -> None:
+def validate_image_detail(
+    detail: object, *, param: str, allow_null: bool = False
+) -> None:
     """Validate an image ``detail`` selector against the pinned contract.
 
-    ``None``/omitted is permitted (the pinned contracts defaulting to ``auto``).
-    The neutral ``auto`` mode is permitted. Any other *recognized* semantic mode
-    (``low``/``high``/``original``) is explicitly rejected — the pinned
+    Omission (the ``_DETAIL_OMITTED`` sentinel, used by callers via key-presence
+    detection rather than ``.get()``) is always permitted and is distinct from an
+    explicitly supplied ``null``:
+
+    - Chat `image_url.detail` is **optional but not nullable** (Python `ImageURL`
+      is ``total=False`` with ``detail: Literal['auto','low','high']``; JS
+      ``detail?: 'auto'|'low'|'high'|'original'``). An explicit ``null`` is a
+      contract violation, so ``allow_null=False`` (the default) rejects it.
+    - Responses `input_image.detail` is **optional and nullable** in the pinned
+      contract (JS ``detail?: ImageDetail | null``), so the Responses caller
+      passes ``allow_null=True`` to tolerate an explicit ``null``.
+
+    The neutral ``auto`` mode is permitted. Any recognized non-default semantic
+    mode (``low``/``high``/``original``) is explicitly rejected — the pinned
     LiteLLM/Ollama path has no faithful non-default detail control, so accepting
-    it would silently drop a semantic field. Unrecognized values are rejected as
-    contract violations. Error text never contains image bytes or base64.
+    it would silently drop a semantic field. Unrecognized and non-string values
+    are rejected as contract violations. Error text never contains image bytes
+    or base64.
     """
-    if detail is None:
+    if detail is _DETAIL_OMITTED:
         return
+    if detail is None:
+        if allow_null:
+            return
+        raise UnsupportedFeature("image_detail", param=param)
     if not isinstance(detail, str):
         raise UnsupportedFeature("image_detail", param=param)
     if detail in _NEUTRAL_IMAGE_DETAILS:
@@ -207,4 +234,5 @@ __all__ = [
     "parse_inline_image",
     "enforce_request_image_limits",
     "validate_image_detail",
+    "DETAIL_OMITTED",
 ]
