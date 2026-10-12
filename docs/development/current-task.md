@@ -1,3 +1,40 @@
+# RESUME HOLD — branch workflow must be normalized before AGV2-030 starts
+
+AGV2-030 is **queued but not started**.
+
+The canonical product is now on `main`. PR #3 merged at
+`7c47cd8575dc96265c02e17333ee88bda920de99`, and all four post-merge workflows are green on that
+exact `main` SHA:
+
+- backend `38263020817`
+- frontend `38263020743`
+- schema-secret-gate `38263020802`
+- alpha-golden-path `38263020770`
+
+The long-lived branch name `v2` is now historical/misleading. The operator explicitly flagged that
+OpenCode is still reporting `v2`. Do **not** dispatch AGV2-030 until the active development-branch
+policy is explicitly normalized. The next architect chat must ask the operator which policy to use
+going forward (for example a neutral long-lived development branch or per-task branches from
+`main`); do not silently choose a replacement branch.
+
+Current remote state at this checkpoint:
+- `main`: `7c47cd8575dc96265c02e17333ee88bda920de99`
+- `v2`: `df6ac9ec8e6a218ab214ebb93f268f0f4038b2d9` before this checkpoint update
+- `v2` is one docs-only task-queue commit ahead of the old PR head and is behind the canonical
+  `main` merge history; it must not be treated as the new canonical base without reconciliation.
+- no open PR exists after PR #3 merged.
+
+The docs-only `v2` queue SHA had backend/frontend/schema-secret-gate green, but
+alpha-golden-path run `38263913698` failed at the final browser OIDC login/dashboard assertion
+after setup, SDK, backup/restore, post-restore, and JS SDK smoke had all succeeded. Per `AGENTS.md`,
+that red gate is real until root-caused. Do not call the queued branch green and do not start product
+work on top of it without resolving the branch/base issue and the red gate.
+
+Once the branch policy is decided, move/rebase/recreate the queued AGV2-030 assignment from canonical
+`main` as appropriate, update every branch-specific instruction below, and only then dispatch it.
+
+---
+
 # AetherGate - Current Task
 
 ## Task ID
