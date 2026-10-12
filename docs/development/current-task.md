@@ -1,224 +1,186 @@
 # AetherGate — Current Task
 
 ## Task ID
-AGV2-028V2
+AGV2-028V3
 
 ## Title
-Vision contract closure — distinguish omitted vs explicit-null Chat image detail
+Vision handoff/PR metadata synchronization — no product changes
 
 ## Why This Exists
 
-AGV2-028V correctly fixed:
-- strict WebP RIFF + WEBP signature validation;
-- explicit handling of image detail modes.
+AGV2-028V2 product code is independently verified correct on:
 
-Independent review of the pinned SDK types found one remaining narrow mismatch:
+`936cec102d40315c6d5b90c4c05fc4ca3dac3622`
 
-### Chat `image_url.detail`
+The Chat explicit-null detail bug is closed:
+- omission accepted;
+- `auto` accepted;
+- explicit `null` rejected on Chat;
+- Responses intentionally tolerates explicit null;
+- low/high/original remain explicit unsupported;
+- tests and exact-SHA remote CI are green.
 
-Pinned `openai==2.54.0` Python:
-`detail: Literal["auto", "low", "high"]`
-inside a total=False TypedDict — optional, but not nullable.
+However, independent review found the durable project metadata is stale/inconsistent:
 
-Pinned `openai@7.32.0` JS:
-`detail?: 'auto' | 'low' | 'high' | 'original'`
-— optional, but not nullable.
+1. `docs/development/agent-handoff.md` still labels the closure as **AGV2-028V**, not
+   **AGV2-028V2**.
+2. That handoff still records the substantive/final state as `389fffd...` and does not record the
+   final `936cec...` tip or its final exact-SHA workflow IDs.
+3. The handoff WIP lifecycle still says `task=AGV2-028V`, not `AGV2-028V2`.
+4. PR #2's actual GitHub description is stale: it still says final SHA
+   `06728b21e91ea982e171385751067a64fb1ae45a` and describes only AGV2-028/028V.
+   It does not include the explicit-null closure or final `936cec...` CI evidence.
 
-Current AetherGate code does:
-
-```python
-detail = image_url.get("detail")
-validate_image_detail(detail, ...)
-```
-
-and `validate_image_detail(None)` accepts `None`.
-
-That makes an explicitly supplied JSON `"detail": null` indistinguishable from omission and therefore accepted on Chat, even though the pinned Chat contracts permit omission but not null.
-
-This task closes only that mismatch.
-
-PR #2 must remain open/unmerged until this passes.
+This is a metadata-only closure. Do not change product behavior.
 
 ## WIP Marker — FIRST LOCAL ACTION
 
-Immediately create `.aethergate-wip` before any other local repository action:
+Create `.aethergate-wip` before other local repository work:
 
-- task=AGV2-028V2
+- task=AGV2-028V3
 - branch=v2
 - started_at=<UTC timestamp>
 
 Never stage/commit/push it.
-Remove it only after final remote verification, handoff update, and PR update.
+Remove only after final remote verification and PR/handoff synchronization.
 
 ## Starting Point
 
-Current `origin/v2` before this task:
-`06728b21e91ea982e171385751067a64fb1ae45a`
+Verified product tip before this metadata task:
+`936cec102d40315c6d5b90c4c05fc4ca3dac3622`
 
-AGV2-028V remote CI is green on that exact SHA.
+All four workflows are completed/success on that exact SHA:
+- backend — `38195202524` (duplicate green run `38195206211`)
+- frontend — `38195202501` (duplicate green run `38195206185`)
+- schema-secret-gate — `38195202508` (duplicate green run `38195206173`)
+- alpha-golden-path — `38195202546` (duplicate green run `38195206199`)
 
-Current baseline:
-- backend: **685**
+Current regression baseline:
+- backend: **691**
 - frontend: **89**
 - Playwright: **32 passed / 6 skipped**
 - migration head: **0017**
-- PR #2: open/unmerged/mergeable.
 
-## 1. Preserve omission semantics
+PR #2:
+- open
+- unmerged
+- mergeable
+- head branch v2
+- actual description is stale and must be corrected.
 
-For Chat image parts:
+## 1. Update the handoff accurately
 
-- omitted `image_url.detail` must remain accepted;
-- `detail: "auto"` remains accepted;
-- `low` / `high` / `original` remain explicit `400 unsupported_feature`;
-- invalid strings remain rejected;
-- non-string values remain rejected;
-- **explicit `detail: null` must now be rejected**.
+Update `docs/development/agent-handoff.md` so the top/current section is clearly:
 
-Do not treat missing and explicit null as the same state.
+**AGV2-028V2 — Chat image-detail null closure**
 
-Use key-presence detection or a sentinel; do not rely on `.get()` alone.
+Record:
+- pinned Chat optional-but-non-null evidence;
+- sentinel/key-presence implementation;
+- Responses nullable tolerance;
+- backend 691;
+- frontend 89;
+- Playwright 32 passed / 6 skipped;
+- migration head 0017;
+- substantive code/test SHA `389fffd772894ab4ae9cede2ce8d2e3a5e925845`;
+- independently verified final pre-metadata tip
+  `936cec102d40315c6d5b90c4c05fc4ca3dac3622`;
+- the exact four green workflow IDs above;
+- correct WIP task name `AGV2-028V2`;
+- PR #2 status.
 
-## 2. Responses semantics
+Do not claim the stale PR body was already updated.
 
-Do not blindly copy Chat's null rule into Responses.
+After this metadata commit becomes the new final v2 SHA, update the handoff again if necessary so it
+records the actual final SHA and exact-SHA green workflows for that final tip.
 
-The pinned JS Responses content-part type is:
-`detail?: ImageDetail | null`.
+The exactly-one recommended next step must remain:
 
-The pinned Python type generation differs in requiredness/nullability.
+**Merge PR #2 (v2 -> main) through the reviewed/user-authorized process.**
 
-Keep the currently documented Responses omission/default behavior unless direct inspection of the exact content-part contract used by both SDKs proves a safer correction is required.
+Do not queue embeddings yet.
 
-At minimum:
-- do not regress Responses omitted/auto behavior;
-- do not broaden non-default detail support;
-- preserve explicit rejection of low/high/original;
-- document any intentional cross-SDK tolerance decision clearly.
+## 2. Update PR #2 description
 
-This task is about the clear Chat null mismatch, not reopening the entire Responses contract.
+Update the actual GitHub PR #2 body so it includes:
 
-## 3. Tests
-
-Add focused tests proving:
-
-### Chat
-- omitted succeeds;
-- auto succeeds;
-- explicit JSON null returns structured 400 / UnsupportedFeature;
-- low/high/original rejected;
-- invalid string rejected;
-- non-string rejected;
-- rejected null request does not reach adapter/upstream.
-
-Include direct contract-level and API-level coverage.
-
-### Responses
-Retain regression coverage for the currently documented omission/auto behavior and non-default rejection.
-
-## 4. SDK / contract evidence
-
-Record in comments/docs/handoff the exact pinned Chat evidence:
-
-Python:
-`ImageURL.detail: Literal["auto","low","high"]` optional by TypedDict total=False, not Optional.
-
-JS:
-`detail?: 'auto'|'low'|'high'|'original'`, optional, not `| null`.
-
-Do not claim `original` is supported; it remains explicitly rejected because transport cannot implement it faithfully.
-
-No external network/provider behavior changes are needed.
-
-## 5. Documentation
-
-Update `docs/contracts/vision.md` narrowly:
-
-- Chat detail omitted/auto accepted;
+- AGV2-028 vision implementation;
+- AGV2-028V strict WebP/detail semantics closure;
+- AGV2-028V2 explicit-null Chat detail closure;
+- Chat omission/auto accepted;
 - Chat explicit null rejected;
-- Chat low/high/original rejected;
-- Responses behavior remains as currently documented, with any intentional null tolerance stated if relevant.
+- Responses explicit null intentionally tolerated;
+- low/high/original explicitly unsupported;
+- backend 691 / frontend 89 / Playwright 32 passed, 6 skipped;
+- migration head 0017;
+- final v2 SHA;
+- exact four workflow IDs/conclusions for the final SHA.
 
-Do not broaden compatibility claims.
+Remove stale statements that call `06728b21...` the final SHA.
 
-## 6. Regression Gate
+PR #2 must remain:
+- open;
+- unmerged;
+- mergeable.
 
-Run focused tests first, then the established full gate:
+Do not merge it.
 
-- backend full suite, >= 685 collected and all pass;
-- frontend >= 89 pass;
-- full Playwright >= 32 pass;
-- npm build;
-- npm lint;
-- `npx tsc -b --noEmit`;
-- OpenAPI/client drift;
-- ruff;
-- git diff --check;
-- secret/content/image-data scans;
-- no-legacy-v1 guard + self-test;
-- migrations empty -> 0017;
-- populated 0016 -> 0017;
-- config_check;
-- fake Ollama vision;
-- official Python vision;
-- official JS vision;
-- offline golden path.
+## 3. No product/code changes
 
-No migration.
-Do not modify migrations 0001-0017.
+Do not modify:
+- application code;
+- tests;
+- generated OpenAPI/types;
+- migrations;
+- CI logic;
+- provider behavior;
+- scheduler/accounting behavior.
 
-No live nomnom rerun is required: this is pre-dispatch request-contract validation only.
+This task exists only to make the durable repo/PR communication truthful.
 
-## 7. Remote CI
+## 4. Verification
 
-Push to `origin/v2`.
+Because the handoff commit changes `origin/v2`, require the normal remote exact-SHA gate on the
+new final tip:
 
-On the exact FINAL SHA require:
 - backend completed/success;
 - frontend completed/success;
 - schema-secret-gate completed/success;
 - alpha-golden-path completed/success.
 
-Root-cause any red workflow.
+No full local regression rerun is required for docs-only changes beyond:
+- git diff --check;
+- no-legacy-v1 guard if touched by normal workflow;
+- confirm only intended documentation metadata changed.
 
-## 8. PR #2
+If any remote workflow is red, root-cause it before completion.
 
-PR #2 remains open/unmerged.
+## 5. Final consistency check
 
-Verify:
-- head updated to final v2 SHA;
-- mergeable;
-- description mentions the explicit-null Chat detail closure;
-- exact final SHA + workflow IDs are current.
+Before completion verify all three agree:
 
-Do NOT merge PR #2.
+1. `origin/v2` exact final SHA;
+2. `docs/development/agent-handoff.md`;
+3. PR #2 body/head.
 
-## 9. Handoff
+They must all name the same final v2 SHA and the same exact-SHA four green workflow runs.
 
-Update `docs/development/agent-handoff.md` with:
-- independent-review finding;
-- exact pinned Chat optional-but-non-null evidence;
-- implementation choice used to distinguish omission from null;
-- focused tests;
-- final regression counts;
-- migration head 0017;
-- final SHA + four CI workflow IDs/conclusions;
-- PR #2 status/head;
-- WIP lifecycle;
-- exactly one recommended next step:
-  **Merge PR #2 (v2 -> main) through the reviewed/user-authorized process.**
-
-Never include image bytes/base64, secrets, prompts/outputs, encrypted payloads, or large logs.
+Also verify:
+- PR #2 remains unmerged;
+- migration head remains 0017;
+- `.aethergate-wip` is absent locally and never tracked/staged/committed/pushed.
 
 ## Commit / Push
 
-Use a narrow conventional commit such as:
-`fix(vision): reject null chat image detail`
+Use a docs-only conventional commit such as:
+
+`docs: synchronize vision handoff and pr metadata`
 
 Push to `origin/v2`.
 Never push directly to main.
-Do not ask whether to commit/push/continue.
 
-The task is complete only when explicit null is rejected on Chat without changing omission/auto behavior,
-all regressions and exact-SHA remote CI are green, PR #2 is updated and still unmerged, handoff is
-truthful, and `.aethergate-wip` is removed only after final remote verification.
+Do not implement embeddings.
+Do not merge PR #2.
+
+The task is complete only when the handoff, PR #2, and actual final v2/CI state are mutually
+consistent and truthful.
