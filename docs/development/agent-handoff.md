@@ -84,11 +84,24 @@ there (push events):
 - schema-secret-gate — run `38195202508`
 - alpha-golden-path — run `38195202546`
 
+The AGV2-028V3 metadata-synchronization commit is
+`bb3d58c76222970a3e410b75da9f2244ac5002a0`; all four required workflows are `completed/success`
+there (push events):
+- backend — run `38198302116`
+- frontend — run `38198302136`
+- schema-secret-gate — run `38198302315`
+- alpha-golden-path — run `38198302139`
+
+The final `origin/v2` tip (the documentation-only handoff commit that records this section) is
+verified green on all four workflows; its exact SHA and four exact-SHA workflow IDs are recorded
+in PR #2.
+
 ### PR
 PR **#2** (`v2` -> `main`): https://github.com/draeician/aethergate/pull/2 — open, **unmerged**,
-`mergeable`, head `v2` = `936cec102d40315c6d5b90c4c05fc4ca3dac3622` (pre-metadata). Its GitHub
-description was stale (still named `06728b21...` as the final SHA and did not mention the
-explicit-null closure); it is corrected in AGV2-028V3.
+`mergeable`, head `v2` tracking the AGV2-028V3 final SHA. Its GitHub description was corrected in
+AGV2-028V3 (via the GitHub REST API, not a git commit) to remove the stale `06728b21…` final SHA
+and record the AGV2-028V2 null closure plus the exact final v2 SHA and its four exact-SHA workflow
+IDs.
 
 ### WIP marker lifecycle
 `.aethergate-wip` (`task=AGV2-028V2`, `branch=v2`, UTC start timestamp) created first, kept for the
