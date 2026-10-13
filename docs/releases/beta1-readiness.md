@@ -77,18 +77,22 @@ Local/nomnom acceptance (with the Alpha 1 baselines recorded in
 
 | Gate | Requirement | Status |
 |---|---|---|
-| Backend CI | `pytest` (incl. recovery + beta compose) green on final SHA | pending |
-| Frontend CI | build/lint/tsc/OpenAPI green on final SHA | pending |
-| schema-secret-gate CI | secret scan + architecture boundaries green on final SHA | pending |
-| alpha-golden-path CI | offline OIDC + browser + SDK golden path green on final SHA | pending |
-| beta-release-gate CI | disposable prod-profile smoke green on final SHA | pending |
-| Local backend suite | canonical `scripts/dev/v2 test` exit 0 | pending |
-| Local beta release gate | `scripts/ci/beta_release_gate.sh` end-to-end (migrate -> VALID -> SDK -> recovery -> backup/restore -> post-restore SDK) | pending |
-| Secret scan | no committed credentials/providers/`.env`/keys | pending |
+| Backend CI | `pytest` (incl. recovery + beta compose) green on final SHA | **PASS** |
+| Frontend CI | build/lint/tsc/OpenAPI green on final SHA | **PASS** |
+| schema-secret-gate CI | secret scan + architecture boundaries green on final SHA | **PASS** |
+| alpha-golden-path CI | offline OIDC + browser + SDK golden path green on final SHA | **PASS** |
+| beta-release-gate CI | disposable prod-profile smoke green on final SHA | **PASS** |
+| Local backend suite | canonical `scripts/dev/v2 test` exit 0 (846 collected) | **PASS** |
+| Local beta release gate | `scripts/ci/beta_release_gate.sh` end-to-end (migrate -> VALID -> SDK -> recovery -> backup/restore -> post-restore SDK) | **PASS** |
+| Secret scan | no committed credentials/providers/`.env`/keys | **PASS** |
+| Branch protection / CODEOWNERS review enforcement | hosted rule active on `main` | **NO-GO (operator action)** |
 
-**GO** requires every row above to be green on the exact final SHA. **NO-GO** is
-any red row, until root-caused and fixed (per the standing rule that every
-failing test is a real defect).
+Every row is green on the exact final SHA except the branch-protection row, which
+is an **operator action** and is recorded below as a release limitation rather
+than an achieved protection. `main` has no branch protection rule today
+(`gh api repos/draeician/aethergate/branches/main/protection` → `404 Branch not
+protected`), so the committed CODEOWNERS file does **not** enforce review until
+the operator enables a protected branch + required reviews on `main`.
 
 ## Deferred (not Beta 1)
 
@@ -111,9 +115,25 @@ database (no v1 import); see `docs/migrations/v1-to-v2.md`.
 - OIDC is optional; when enabled its issuer must be HTTPS in `prod`.
 - The worker heartbeat relies on a tmpfs file refreshed each poll cycle; a hard
   stall (not a crash) is detected after the freshness window.
+- `main` has no branch protection rule and the committed CODEOWNERS file therefore
+  does not enforce review until the operator enables a protected branch + required
+  reviews. This is an explicit operator action, not an achieved protection.
 
 ## Remote CI status
 
-(To be completed after the Beta 1 branch is pushed and the five workflows are
-verified green on the exact final SHA. Each workflow's run ID and conclusion is
-recorded here.)
+Final task-branch head `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`. All five
+workflows `completed/success` on that exact SHA (pull_request events for the open
+draft PR #5):
+
+| Workflow | Run ID | Conclusion |
+|---|---|---|
+| backend | 38344290957 | completed/success |
+| frontend | 38344291014 | completed/success |
+| schema-secret-gate | 38344290966 | completed/success |
+| alpha-golden-path | 38344290975 | completed/success |
+| beta-release-gate | 38344290969 | completed/success |
+
+Post-merge main preflight (section 0) was verified green on main merge SHA
+`abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4): backend `38335810551`,
+frontend `38335811087`, schema-secret-gate `38335810559`, alpha-golden-path
+`38335810532`.

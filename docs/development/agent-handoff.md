@@ -12,7 +12,87 @@ send credentials or other sensitive details.
 
 ---
 
-# AGV2-031 kickoff — 2026-10-13 UTC (active)
+# AGV2-031 complete — ready for independent review (2026-10-13 UTC)
+
+## Status
+Beta 1 release hardening is **implemented and verified**. This is a release
+*candidate*, not a shipped release, tag, or public deployment. Branch
+`feat/agv2-031-beta1-release-hardening`, final head
+`4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`, open draft PR **#5** (unmerged). All
+five PR workflows are green on the exact final SHA; `.aethergate-wip` removed.
+
+## Section 0 preflight — post-merge main CI (verified)
+Green on main merge SHA `abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4):
+backend `38335810551`, frontend `38335811087`, schema-secret-gate `38335810559`,
+alpha-golden-path `38335810532` (evidence mechanism: `gh run view`/API).
+
+## Implementation commits
+- `9fea250` feat(release): add Beta 1 production profile and worker heartbeat healthcheck
+- `121d23a` feat(release): add recovery fault-injection tests and architecture boundary gate
+- `4fb56e0` feat(release): add Beta 1 release gate smoke and operator docs
+
+## Deliverables
+- `deploy/beta1/compose.yaml` (prod profile: postgres+api+worker, non-root,
+  read-only rootfs+tmpfs, loopback-only API, hardcoded prod invariants),
+  `deploy/beta1/env.example`, `deploy/beta1/compose.smoke.yaml` (CI-only fake
+  upstream on a literal IP). No hardcoded `container_name`; project-scoped naming.
+- Worker heartbeat: `AETHERGATE_WORKER_HEARTBEAT_FILE` in `config.py`, heartbeat
+  write in `worker.run`, and `src/aethergate/worker_healthcheck.py`.
+- `deploy/v2/Dockerfile` now ships the beta1 compose + env template.
+- Tests: `tests/test_beta1_compose.py` (10 shape/prod-invariant tests),
+  `tests/test_recovery.py` (3 worker/API restart + provider-failure recovery),
+  plus the existing `tests/test_scheduler_hardening.py` (20).
+- `scripts/ci/architecture_boundaries.py` (stdlib AST; persistence never reaches
+  up, CLI never imports persistence, routers never import raw ORM models), wired
+  into `schema-secret-gate.yml`; `.github/CODEOWNERS` maps bounded areas to
+  `@draeician`.
+- `scripts/ci/beta_smoke.py` + `scripts/ci/beta_release_gate.sh` +
+  `.github/workflows/beta-release-gate.yml`: disposable production release gate
+  (migrate -> prod `config_check` VALID -> one-use bootstrap + literal-IP catalog
+  + official SDK Models/Chat/Embeddings with bypass off -> worker restart recovery
+  -> backup -> destructive restore -> head 0017 -> post-restore SDK -> teardown).
+- `docs/operations/beta1-runbook.md`, `docs/releases/beta1-readiness.md`.
+
+## Regression counts
+- backend: **846 collected / exit 0** (baseline 833 + 13 new) via canonical
+  `scripts/dev/v2 test`; `ruff check src tests` clean; `git diff --check` clean;
+  `scripts/ci/secret_scan.sh` clean.
+- Local `scripts/ci/beta_release_gate.sh` end-to-end pass on a disposable stack
+  (offline, no model downloads): migration empty -> `0017`, prod `config_check`
+  VALID, Python SDK Models/Chat(non-stream+stream)/Embeddings, worker stop/start
+  recovery, backup/restore `0017`, post-restore SDK with the same credentials.
+- Note: a single `docker restart <worker>` does not reset the container
+  healthcheck state machine and can report a false `unhealthy` after a clean
+  SIGTERM shutdown even though the worker is live; `docker compose stop` + `start`
+  recovers cleanly. Documented in the runbook.
+
+## Final remote CI (exact SHA `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`)
+All five workflows `completed/success` (pull_request events for PR #5):
+- backend — `38344290957`
+- frontend — `38344291014`
+- schema-secret-gate — `38344290966`
+- alpha-golden-path — `38344290975`
+- beta-release-gate — `38344290969`
+
+## Known limitations / explicit operator actions
+- **Branch protection not enabled.** `gh api
+  repos/draeician/aethergate/branches/main/protection` returns `404 Branch not
+  protected`, so the committed CODEOWNERS file does **not** enforce review until
+  the operator enables a protected branch + required reviews on `main`. Recorded
+  as a release limitation, not an achieved protection.
+- No release tag/publication; the operator decides GO/NO-GO for Beta 1 after
+  reviewer-approved merge and post-merge main CI.
+- OIDC is optional and its issuer must be HTTPS in `prod`; TLS termination is
+  operator-managed (API binds loopback only).
+
+## Recommended next step
+Independent review of PR **#5**; do **not** merge automatically. After reviewer
+approval + merge + green post-merge `main` CI, the operator decides Beta 1
+GO/NO-GO.
+
+---
+
+# AGV2-031 kickoff — 2026-10-13 UTC (superseded by the complete record above)
 
 - **AGV2-030 complete and merged.** GitHub PR #4 is closed/merged; canonical main merge SHA `abce2245444efc616b617b53746ba4c4427da689` includes reviewer-approved Beta security foundation. Its feature head `630b3546c899ef8f7b20710447e37565319b0538` passed all four PR-event workflows: backend 38334919438; frontend 38334919423; schema-secret-gate 38334919416; alpha-golden-path 38334919443.
 - **Post-merge main workflow evidence pending:** The GitHub integration available to the architect does not surface main push-event runs. Confirm all four completed/success with head_sha `abce2245444efc616b617b53746ba4c4427da689` using authenticated GitHub UI/gh/API before AGV2-031 implementation. No claim that an unobserved push run passed or failed.
