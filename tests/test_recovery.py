@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from aethergate.adapters.base import (
@@ -29,10 +30,18 @@ from aethergate.adapters.base import (
 from aethergate.config import Settings
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import Capability, RequestState
+from aethergate.domain.enums import (
+    Capability,
+    CredentialAudience,
+    CredentialScope,
+    RequestState,
+)
 from aethergate.domain.ids import (
+    ApiCredentialId,
     EndpointId,
     ModelAliasId,
+    PrincipalId,
+    ProjectId,
     ProviderAccountId,
     ProviderId,
     RouteBindingId,
@@ -67,6 +76,41 @@ class _OkAdapter:
             usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
             upstream_request_id="upstream-1",
         )
+
+
+class _TrackingAdapter:
+    """Records every dispatch so a DB outage can be proven to dispatch nothing."""
+
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    async def complete(self, request: ChatRequest, secret: str | None) -> CompletionResult:
+        self.complete_calls += 1
+        return CompletionResult(
+            content="ok",
+            finish_reason="stop",
+            usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+            upstream_request_id="upstream-1",
+        )
+
+
+class _DownSessionFactory:
+    """A session factory whose every connection attempt raises ``OperationalError``,
+    the SQLAlchemy surface of an unreachable PostgreSQL database. Used to prove the
+    scheduler fails closed rather than silently succeeding while the DB is down."""
+
+    def __init__(self) -> None:
+        self.opens = 0
+
+    def __call__(self) -> _DownSessionFactory:
+        return self
+
+    async def __aenter__(self):
+        self.opens += 1
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
 
 
 async def _seed_endpoint(
@@ -335,3 +379,61 @@ async def test_provider_failure_settles_failed_without_retry(sched_engine):
             )
         ).scalars().all()
         assert len(attempts) == 1
+
+
+# 4. PostgreSQL outage fails closed: no admitted work, no unguarded dispatch
+
+
+async def test_database_outage_fails_closed_without_dispatch():
+    """A DB outage must never admit work or dispatch upstream.
+
+    ``claim_and_reserve`` and ``admit_and_enqueue`` both open a session first; when
+    the database is unreachable that open raises ``OperationalError`` and must
+    propagate (fail closed) rather than returning a synthetic success, and the
+    upstream adapter must never be reached.
+    """
+    encryptor = QueueEncryptor(QueueEncryptor.generate_key())
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://u:p@h/db",
+        app_env="dev",
+        upstream_allowlist="192.168.22.50",
+        oidc_enabled=False,
+        allow_inference_auth_bypass=False,
+        bootstrap_token=None,
+    )
+    adapter = _TrackingAdapter()
+    inference = InferenceService(
+        EnvSecretResolver(),
+        DestinationPolicy(settings.upstream_allowlist_hosts),
+        adapter_factory=lambda kind: adapter,
+    )
+    factory = _DownSessionFactory()
+    service = SchedulingService(
+        encryptor=encryptor,
+        inference_service=inference,
+        session_factory=factory,
+        settings=settings,
+    )
+    context = domain.RequestContext(
+        project_id=ProjectId("proj-down"),
+        principal_id=PrincipalId("principal-down"),
+        api_credential_id=ApiCredentialId("cred-down"),
+        audience=CredentialAudience.INFERENCE,
+        scopes=(CredentialScope.INFERENCE_INVOKE,),
+    )
+
+    with pytest.raises(OperationalError):
+        await service.claim_and_reserve("w1")
+
+    with pytest.raises(OperationalError):
+        await service.admit_and_enqueue(
+            alias_name="gpt-4",
+            messages=[Message(role="user", content="hi")],
+            params=GenerationParams(),
+            stream=False,
+            context=context,
+        )
+
+    assert factory.opens >= 2
+    assert adapter.complete_calls == 0

@@ -26,7 +26,8 @@ Beta 1 carries the full Alpha 1 OpenAI-compatible + admin surface (see
   observed by the container runtime;
 - a **release gate** (`scripts/ci/beta_release_gate.sh`) that proves the profile
   from a clean, empty database through migration, SDK inference, worker restart
-  recovery, and backup/restore — offline, with no model downloads.
+  recovery, a real PostgreSQL outage/recovery gate, and backup/restore — offline,
+  with no model downloads.
 
 Migration head: **0017**.
 
@@ -193,10 +194,12 @@ client.chat.completions.create(model="<alias>", messages=[{"role":"user","conten
 - `GET /health/ready` — `200` only when PostgreSQL answers **and** the applied
   schema revision equals the code head (`503 schema_not_current` otherwise).
 - The **worker** has no HTTP surface; its container health is the heartbeat file
-  the worker refreshes each poll cycle
+  the worker refreshes on a fixed cadence from a dedicated event-loop task
   (`AETHERGATE_WORKER_HEARTBEAT_FILE`, default `/tmp/aethergate-worker-heartbeat`,
-  freshness window `AETHERGATE_WORKER_HEARTBEAT_TIMEOUT_SECONDS`). If the worker
-  stalls, the container is marked unhealthy by the runtime.
+  freshness window `AETHERGATE_WORKER_HEARTBEAT_TIMEOUT_SECONDS`). The cadence is
+  independent of the claim/dispatch loop, so a long-running inference does not
+  make a healthy worker appear stale. If the worker truly stalls, the container
+  is marked unhealthy by the runtime.
 
 Migrations are applied explicitly. The worker never auto-runs destructive
 migrations.
@@ -240,14 +243,26 @@ target a disposable stack by name; omit them to target the standard v2 dev stack
 - **Full stack restart**: stop API + worker + PostgreSQL cleanly **without
   deleting the volume**, then start again. Never use a destructive `reset` on a
   real deployment.
+- **PostgreSQL outage**: while PostgreSQL is unreachable, `/health/ready` returns
+  `503` and the API does not admit new requests (they fail with a non-2xx
+  error). The worker keeps its liveness heartbeat but performs no dispatch
+  (claiming fails closed on the unreachable database). No work is silently lost:
+  requests are either durably queued before the outage or rejected, never
+  admitted-then-dropped. After PostgreSQL recovers, readiness returns `200` and
+  the worker resumes draining the durable queue.
 - Prefer `docker compose stop <svc>` then `docker compose start <svc>` over
   `docker restart <container>`: a single `docker restart` does not reset the
   container healthcheck state machine, so the worker heartbeat probe can report a
   false `unhealthy` after a clean SIGTERM shutdown even though the worker is live.
+  The dedicated heartbeat task keeps the file fresh during graceful shutdown of
+  an in-flight request, but `stop`+`start` remains the recommended restart form.
 
 ## Common failure modes
 
 - **`503 schema_not_current`**: migrations not applied. Run `alembic upgrade head`.
+- **`503 database_unreachable`**: PostgreSQL is down or unreachable; the API fails
+  closed and admits no new work until the database answers. Restore PostgreSQL,
+  then confirm readiness returns `200`.
 - **`destination_denied`**: endpoint host is not a literal-IP allowlisted address,
   or is loopback/link-local/metadata.
 - **`secret_resolution_failed`**: a provider account references a SecretRef with no

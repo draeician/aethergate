@@ -33,11 +33,14 @@ Alpha 1 gates recorded in `docs/releases/alpha1-readiness.md`:
 - a **production configuration/deployment smoke** is deterministic and offline
   (`scripts/ci/beta_release_gate.sh`): empty DB migrates to head, prod
   `config_check` reports VALID, one-use bootstrap + literal-IP catalog + official
-  SDK Models/Chat/Embeddings with bypass off, worker restart recovery, and
-  backup -> destructive restore -> post-restore SDK;
+  SDK Models/Chat/Embeddings with bypass off, worker restart recovery, a real
+  PostgreSQL outage/recovery gate (readiness `503` while down, no admitted work,
+  recovery and post-outage SDK), and backup -> destructive restore ->
+  post-restore SDK;
 - deterministic **fault-injection recovery** tests exist at the service level
   (`tests/test_recovery.py`, `tests/test_scheduler_hardening.py`) covering worker
-  restart, API restart, provider failure, and scheduler lease/outcome recovery;
+  restart, API restart, provider failure, PostgreSQL outage (fail-closed, no
+  unguarded dispatch), and scheduler lease/outcome recovery;
 - a **live nomnom acceptance** (`scripts/ci/beta_nomnom_acceptance.sh`) proves the
   beta1 profile against the real internal Ollama on its allowlisted literal IP —
   prod `config_check` VALID, official Python SDK Models/Chat with bypass off, and
@@ -123,7 +126,8 @@ database (no v1 import); see `docs/migrations/v1-to-v2.md`.
 - No built-in TLS termination: the API binds loopback only and must sit behind an
   operator-managed reverse proxy.
 - OIDC is optional; when enabled its issuer must be HTTPS in `prod`.
-- The worker heartbeat relies on a tmpfs file refreshed each poll cycle; a hard
+- The worker heartbeat relies on a tmpfs file refreshed on a fixed cadence from a
+  dedicated event-loop task (independent of the claim/dispatch loop); a hard
   stall (not a crash) is detected after the freshness window.
 - `main` has no branch protection rule and the committed CODEOWNERS file therefore
   does not enforce review until the operator enables a protected branch + required
