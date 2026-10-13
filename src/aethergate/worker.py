@@ -23,8 +23,11 @@ import argparse
 import asyncio
 import logging
 import signal
+import time
 import uuid
+from pathlib import Path
 
+from aethergate.config import get_settings
 from aethergate.logging_config import configure_logging_from_settings, log_event
 from aethergate.scheduler.runtime import build_scheduling_service
 from aethergate.scheduler.service import ClaimedWork
@@ -73,12 +76,22 @@ async def run(
     once: bool = False,
     poll_interval: float = 0.2,
     shutdown_event: asyncio.Event | None = None,
+    heartbeat_file: str | None = None,
+    heartbeat_seconds: float = 30.0,
 ) -> None:
     service = build_scheduling_service()
+    last_heartbeat = 0.0
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
             logger.info("worker %s received shutdown; no longer claiming", worker_id)
             return
+        if heartbeat_file and time.monotonic() - last_heartbeat >= heartbeat_seconds:
+            try:
+                Path(heartbeat_file).parent.mkdir(parents=True, exist_ok=True)
+                Path(heartbeat_file).touch()
+                last_heartbeat = time.monotonic()
+            except OSError:
+                logger.warning("worker %s could not update heartbeat file", worker_id)
         try:
             result = await _run_once(worker_id, service)
             if once:
@@ -115,6 +128,7 @@ def main() -> None:
 
     configure_logging_from_settings()
     worker_id = args.worker_id or uuid.uuid4().hex
+    settings = get_settings()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -134,6 +148,8 @@ def main() -> None:
                 once=args.once,
                 poll_interval=args.poll_interval,
                 shutdown_event=shutdown_event,
+                heartbeat_file=settings.worker_heartbeat_file,
+                heartbeat_seconds=settings.worker_heartbeat_seconds,
             )
         )
     finally:

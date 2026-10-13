@@ -1,0 +1,46 @@
+# AetherGate v2 — Beta 1 disposable acceptance override (CI/nomnom only).
+#
+# NEVER used in a real production deployment. Adds the deterministic fake Ollama
+# upstream on a dedicated network with a fixed literal IP, so the production
+# literal-IP egress policy can be exercised without Internet or model downloads.
+# The real production profile in deploy/beta1/compose.yaml contains postgres +
+# api + worker only; this override is layered on top for the release gate.
+#
+# Bring up with scripts/ci/beta_release_gate.sh (which writes the disposable
+# secrets) — do not use this override to serve real traffic.
+services:
+  api:
+    environment:
+      AETHERGATE_UPSTREAM_ALLOWLIST: "10.90.0.10"
+    ports: !override
+      - "127.0.0.1:18081:8000"
+    networks:
+      - beta1-smoke-net
+
+  worker:
+    environment:
+      AETHERGATE_UPSTREAM_ALLOWLIST: "10.90.0.10"
+    networks:
+      - beta1-smoke-net
+
+  postgres:
+    networks:
+      - beta1-smoke-net
+
+  fake-ollama:
+    image: aethergate-beta1:local
+    command: ["python", "-m", "aethergate.testing.fake_ollama_server"]
+    environment:
+      FAKE_OLLAMA_PORT: "11434"
+      FAKE_OLLAMA_DELAY: ${FAKE_OLLAMA_DELAY:-0}
+      FAKE_OLLAMA_FAIL_STATUS: ${FAKE_OLLAMA_FAIL_STATUS:-}
+    networks:
+      beta1-smoke-net:
+        ipv4_address: 10.90.0.10
+    restart: "no"
+
+networks:
+  beta1-smoke-net:
+    ipam:
+      config:
+        - subnet: 10.90.0.0/24

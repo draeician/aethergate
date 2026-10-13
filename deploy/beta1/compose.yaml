@@ -1,0 +1,162 @@
+# AetherGate v2 — Beta 1 production deployment profile.
+#
+# Isolated, least-privilege, single-company/self-hosted production compose file.
+# This is a *release candidate* profile, not a public release, and it is separate
+# from the Alpha/dev profile in deploy/v2/. It is intentionally minimal:
+#
+#   - postgres + api + worker ONLY. No dev OIDC IdP, no fake provider, no web
+#     console image. Human browser/CLI auth and TLS termination are operator
+#     responsibilities (see docs/operations/beta1-runbook.md).
+#   - AETHERGATE_ENV=prod with strict literal-IP egress, file-backed provider
+#     secrets, and inference-auth bypass forced off.
+#   - PostgreSQL is NOT host-published; the API binds loopback only and must sit
+#     behind an operator-managed TLS-terminating reverse proxy.
+#   - Non-root runtime (from the shared Dockerfile), read-only rootfs with a
+#     tmpfs /tmp, bounded resources, real liveness healthchecks, and a distinct
+#     compose project / network / volume / container names.
+#
+# Never commit live secrets. Copy deploy/beta1/env.example to deploy/beta1/.env,
+# fill in real values, and `chmod 600` it.
+
+name: aethergate-beta1
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/v2/Dockerfile
+    image: aethergate-beta1:local
+    init: true
+    environment:
+      AETHERGATE_ENV: prod
+      PYTHONDONTWRITEBYTECODE: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: aethergate
+      POSTGRES_USER: aethergate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/beta1/.env}
+      # Production invariants — hardcoded so a copied/edited file cannot silently
+      # weaken them. These are the only accepted production values.
+      AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS: "false"
+      AETHERGATE_SECRET_BACKEND: file
+      AETHERGATE_SECRET_DIRECTORY: /run/secrets/aethergate-provider
+      AETHERGATE_EGRESS_REQUIRE_LITERAL_IP: "true"
+      # Operator-supplied. Empty allowlist = deny-all egress (config_check warns).
+      AETHERGATE_UPSTREAM_ALLOWLIST: ${AETHERGATE_UPSTREAM_ALLOWLIST:-}
+      # One-use bootstrap secret. Unset/empty disables bootstrap; remove it after
+      # the initial bootstrap so it cannot be replayed.
+      AETHERGATE_BOOTSTRAP_TOKEN: ${AETHERGATE_BOOTSTRAP_TOKEN:-}
+      # Fernet queue-content encryption key (outside PostgreSQL; back it up).
+      AETHERGATE_QUEUE_KEY: ${AETHERGATE_QUEUE_KEY:?set AETHERGATE_QUEUE_KEY in deploy/beta1/.env}
+      # OIDC human identity (optional; HTTPS issuer required in prod when set).
+      AETHERGATE_OIDC_ENABLED: ${AETHERGATE_OIDC_ENABLED:-false}
+      AETHERGATE_OIDC_ISSUER: ${AETHERGATE_OIDC_ISSUER:-}
+      AETHERGATE_OIDC_CLIENT_ID: ${AETHERGATE_OIDC_CLIENT_ID:-}
+      AETHERGATE_OIDC_CLIENT_SECRET: ${AETHERGATE_OIDC_CLIENT_SECRET:-}
+      AETHERGATE_OIDC_REDIRECT_URI: ${AETHERGATE_OIDC_REDIRECT_URI:-}
+      AETHERGATE_OIDC_SCOPES: ${AETHERGATE_OIDC_SCOPES:-openid}
+      AETHERGATE_OIDC_PROVIDER_NAME: ${AETHERGATE_OIDC_PROVIDER_NAME:-OIDC}
+      AETHERGATE_OIDC_JIT_PROVISIONING: ${AETHERGATE_OIDC_JIT_PROVISIONING:-false}
+      AETHERGATE_OIDC_WEB_CALLBACK_PATH: ${AETHERGATE_OIDC_WEB_CALLBACK_PATH:-}
+      AETHERGATE_OIDC_DEVICE_CLIENT_ID: ${AETHERGATE_OIDC_DEVICE_CLIENT_ID:-}
+      AETHERGATE_OIDC_DEVICE_SCOPES: ${AETHERGATE_OIDC_DEVICE_SCOPES:-openid}
+    ports:
+      # Loopback-only, ephemeral host port. Docker picks a free port; TLS and
+      # public exposure are the reverse proxy's responsibility.
+      - "127.0.0.1::8000"
+    volumes:
+      - type: bind
+        source: ${AETHERGATE_SECRET_HOST_DIR:?set AETHERGATE_SECRET_HOST_DIR to a read-only provider-secret directory}
+        target: /run/secrets/aethergate-provider
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - aethergate.healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/v2/Dockerfile
+    image: aethergate-beta1:local
+    init: true
+    environment:
+      AETHERGATE_ENV: prod
+      PYTHONDONTWRITEBYTECODE: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: aethergate
+      POSTGRES_USER: aethergate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/beta1/.env}
+      AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS: "false"
+      AETHERGATE_SECRET_BACKEND: file
+      AETHERGATE_SECRET_DIRECTORY: /run/secrets/aethergate-provider
+      AETHERGATE_EGRESS_REQUIRE_LITERAL_IP: "true"
+      AETHERGATE_UPSTREAM_ALLOWLIST: ${AETHERGATE_UPSTREAM_ALLOWLIST:-}
+      AETHERGATE_QUEUE_KEY: ${AETHERGATE_QUEUE_KEY:?set AETHERGATE_QUEUE_KEY in deploy/beta1/.env}
+      AETHERGATE_WORKER_HEARTBEAT_FILE: /tmp/aethergate-worker-heartbeat
+      AETHERGATE_WORKER_HEARTBEAT_TIMEOUT_SECONDS: "90"
+    command: ["python", "-m", "aethergate.worker"]
+    volumes:
+      - type: bind
+        source: ${AETHERGATE_SECRET_HOST_DIR:?set AETHERGATE_SECRET_HOST_DIR to a read-only provider-secret directory}
+        target: /run/secrets/aethergate-provider
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - aethergate.worker_healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: aethergate
+      POSTGRES_USER: aethergate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/beta1/.env}
+    volumes:
+      - aethergate-beta1-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aethergate -d aethergate"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  aethergate-beta1-pgdata:

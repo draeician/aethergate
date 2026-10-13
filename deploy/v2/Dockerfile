@@ -37,6 +37,7 @@ COPY --chown=aethergate:aethergate pyproject.toml ./
 COPY --chown=aethergate:aethergate src ./src
 COPY --chown=aethergate:aethergate tests ./tests
 COPY --chown=aethergate:aethergate deploy/v2/compose.yaml deploy/v2/Dockerfile ./deploy/v2/
+COPY --chown=aethergate:aethergate deploy/beta1/compose.yaml deploy/beta1/env.example ./deploy/beta1/
 
 RUN chown aethergate:aethergate /app
 
