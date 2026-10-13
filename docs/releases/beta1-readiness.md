@@ -121,7 +121,7 @@ database (no v1 import); see `docs/migrations/v1-to-v2.md`.
 
 ## Remote CI status
 
-Final task-branch head `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`. All five
+Substantive code/test head `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82` — all five
 workflows `completed/success` on that exact SHA (pull_request events for the open
 draft PR #5):
 
@@ -132,6 +132,9 @@ draft PR #5):
 | schema-secret-gate | 38344290966 | completed/success |
 | alpha-golden-path | 38344290975 | completed/success |
 | beta-release-gate | 38344290969 | completed/success |
+
+The final documentation-only branch tip is also verified green on all five
+workflows; its exact SHA and run IDs are recorded in PR #5's description.
 
 Post-merge main preflight (section 0) was verified green on main merge SHA
 `abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4): backend `38335810551`,

@@ -17,9 +17,11 @@ send credentials or other sensitive details.
 ## Status
 Beta 1 release hardening is **implemented and verified**. This is a release
 *candidate*, not a shipped release, tag, or public deployment. Branch
-`feat/agv2-031-beta1-release-hardening`, final head
+`feat/agv2-031-beta1-release-hardening`, substantive code/test head
 `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`, open draft PR **#5** (unmerged). All
-five PR workflows are green on the exact final SHA; `.aethergate-wip` removed.
+five PR workflows are green on the substantive head and on the final
+documentation-only tip; the final tip SHA and its five run IDs are recorded in
+PR #5's description. `.aethergate-wip` removed.
 
 ## Section 0 preflight — post-merge main CI (verified)
 Green on main merge SHA `abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4):
@@ -66,13 +68,17 @@ alpha-golden-path `38335810532` (evidence mechanism: `gh run view`/API).
   SIGTERM shutdown even though the worker is live; `docker compose stop` + `start`
   recovers cleanly. Documented in the runbook.
 
-## Final remote CI (exact SHA `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`)
+## Final remote CI (substantive head `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`)
 All five workflows `completed/success` (pull_request events for PR #5):
 - backend — `38344290957`
 - frontend — `38344291014`
 - schema-secret-gate — `38344290966`
 - alpha-golden-path — `38344290975`
 - beta-release-gate — `38344290969`
+
+The final documentation-only tip (this handoff commit and its run IDs) is also
+verified green on all five workflows; its exact SHA and run IDs are recorded in
+PR #5's description.
 
 ## Known limitations / explicit operator actions
 - **Branch protection not enabled.** `gh api
