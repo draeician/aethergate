@@ -104,5 +104,45 @@ NO unrelated new endpoints, provider kinds, Responses tools/MCP/files, audio/ima
 - Keep `.aethergate-wip` until all completion conditions are satisfied, the handoff is pushed and remote PR head/CI are verified; leave it in place on a block.
 - At final handoff, state **ready for independent review** rather than claiming Beta 1 publicly shipped. After reviewer-approved merge and four successful post-merge main workflows, the operator decides GO/NO-GO for Beta 1.
 
+## 9. Operator phone alert — REQUIRED after completion
+
+**Operator request:** When AGV2-031 work is fully complete and PR #5 is
+**ready for independent review**, send an urgent notification to the operator's
+phone through the specified ntfy topic. The recipient and message transport
+have been explicitly authorized for this milestone. This alert is not a Beta
+release announcement or an authorization to merge or publish.
+
+Do **not** send on initial assignment preparation, partial implementation,
+a blocked milestone, first green CI alone, or a merely opened draft PR.
+
+**Trigger (all conditions must be met):** the required baseline and exact-final
+task-branch CI gates are verified green, deterministic and live operational
+acceptance criteria are complete, the final handoff is committed and pushed,
+PR #5 contains the final SHA/evidence and is ready for independent review,
+and the local `.aethergate-wip` lifecycle conditions have been satisfied.
+The PR remains **unmerged**. Send only once after final evidence has been
+published (a later commit changes the exact final SHA and requires re-verification).
+
+Run from the repository root, with `HEAD` equal to the verified final PR head:
+
+```bash
+curl \
+  -H "Title: Priority alert" \
+  -H "Priority: urgent" \
+  -H "Tags: rotating_light" \
+  -d "AetherGate AGV2-031 is complete and ready for independent review. PR #5: https://github.com/draeician/aethergate/pull/5 . Final commit: $(git rev-parse HEAD)" \
+  https://ntfy.sh/draeician_alerts
+```
+
+Preserve the specified Title/Priority/Tags headers and ntfy endpoint. The
+`-d` message replaces the operator's `Hi` and identifies the milestone,
+review PR and exact commit. Ensure it contains no credentials, keys, tokens,
+prompts, confidential diagnostics or other sensitive values. Check that the
+ntfy endpoint returned a successful HTTP 2xx response/accepted message. If
+delivery is not confirmed, report that clearly in the final handoff rather
+than claiming the phone alert was delivered; avoid duplicate deliveries after
+an acknowledged success. Record the notification outcome in a PR comment
+(without changing the reviewed commit SHA) and in the final agent response.
+
 ## Assignment disposition
 This branch and task are **prepared**. The next actor is OpenCode on nomnom, with ChatGPT as independent architect/reviewer. Do not begin release implementation unless section 0 post-merge CI is positively verified and captured.
