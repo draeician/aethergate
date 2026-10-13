@@ -34,13 +34,17 @@ Alpha 1 gates recorded in `docs/releases/alpha1-readiness.md`:
   (`scripts/ci/beta_release_gate.sh`): empty DB migrates to head, prod
   `config_check` reports VALID, one-use bootstrap + literal-IP catalog + official
   SDK Models/Chat/Embeddings with bypass off, worker restart recovery, a real
-  PostgreSQL outage/recovery gate (readiness `503` while down, no admitted work,
-  recovery and post-outage SDK), and backup -> destructive restore ->
-  post-restore SDK;
+  PostgreSQL outage/recovery gate (a valid request proven good first, then
+  readiness `503` while down, a valid request failing closed with a `5xx`, a
+  pre-outage queued request persisted and drained exactly once with no duplicate
+  settlement, and a post-outage SDK request), and backup -> destructive restore
+  -> post-restore SDK;
 - deterministic **fault-injection recovery** tests exist at the service level
   (`tests/test_recovery.py`, `tests/test_scheduler_hardening.py`) covering worker
   restart, API restart, provider failure, PostgreSQL outage (fail-closed, no
-  unguarded dispatch), and scheduler lease/outcome recovery;
+  unguarded dispatch, and an in-flight request lost to an outage surfaces as
+  `outcome_unknown` with exactly one attempt and no duplicate settlement), and
+  scheduler lease/outcome recovery;
 - a **live nomnom acceptance** (`scripts/ci/beta_nomnom_acceptance.sh`) proves the
   beta1 profile against the real internal Ollama on its allowlisted literal IP —
   prod `config_check` VALID, official Python SDK Models/Chat with bypass off, and
@@ -94,7 +98,7 @@ Local/nomnom acceptance (with the Alpha 1 baselines recorded in
 | schema-secret-gate CI | secret scan + architecture boundaries green on final SHA | **PASS** |
 | alpha-golden-path CI | offline OIDC + browser + SDK golden path green on final SHA | **PASS** |
 | beta-release-gate CI | disposable prod-profile smoke green on final SHA | **PASS** |
-| Local backend suite | canonical `scripts/dev/v2 test` exit 0 (846 collected) | **PASS** |
+| Local backend suite | canonical `scripts/dev/v2 test` exit 0 (862 collected) | **PASS** |
 | Local beta release gate | `scripts/ci/beta_release_gate.sh` end-to-end (migrate -> VALID -> SDK -> recovery -> backup/restore -> post-restore SDK) | **PASS** |
 | Live nomnom acceptance | beta1 profile vs real Ollama `192.168.22.50` (prod `config_check` VALID, SDK Models/Chat, bypass off, scoped teardown) | **PASS** |
 | Secret scan | no committed credentials/providers/`.env`/keys | **PASS** |

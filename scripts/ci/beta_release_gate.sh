@@ -102,6 +102,12 @@ bootstrap_token() {
     grep '^AETHERGATE_BOOTSTRAP_TOKEN=' "$ENV_FILE" | cut -d= -f2-
 }
 
+# Read a previously persisted Beta credential value from the mode-0600 secrets
+# file (never printed or logged). Returns empty when the key is absent.
+secret_value() {
+    grep "^$1=" "$WORKDIR/beta_secrets.env" 2>/dev/null | cut -d= -f2-
+}
+
 wait_ready() {
     local url="$1" tries="${2:-90}"
     for _ in $(seq 1 "$tries"); do
@@ -172,43 +178,97 @@ compose start worker >/dev/null 2>&1
 wait_worker_healthy
 wait_ready "http://127.0.0.1:${API_PORT}/health/ready"
 
-log "database outage / recovery gate (readiness fails closed, no lost work)"
-compose stop postgres >/dev/null 2>&1
+log "database outage / recovery gate (real credential, fail-closed, no lost work)"
 
-# Readiness must fail closed (503) while PostgreSQL is unreachable.
+INFERENCE_KEY="$(secret_value AETHERGATE_BETA_INFERENCE_KEY)"
+ADMIN_KEY="$(secret_value AETHERGATE_BETA_ADMIN_KEY)"
+[[ -n "$INFERENCE_KEY" && -n "$ADMIN_KEY" ]] || die "beta secrets not provisioned (run main phase first)"
+
+outage_api() {
+    "$PYTHON_BIN" scripts/ci/beta_db_outage.py \
+        --base-url "http://127.0.0.1:${API_PORT}" \
+        --workdir "$WORKDIR" \
+        "$@"
+}
+
+# 1. A valid, otherwise-admissible request must succeed before the outage, so the
+#    credential is proven good (contrast: the old gate used an invalid key whose
+#    401 could be returned even with a healthy database).
+log "pre-outage valid request must succeed"
+pre_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+    -X POST "http://127.0.0.1:${API_PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${INFERENCE_KEY}" \
+    -d '{"model":"golden-model","messages":[{"role":"user","content":"pre-outage probe"}]}' \
+    2>/dev/null || echo 000)"
+[[ "$pre_code" == "200" ]] || die "valid request did not succeed before DB outage (HTTP ${pre_code})"
+
+# 2. Stop the worker so the next request is durably queued but never dispatched.
+compose stop worker >/dev/null 2>&1
+
+# 3. Snapshot the pre-outage baseline (queue/usage/ledger/attempt counts).
+outage_api --stage prepare
+
+# 4. Enqueue one request durably; it stays QUEUED while the worker is stopped.
+curl -s -o /dev/null --max-time 600 \
+    -X POST "http://127.0.0.1:${API_PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${INFERENCE_KEY}" \
+    -d '{"model":"golden-model","messages":[{"role":"user","content":"outage queued request"}]}' \
+    2>/dev/null &
+ENQUEUE_PID=$!
+outage_api --stage wait-queued --target 1
+
+# 5. Take PostgreSQL down and prove readiness fails closed (503).
+compose stop postgres >/dev/null 2>&1
 readiness_code=""
 for _ in $(seq 1 30); do
     readiness_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${API_PORT}/health/ready" 2>/dev/null || echo 000)"
-    if [[ "$readiness_code" == "503" ]]; then break; fi
+    [[ "$readiness_code" == "503" ]] && break
     sleep 1
 done
-if [[ "$readiness_code" != "503" ]]; then
-    die "readiness did not fail closed during DB outage (got ${readiness_code:-none})"
-fi
+[[ "$readiness_code" == "503" ]] || die "readiness did not fail closed during DB outage (got ${readiness_code:-none})"
 
-# A new request during the outage must never be admitted; 401/500/503 all mean
-# the request was not durably enqueued and nothing was dispatched upstream.
+# 6. A valid request must fail closed with a server error — never admitted, and
+#    never a vacuous 401 (bad credential) or 000 (API unreachable).
 outage_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
     -X POST "http://127.0.0.1:${API_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
-    -H 'Authorization: Bearer outage-probe' \
-    -d '{"model":"golden-model","messages":[{"role":"user","content":"probe"}]}' \
+    -H "Authorization: Bearer ${INFERENCE_KEY}" \
+    -d '{"model":"golden-model","messages":[{"role":"user","content":"outage denied request"}]}' \
     2>/dev/null || echo 000)"
-if [[ "$outage_code" == "200" || "$outage_code" == "201" ]]; then
-    die "request was admitted during DB outage (HTTP ${outage_code})"
-fi
-log "outage: readiness 503, request not admitted (HTTP ${outage_code})"
+case "$outage_code" in
+    200|201) die "request was admitted during DB outage (HTTP ${outage_code})" ;;
+    401|403)  die "valid credential rejected as unauthenticated during outage (HTTP ${outage_code}); outage not proven" ;;
+    000)     die "API unreachable during outage (HTTP 000); vacuous connection failure" ;;
+esac
+[[ "$outage_code" =~ ^5[0-9][0-9]$ ]] || die "valid request did not fail closed with a 5xx (HTTP ${outage_code})"
+log "outage: readiness 503, valid request failed closed (HTTP ${outage_code})"
 
-log "restoring PostgreSQL and verifying recovery"
+# 7. Restore PostgreSQL; the queued request must have survived with no records
+#    from the denied request (no new queue/usage/ledger/attempt rows).
 compose start postgres >/dev/null 2>&1
 wait_ready "http://127.0.0.1:${API_PORT}/health/ready"
-wait_worker_healthy
+outage_api --stage verify-persisted
 
-log "post-outage SDK smoke (persisted state + settlement intact)"
-"$PYTHON_BIN" scripts/ci/beta_smoke.py \
-    --phase post \
-    --base-url "http://127.0.0.1:${API_PORT}" \
-    --workdir "$WORKDIR"
+# 8. Restart the worker and let it drain the queued request exactly once.
+compose start worker >/dev/null 2>&1
+wait_worker_healthy
+outage_api --stage wait-drained
+outage_api --stage verify-drained
+
+# 9. A valid request must succeed again after recovery (reconciles safely).
+post_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+    -X POST "http://127.0.0.1:${API_PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${INFERENCE_KEY}" \
+    -d '{"model":"golden-model","messages":[{"role":"user","content":"post-outage probe"}]}' \
+    2>/dev/null || echo 000)"
+[[ "$post_code" == "200" ]] || die "valid request did not succeed after recovery (HTTP ${post_code})"
+
+# Reap the background enqueue (it settled once the queue drained).
+wait "$ENQUEUE_PID" 2>/dev/null || true
+log "database outage / recovery gate complete (no lost work, no duplicate settlement)"
 
 log "backup"
 rm -f "$WORKDIR/backup.dump"

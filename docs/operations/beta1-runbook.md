@@ -244,8 +244,8 @@ target a disposable stack by name; omit them to target the standard v2 dev stack
   deleting the volume**, then start again. Never use a destructive `reset` on a
   real deployment.
 - **PostgreSQL outage**: while PostgreSQL is unreachable, `/health/ready` returns
-  `503` and the API does not admit new requests (they fail with a non-2xx
-  error). The worker keeps its liveness heartbeat but performs no dispatch
+  `503` and the API does not admit new requests (a valid request fails closed
+  with a `5xx` error). The worker keeps its liveness heartbeat but performs no dispatch
   (claiming fails closed on the unreachable database). No work is silently lost:
   requests are either durably queued before the outage or rejected, never
   admitted-then-dropped. After PostgreSQL recovers, readiness returns `200` and

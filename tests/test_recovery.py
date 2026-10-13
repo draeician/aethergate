@@ -14,6 +14,7 @@ Provider failure injection uses a deterministic adapter that raises a
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select, update
@@ -31,6 +32,7 @@ from aethergate.config import Settings
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import (
+    BillingUnit,
     Capability,
     CredentialAudience,
     CredentialScope,
@@ -40,6 +42,7 @@ from aethergate.domain.ids import (
     ApiCredentialId,
     EndpointId,
     ModelAliasId,
+    PricePolicyId,
     PrincipalId,
     ProjectId,
     ProviderAccountId,
@@ -160,6 +163,23 @@ async def _seed_endpoint(
             endpoint_id=EndpointId(endpoint_id),
             provider_account_id=ProviderAccountId("acct-ollama"),
             upstream_model="qwen3.8-2b-distill:Q6_K",
+        ),
+    )
+
+
+async def _seed_request_price_policy(session, route_binding_id: str) -> None:
+    """Seed a request-priced policy so a successful settle would record usage."""
+    await repository.create_price_policy(
+        session,
+        domain.PricePolicy(
+            id=PricePolicyId(f"pp-{route_binding_id}"),
+            route_binding_id=RouteBindingId(route_binding_id),
+            billing_unit=BillingUnit.REQUEST,
+            currency="USD",
+            unit_scale=1,
+            request_price=Decimal("0.000000000123"),
+            input_price=None,
+            output_price=None,
         ),
     )
 
@@ -437,3 +457,75 @@ async def test_database_outage_fails_closed_without_dispatch():
 
     assert factory.opens >= 2
     assert adapter.complete_calls == 0
+
+
+# 5. a PostgreSQL outage mid-dispatch must never re-dispatch or settle twice
+
+
+async def test_database_outage_during_dispatch_no_double_settlement(sched_engine):
+    """An in-flight request lost to a DB outage is outcome_unknown, never re-run.
+
+    When PostgreSQL becomes unavailable after a request has been claimed and
+    dispatched (its lease can no longer be renewed or settled), recovery must
+    surface it conservatively as ``outcome_unknown``: exactly one execution
+    attempt, zero usage records, and zero ledger entries. It is never silently
+    re-dispatched (a second attempt) nor billed twice (a second settlement).
+    """
+    service, factory, _encryptor = await _build_service(
+        sched_engine, adapter=_OkAdapter(), max_concurrency=1
+    )
+    async with factory() as session:
+        async with session.begin():
+            await _seed_request_price_policy(session, "rb-alias-gpt4")
+        context = await ensure_dev_identity(session)
+
+    ids = await _enqueue(service, context, 1)
+    claim = await service.claim_and_reserve("w1")
+    assert not isinstance(claim, str) and claim is not None
+
+    # Simulate the DB going down while the request is in flight: the worker can
+    # neither renew its lease nor commit settlement, so the lease lapses.
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(models.InferenceRequest)
+                .where(models.InferenceRequest.id == ids[0])
+                .values(lease_expires_at=past)
+            )
+
+    await service.recover()
+
+    async with factory() as session:
+        row = await sched_repo.get_request(session, ids[0])
+        assert row.state == RequestState.OUTCOME_UNKNOWN
+
+        attempts = (
+            await session.execute(
+                select(models.ExecutionAttempt).where(
+                    models.ExecutionAttempt.request_id == ids[0]
+                )
+            )
+        ).scalars().all()
+        assert len(attempts) == 1
+
+        usage = (
+            await session.execute(
+                select(models.UsageRecord).where(
+                    models.UsageRecord.request_id == ids[0]
+                )
+            )
+        ).scalars().all()
+        assert len(usage) == 0
+
+        ledger = (
+            await session.execute(
+                select(models.LedgerEntry)
+                .join(
+                    models.UsageRecord,
+                    models.LedgerEntry.usage_record_id == models.UsageRecord.id,
+                )
+                .where(models.UsageRecord.request_id == ids[0])
+            )
+        ).scalars().all()
+        assert len(ledger) == 0
