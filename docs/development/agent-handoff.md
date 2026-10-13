@@ -80,6 +80,26 @@ The final documentation-only tip (this handoff commit and its run IDs) is also
 verified green on all five workflows; its exact SHA and run IDs are recorded in
 PR #5's description.
 
+## Live nomnom proof — COMPLETE (2026-10-13 UTC)
+Disposable production-policy stack (`ag-beta1-nomnom`, ephemeral loopback API),
+torn down afterward; the long-lived dev stack was not touched.
+
+- Real internal Ollama at the allowlisted literal IP `192.168.22.50:11434`
+  (installed models inspected; no downloads).
+- beta1 production profile (`deploy/beta1/compose.yaml`) with `AETHERGATE_ENV=prod`,
+  `AETHERGATE_UPSTREAM_ALLOWLIST=192.168.22.50`, `AETHERGATE_SECRET_BACKEND=file`
+  + read-only empty secret dir, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`,
+  `AETHERGATE_EGRESS_REQUIRE_LITERAL_IP=true`, generated queue key + bootstrap
+  token. `config_check` => VALID; migrations `0001 -> 0017` clean.
+- Official Python SDK (`openai==2.54.0`) with bypass off: `models.list()`
+  returns the three public aliases; `chat.completions.create` non-stream and
+  stream return non-empty content against `qwen3.8-2b-distill:Q6_K` on the
+  allowlisted literal IP.
+- Repeatable via `scripts/ci/beta_nomnom_acceptance.sh` (the offline CI gate uses
+  the deterministic fake Ollama; this live gate uses the real internal Ollama).
+- Tear-down: only the disposable `ag-beta1-nomnom` project removed (`down -v`);
+  no unrelated services touched.
+
 ## Known limitations / explicit operator actions
 - **Branch protection not enabled.** `gh api
   repos/draeician/aethergate/branches/main/protection` returns `404 Branch not

@@ -38,6 +38,10 @@ Alpha 1 gates recorded in `docs/releases/alpha1-readiness.md`:
 - deterministic **fault-injection recovery** tests exist at the service level
   (`tests/test_recovery.py`, `tests/test_scheduler_hardening.py`) covering worker
   restart, API restart, provider failure, and scheduler lease/outcome recovery;
+- a **live nomnom acceptance** (`scripts/ci/beta_nomnom_acceptance.sh`) proves the
+  beta1 profile against the real internal Ollama on its allowlisted literal IP —
+  prod `config_check` VALID, official Python SDK Models/Chat with bypass off, and
+  a scoped teardown of only the disposable project (no model downloads);
 - **architecture ownership** is enforced (`scripts/ci/architecture_boundaries.py`,
   wired into `schema-secret-gate.yml`) so persistence never reaches up into
   services, CLI never imports persistence, and the API never imports persistence
@@ -71,7 +75,12 @@ Local/nomnom acceptance (with the Alpha 1 baselines recorded in
 
 - the full backend suite via the canonical `scripts/dev/v2 test`;
 - the Beta 1 release gate (`scripts/ci/beta_release_gate.sh`) end-to-end on a
-  disposable stack, offline, no model downloads.
+  disposable stack, offline, no model downloads;
+- the live Beta 1 nomnom acceptance (`scripts/ci/beta_nomnom_acceptance.sh`):
+  the beta1 production profile against the real internal Ollama
+  (`192.168.22.50:11434`, no downloads) — prod `config_check` VALID, official
+  Python SDK Models/Chat with bypass off on the allowlisted literal IP, then a
+  scoped teardown of only the disposable project.
 
 ## GO / NO-GO checklist
 
@@ -84,6 +93,7 @@ Local/nomnom acceptance (with the Alpha 1 baselines recorded in
 | beta-release-gate CI | disposable prod-profile smoke green on final SHA | **PASS** |
 | Local backend suite | canonical `scripts/dev/v2 test` exit 0 (846 collected) | **PASS** |
 | Local beta release gate | `scripts/ci/beta_release_gate.sh` end-to-end (migrate -> VALID -> SDK -> recovery -> backup/restore -> post-restore SDK) | **PASS** |
+| Live nomnom acceptance | beta1 profile vs real Ollama `192.168.22.50` (prod `config_check` VALID, SDK Models/Chat, bypass off, scoped teardown) | **PASS** |
 | Secret scan | no committed credentials/providers/`.env`/keys | **PASS** |
 | Branch protection / CODEOWNERS review enforcement | hosted rule active on `main` | **NO-GO (operator action)** |
 
