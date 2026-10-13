@@ -42,8 +42,9 @@ transaction remains open while waiting for inference. (Direction)
   returns non-ready when the authoritative database is unavailable, without leaking URLs/credentials. (Settled)
 - Schema is applied by Alembic migrations (never `create_all()` at startup). (Direction)
 - Provider credentials are stored by reference (`SecretRef`) and resolved only inside the trusted
-  runtime via a `SecretResolver`; the environment resolver is a development/test convenience, not the
-  production secret backend. (Direction)
+  runtime via the `build_secret_resolver` factory. The `env` resolver (`AETHERGATE_SECRET_*`) is a
+  development/test convenience rejected in `prod`; production projects read-only secrets from
+  `AETHERGATE_SECRET_DIRECTORY` (file backend). (Settled — AGV2-030)
 
 ## Domain model (see provider-model.md)
 

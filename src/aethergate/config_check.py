@@ -19,6 +19,7 @@ Checks:
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -102,6 +103,39 @@ def _check_allowlist(settings: Settings, result: CheckResult) -> None:
             "upstream allowlist is empty: all outbound provider destinations are denied "
             "(set AETHERGATE_UPSTREAM_ALLOWLIST for a working deployment)"
         )
+    elif settings.app_env == "prod" and not settings.egress_require_literal_ip:
+        result.warnings.append(
+            "prod egress requires literal-IP upstream hosts; DNS-name upstreams are "
+            "disabled until transport-level address pinning exists"
+        )
+
+
+def _check_secret_backend(settings: Settings, result: CheckResult) -> None:
+    """Report provider-secret backend state without printing any secret material."""
+    if settings.secret_backend == "env":
+        if settings.app_env == "prod":
+            result.errors.append(
+                "secret backend 'env' is not permitted in prod "
+                "(set AETHERGATE_SECRET_BACKEND=file)"
+            )
+        else:
+            result.warnings.append(
+                "secret backend is 'env' (development/test only; not a production backend)"
+            )
+        return
+    directory = settings.secret_directory
+    if not directory:
+        result.errors.append(
+            "secret backend 'file' requires AETHERGATE_SECRET_DIRECTORY"
+        )
+    elif not os.path.isabs(directory):
+        result.errors.append(
+            "AETHERGATE_SECRET_DIRECTORY must be an absolute path"
+        )
+    elif not os.path.isdir(directory):
+        result.errors.append(
+            "AETHERGATE_SECRET_DIRECTORY does not exist or is not a directory"
+        )
 
 
 def _check_optional_features(settings: Settings, result: CheckResult) -> None:
@@ -125,6 +159,7 @@ def run_checks(settings: Settings) -> CheckResult:
     _check_oidc(settings, result)
     _check_bootstrap_token(settings, result)
     _check_allowlist(settings, result)
+    _check_secret_backend(settings, result)
     _check_optional_features(settings, result)
     result.ok = not result.errors
     return result

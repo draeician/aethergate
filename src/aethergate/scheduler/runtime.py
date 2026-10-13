@@ -7,20 +7,20 @@ inference service, and scheduler service from process settings.
 from __future__ import annotations
 
 from aethergate.config import get_settings
-from aethergate.egress import DestinationPolicy
+from aethergate.egress import build_destination_policy
 from aethergate.encryption import encryptor_from_key
 from aethergate.inference.service import InferenceService
 from aethergate.persistence.db import get_session_factory
 from aethergate.scheduler.service import SchedulingService
-from aethergate.secrets import EnvSecretResolver
+from aethergate.secrets import build_secret_resolver
 
 
 def build_inference_service() -> InferenceService:
     """Build the inference service from current runtime settings."""
     settings = get_settings()
-    policy = DestinationPolicy(settings.upstream_allowlist_hosts)
+    policy = build_destination_policy(settings)
     return InferenceService(
-        EnvSecretResolver(),
+        build_secret_resolver(settings),
         policy,
         timeout_seconds=settings.inference_timeout_seconds,
     )

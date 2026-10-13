@@ -69,6 +69,13 @@ scripts/dev/v2 <command>
 - The bootstrap token has a minimum-length floor (32 characters) and rejects placeholders; empty/unset
   disables bootstrap. The floor is **not** an entropy proof — the dev helper generates strong random
   material (`agb_ + secrets.token_urlsafe(32)`), and operators must supply high-entropy secrets.
+- `AETHERGATE_SECRET_BACKEND` (`env` default) selects the provider-secret resolver: `env`
+  (`AETHERGATE_SECRET_*`) is dev/test only and rejected in `prod`; `file` reads
+  `AETHERGATE_SECRET_DIRECTORY` (absolute, read-only) by `SecretRef.id`. See
+  `docs/architecture/security.md` (AGV2-030).
+- `AETHERGATE_EGRESS_REQUIRE_LITERAL_IP` (default `false`, forced on in `prod`) requires upstream
+  allowlist hosts to be literal IPs and disables DNS-name upstreams; provider HTTP redirects are
+  never followed regardless of mode.
 
 ## Endpoints
 
@@ -429,7 +436,9 @@ Security invariants preserved:
 - Credential raw keys are revealed exactly once in a dedicated `RevealSecret` modal (Copy action,
   destroyed on close); never in URL/history/web storage/logs, and no "show existing key" control.
 - Provider-account configuration selects existing `SecretRef` metadata only; no plaintext
-  provider-secret input or raw-secret display. Raw secret storage remains deferred.
+  provider-secret input or raw-secret display. The admin API/console never accepts or shows raw
+  provider secret material; the trusted runtime resolves it from the configured backend (see
+  `docs/architecture/security.md` AGV2-030).
 - Endpoint pages distinguish catalog `is_active` from queue runtime `operational_state`; pause/drain/
   resume stay queue/operator actions.
 - Route-binding/account/quota mismatches and the one-active-route rule render stable structured

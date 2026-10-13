@@ -52,6 +52,23 @@ class Settings(BaseSettings):
     upstream_allowlist: str = Field(
         default="", validation_alias="AETHERGATE_UPSTREAM_ALLOWLIST"
     )
+    # Provider-secret backend. ``env`` is a development/test convenience only and
+    # is rejected in prod; ``file`` resolves read-only externally projected
+    # secret files (Docker/Kubernetes/systemd projection or an operator mount).
+    # Enforcement lives in ``build_secret_resolver`` (fail closed at startup) and
+    # is reported by ``config_check``.
+    secret_backend: Literal["env", "file"] = Field(
+        default="env", validation_alias="AETHERGATE_SECRET_BACKEND"
+    )
+    secret_directory: str | None = Field(
+        default=None, validation_alias="AETHERGATE_SECRET_DIRECTORY"
+    )
+    # Production DNS policy: when true, the configured upstream destination host
+    # must be a literal IP address so DNS rebinding cannot occur between
+    # validation and connect. Dev/test may keep service DNS names.
+    egress_require_literal_ip: bool = Field(
+        default=False, validation_alias="AETHERGATE_EGRESS_REQUIRE_LITERAL_IP"
+    )
     inference_timeout_seconds: float = Field(
         default=120.0, validation_alias="AETHERGATE_INFERENCE_TIMEOUT_SECONDS"
     )
@@ -214,6 +231,14 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _empty_oidc_is_none(cls, value: object) -> object:
+        """Treat an empty env value (e.g. ``${VAR:-}`` from compose) as unset."""
+        if value is None or value == "":
+            return None
+        return value
+
+    @field_validator("secret_directory", mode="before")
+    @classmethod
+    def _empty_secret_directory_is_none(cls, value: object) -> object:
         """Treat an empty env value (e.g. ``${VAR:-}`` from compose) as unset."""
         if value is None or value == "":
             return None

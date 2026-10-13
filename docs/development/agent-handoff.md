@@ -1,17 +1,267 @@
+# AGV2-030 corrective closure — complete (2026-10-13 UTC)
+
+- Branch: `feat/agv2-030-beta1-security`; canonical `main` is still
+  `7c47cd8575dc96265c02e17333ee88bda920de99`; PR #4 is open, mergeable, and
+  **unmerged**. No migration files changed; head remains `0017`.
+- The independent-review HOLD is resolved; all three items are closed:
+
+  1. **Strict literal-IP validation.** `_is_ip_literal` in
+     `src/aethergate/egress.py` now parses the host exactly as spelled (no
+     trailing-dot stripping), so `192.168.22.50.` and multi-dot spellings are
+     rejected under `require_literal_ip=True` even when that exact spelling is
+     allowlisted. Red-before/green-after regression tests in
+     `tests/test_egress.py` (single/multiple/triple trailing dot, both
+     spellings allowlisted, trailing-dot URL with plain IP allowlisted). Valid
+     allowlisted IPv4/bracketed IPv6 and dev/test service-DNS semantics are
+     preserved.
+  2. **Transport direct-connect verification (proxy closure).** The pinned
+     LiteLLM aiohttp transport reads `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` via
+     `LiteLLMAiohttpTransport._get_proxy_settings`, gated by
+     `litellm.disable_aiohttp_trust_env` (False by default); its httpx fallback
+     (`DISABLE_AIOHTTP_TRANSPORT`/`LITELLM_HTTP2`) builds `trust_env=True`
+     clients that resolve env proxies into `_mounts` at construction. A proxy
+     **can** therefore intervene and defeat "validated IP == connected IP".
+     `install_proxy_safety()` (applied once at adapter import) pins
+     `litellm.disable_aiohttp_trust_env=True` and strips `_trust_env`/`_mounts`
+     from every future and already-created client. Proven by real-transport
+     canary tests (`tests/test_proxy_safety.py`) for both the default aiohttp
+     and the httpx-fallback transport: a loopback canary proxy is never
+     contacted, the origin is reached directly, and the guard's
+     `disable_aiohttp_trust_env`/`_trust_env`/`_mounts` state is asserted.
+  3. **Section-11 live nomnom proof** executed on a disposable
+     production-policy stack (evidence below).
+
+- Substantive closure commit: `f25d31f5159852eae155620fc70e0cc0ddb4ec4b`
+  (`fix(security): close trailing-dot and env-proxy egress escapes`). All four
+  PR workflows completed/success on that exact SHA: backend `38333972927`,
+  frontend `38333972938`, schema-secret-gate `38333972978`,
+  alpha-golden-path `38333972924`.
+- `.aethergate-wip` remains in place until this documentation-only handoff tip
+  is also verified green on all four workflows and PR #4 is updated.
+- The historical checkpoints below are superseded by this closure record.
+
+---
+
+# Resume checkpoint - 2026-10-12 (per-task branch policy)
+
+> Superseded: this checkpoint predates the AGV2-030 implementation. See the
+> **AGV2-030** section below for the current, complete state.
+
+- **Policy decided by operator:** new work uses per-task branches created from
+  the latest reviewed/verified `main`. Historical long-lived `v2` is retired
+  for development (preserved for audit), and must not be rebased, force-pushed,
+  or used as the AGV2-030 base. Do not push implementation directly to `main`.
+- Canonical `main`: `7c47cd8575dc96265c02e17333ee88bda920de99`.
+  PRs #1-3 merged; backend `38263020817`, frontend `38263020743`,
+  schema-secret-gate `38263020802`, and alpha-golden-path `38263020770`
+  all succeeded on that merge SHA. Migration head `0017`.
+- **Current prepared branch:** `feat/agv2-030-beta1-security`, created from
+  canonical `main` with **zero commits behind**. Its previously existing
+  preparation commits modified only `AGENTS.md` and
+  `docs/development/current-task.md`; the product implementation is **not
+  started**. This checkpoint and the current task are the active instructions.
+  All downstream AGV2-031 work must start on a fresh branch from the then
+  current reviewed `main`, not from AGV2-030 or old `v2`.
+- `AGV2-030` remains Beta 1 security foundation: file-backed production
+  provider-secret backend and pinned Ollama/LiteLLM DNS/redirect egress closure.
+  Complete scope, proof requirements, nomnom test, no-migration expectation,
+  `.aethergate-wip` lifecycle, and PR gate are in
+  `docs/development/current-task.md` on the active branch.
+- **Golden-path evidence requiring preflight correction:** On historical
+  docs-only `v2` queue SHA `df6ac9ec8e6a218ab214ebb93f268f0f4038b2d9`,
+  golden-path run `38263913698` failed only the second browser test at
+  `frontend/e2e/fixtures.ts:loginAs` (Dashboard not visible, 30 s).
+  The first browser OIDC test and the other four browser tests passed.
+  Redacted web logs show the second test's unauthenticated session check
+  returned 401 around 14:38:42 UTC, **without an OIDC login redirect**
+  before timeout. Immediate `isVisible()` on the sign-in link after
+  `page.goto("/")` is a credible client-auth-loading race. This diagnosis
+  needs deterministic reproduction and a verified fix; do not dismiss as
+  transient or mark resolved from a later green run alone.
+- The historical `v2` handoff SHA
+  `b715f780573b43d4046ddfbb6a6979c7fa368826` subsequently passed
+  **all four** workflows: backend `38312457242`, frontend `38312457133`,
+  schema-secret-gate `38312457067`, golden `38312457044`.
+  This confirms the old green regression baseline, but does not close the
+  missing-auth-redirect race. Preserve failing CI evidence for the fix.
+- Work must proceed in this order: (1) create `.aethergate-wip` as first
+  local repo action for active AGV2-030; (2) root-cause/repair/prove the
+  OIDC smoke defect as the preflight; (3) implement AGV2-030 security scope;
+  (4) independently verify tests, exact-final PR head and four CI gates;
+  (5) reviewed PR to main, with **no automatic merge**.
+- CI workflows respond to `pull_request` for task branches. Their `push`
+  triggers currently name `main` and legacy `v2`; therefore a draft
+  AGV2-030 PR may be used to get PR-event CI, but must not be merged before
+  complete independent review. Do not claim branch-push CI exists when only
+  PR-triggered CI ran.
+
+---
+
 # AetherGate Agent Handoff
 
 ## Current State
-- Branch: `v2`. **AGV2-029 (OpenAI Embeddings API)** complete, and **AGV2-029V** (independent-review
-  verification closure) complete: `POST /v1/embeddings` is a non-streaming inference operation
-  through the same durable scheduler/accounting authority as Chat/Responses. String/list-of-strings
-  input (bounded at 2048), `float`/`base64` encoding, operation-aware encrypted payload/result, and
-  alias/provider/adapter embedding-capability enforcement at admission and dispatch. AGV2-029V
-  closed three narrow gaps: strict provider index integrity, omitted-vs-explicit-null semantics, and
-  the bounded input cardinality. Official Python (`openai==2.54.0`) and JS (`openai@7.32.0`) SDK
-  proofs green, including the mandatory JS default-base64 decode path. No migration (head `0017`).
+- Branch: `feat/agv2-030-beta1-security`, created from canonical `main`
+  `7c47cd8575dc96265c02e17333ee88bda920de99`. **AGV2-030 (Beta 1 security foundation)** is
+  implemented: the production file-backed provider-secret backend and the DNS-rebinding/redirect-
+  escape egress closure. The historical persistent `v2` branch is retired for new work.
 - **Migration head remains `0017`**; no new migration; `0001`–`0017` untouched.
-- All four required remote workflows are `completed/success` on the final `origin/v2` SHA (recorded
-  below); feature PR **#3** (`v2` -> `main`) is open/unmerged.
+- All four required remote workflows are `completed/success` on the AGV2-030 head (recorded below);
+  feature PR **#4** (`feat/agv2-030-beta1-security` -> `main`) is open/unmerged.
+- **Open item:** the live nomnom production-policy proof (task section 11) has not yet been
+  executed. nomnom is reachable (Ollama `192.168.22.50:11434` open; dev IdP `:8090` down). All
+  deterministic/offline proof is green; this live proof is the sole remaining AGV2-030 item.
+
+## AGV2-030 — Beta 1 security foundation (provider-secret backend + egress DNS/redirect closure)
+
+### Implementation commits
+- `65984bac391eebf9f0419558788a1a7608b1a7e6` — fix(e2e): wait for resolved auth state before OIDC sign-in
+- `0978438786505fc88a3de201d9188733df76c666` — feat(security): add production provider-secret backend and egress closure
+- `6b9907fcb78da61258e65904c4594c0d81434e3d` — docs: document beta 1 provider-secret backend and egress closure
+- `f25d31f5159852eae155620fc70e0cc0ddb4ec4b` — fix(security): close trailing-dot and env-proxy egress escapes (corrective closure)
+
+### Preflight — OIDC golden-path loginAs race (root-caused and fixed)
+- **Root cause:** `frontend/e2e/fixtures.ts:loginAs` polled `isVisible()` once immediately after
+  `page.goto("/")`. The console renders a `Loading…` placeholder while its async
+  `/admin/v1/auth/session` probe is in flight, so the poll could observe neither the sign-in link
+  nor the Dashboard, skip the OIDC click, and time out waiting for a Dashboard it never reached.
+  This matches the golden-path failure where the session probe returned 401 with no subsequent
+  `/admin/v1/auth/oidc/login` redirect.
+- **Fix:** a `waitForAuthState(page)` helper polls until a terminal auth state resolves (Dashboard
+  heading or sign-in link) before `loginAs` acts; the same helper replaced the duplicated racy
+  polls in `web-console.spec.ts`. No timeout inflation, no rerun-only disposition.
+- **Regression:** `alpha-golden.spec.ts` adds `login readiness survives a delayed unauthenticated
+  session probe`, which `page.route`s `**/admin/v1/auth/session` with a 1500 ms delay so the race
+  is forced deterministically; the helper must still reach the Dashboard. Verified to fail (30 s
+  timeout) pre-fix and pass post-fix.
+
+### Production provider-secret backend
+- `FileSecretResolver` resolves a `SecretRef` by its stable opaque `id` (never the display name) from
+  `AETHERGATE_SECRET_DIRECTORY`. Safety: absolute root; resolved target must stay inside the root
+  (traversal and symlink escape rejected, in-root symlinks permitted for rotation projection);
+  regular files only; 64 KiB bound; UTF-8 only, no NUL, non-empty; exactly one trailing `LF`/`CRLF`
+  removed (arbitrary whitespace preserved). Errors carry only safe `SecretRef` metadata, never file
+  contents.
+- `build_secret_resolver(settings)` is the single API/worker factory: `env` is a dev/test convenience
+  rejected in `prod`; `prod` requires `file`; no implicit fallback (a file deployment never consults
+  `AETHERGATE_SECRET_*`, and prod never falls back to env). `runtime.build_inference_service` now
+  uses it. No resolver choice comes from a client request or database row.
+- `config_check` reports prod `env` backend INVALID, and a missing/non-absolute/unusable file
+  directory INVALID, without printing secret material.
+
+### Egress / DNS / redirect closure
+- **DNS rebinding (literal-IP prod policy):** `build_destination_policy(settings)` enables
+  `DestinationPolicy(require_literal_ip=True)` in `prod`, so the configured upstream host must be a
+  literal IPv4/IPv6 address — the validated address is the connected address, so DNS cannot be
+  swapped between validation and connect. Authorized private-LAN literal IPs remain allowed when
+  allowlisted (RFC1918 is not rejected generally). Dev/test may keep service DNS names; no insecure
+  "allow unsafe DNS" override.
+- **Redirect escape:** pinned LiteLLM `1.104.0` was found to construct its httpx clients with
+  `follow_redirects=True`. `install_redirect_safety()` (invoked once at adapter import) patches the
+  `AsyncHTTPHandler` constructor to force `follow_redirects=False` and mutates already-created/cached
+  module-level and in-memory-cache handlers, so completion/streaming/embedding transports never
+  contact a redirect target: every `301/302/303/307/308` surfaces as a safe provider error and the
+  `Location` target is never requested.
+- **Shared policy:** endpoint catalog create/update, dev seeding, and dispatch-time route
+  preparation all use the same environment-aware `DestinationPolicy`; secret resolution runs only
+  after dispatch-time destination validation, so a denied destination never receives credentials.
+- **Strict literal-IP (trailing-dot closure):** `_is_ip_literal` parses the host exactly as spelled
+  (no `rstrip(".")`/lower normalization), so a trailing-dot FQDN spelling such as `192.168.22.50.`
+  is rejected under `require_literal_ip=True` even when that exact spelling is allowlisted, as are
+  multiple-dot spellings. Valid allowlisted IPv4/bracketed IPv6 and dev/test service-DNS names are
+  unchanged.
+- **Implicit env-proxy closure:** the pinned LiteLLM aiohttp transport reads
+  `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` via `LiteLLMAiohttpTransport._get_proxy_settings` unless
+  `litellm.disable_aiohttp_trust_env=True`, and its httpx fallback
+  (`DISABLE_AIOHTTP_TRANSPORT`/`LITELLM_HTTP2`) builds `trust_env=True` clients that resolve env
+  proxies into `_mounts` at construction — so an implicit env proxy **could** route a "validated"
+  literal address through a proxy. `install_proxy_safety()` (applied once at adapter import) pins
+  `disable_aiohttp_trust_env=True` and strips `_trust_env`/`_mounts` from every future and
+  already-created client (module-level and in-memory-cache handlers), so both transports connect
+  directly to the validated address.
+
+### Deterministic / offline proof
+- File-resolver safety matrix (traversal, symlink escape, size, UTF-8/NUL/empty, newline) in
+  `tests/test_secrets.py`; factory prod/dev selection and no-env-fallback in `tests/test_runtime_secrets.py`.
+- Prod literal-IP policy and shared catalog/dispatch policy in `tests/test_egress.py` and
+  `tests/test_inference_boundary.py`.
+- Real-transport redirect canary (completion + streaming + embedding; silent for all five redirect
+  classes, canary hit count zero) in `tests/test_redirect_safety.py`.
+- Real-transport env-proxy canary (`tests/test_proxy_safety.py`) for both the default aiohttp and the
+  httpx-fallback transport: a loopback canary proxy is never contacted and the origin is reached
+  directly, with the guard state (`disable_aiohttp_trust_env`/`_trust_env`/`_mounts`) asserted.
+- `config_check` prod/dev cases in `tests/test_config_check.py`.
+
+### Regression counts (AGV2-030)
+- backend: **833 collected / exit 0** (baseline 758 + 75 new/expanded security tests) via canonical
+  `scripts/dev/v2 test`; `ruff check src tests` clean. The 833 includes the 5 trailing-dot
+  literal-IP tests in `tests/test_egress.py` and the 3 env-proxy transport tests in
+  `tests/test_proxy_safety.py`.
+- frontend unit/component: **89 passed** (22 files, unchanged).
+- full Playwright: **32 passed / 7 skipped** locally (6 CI-only `alpha-golden.spec.ts` + 1 new
+  login-readiness regression); CI `alpha-golden.spec.ts` runs **7 passed**.
+- migration head `0017` (empty -> `0017` and populated `0016 -> 0017` unchanged); `git diff --check`
+  clean; secret scan clean; no-legacy guard clean; config_check dev VALID and prod security cases
+  correct.
+
+### Final remote CI (AGV2-030 substantive head `f25d31f`)
+All four required PR-event workflows are `completed/success` on the substantive closure head:
+- backend — run `38333972927`
+- frontend — run `38333972938`
+- schema-secret-gate — run `38333972978`
+- alpha-golden-path — run `38333972924`
+
+The exact final task-branch tip (including this documentation-only handoff commit) is re-verified on
+all four workflows; its exact SHA and four exact-SHA workflow IDs are recorded in PR #4's description.
+
+### Live nomnom proof — COMPLETE (2026-10-13 UTC)
+Executed on a disposable production-policy stack (`ag-agv2030-nomnom`, loopback api `:18080`), torn
+down afterward; the long-lived dev stack was not touched.
+
+- **Installed models inspected** (no downloads) via `GET http://192.168.22.50:11434/api/tags`:
+  vision-capable `qwen3-vl:latest` (and others), embedding-capable
+  `nomic-embed-text:latest`/`nomic-embed-text:v1.5` (`caps=["embedding"]`, 768-dim), and
+  completion-capable `qwen3.8-2b-distill:Q6_K` among many more.
+- **Production-policy stack:** `AETHERGATE_ENV=prod`,
+  `AETHERGATE_UPSTREAM_ALLOWLIST=192.168.22.50`,
+  `AETHERGATE_SECRET_BACKEND=file` with a read-only mounted empty
+  `AETHERGATE_SECRET_DIRECTORY=/run/secrets/aethergate-provider`,
+  `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`, `AETHERGATE_EGRESS_REQUIRE_LITERAL_IP=true`,
+  generated `AETHERGATE_QUEUE_KEY`/`AETHERGATE_BOOTSTRAP_TOKEN`, fresh postgres volume, OIDC
+  disabled. `python -m aethergate.config_check` => **VALID**; migrations `0001 -> 0017` clean.
+- **bypass=false:** inference auth bypass disabled in prod (and prod forbids it by validator).
+- **Official Python SDK (`openai==2.54.0`):**
+  - `client.models.list()` returns the three public aliases (text, vision, embedding).
+  - `client.chat.completions.create` (text, `nomnom-text` -> `qwen3.8-2b-distill:Q6_K`) returns
+    non-empty content against the allowlisted literal IP.
+  - `client.chat.completions.create` (vision, `nomnom-vision` -> `qwen3-vl:latest`) returns
+    non-empty content for a deterministic 16x16 PNG.
+  - `client.embeddings.create` (`nomnom-embed` -> `nomic-embed-text:latest`) returns a 768-dim
+    vector.
+- **Hostname form rejected in prod:** catalog endpoint create with
+  `http://ollama.internal:11434` => `400` (destination denied).
+- **Metadata/link-local denied:** `http://169.254.169.254:80` and `http://169.254.1.1:80` =>
+  `400` (destination denied); trailing-dot `http://192.168.22.50.:11434` => `400` as well.
+- **Tear-down:** only the disposable `ag-agv2030-nomnom` project was removed (`down -v`); no
+  unrelated services or the dev IdP were touched. `FileSecretResolver` was proven deterministically
+  (offline) because the real Ollama route has no provider credential.
+- No secret contents, provider credentials, prompt/output text, or large logs are reproduced here.
+
+### Feature PR
+PR **#4** (`feat/agv2-030-beta1-security` -> `main`): open, `mergeable`, **unmerged**; head tracks
+the AGV2-030 tip. Description records the preflight root-cause/fix, the security design choice, the
+verification summary, the exact final SHA, and the four exact-SHA workflow IDs.
+
+### WIP marker lifecycle
+`.aethergate-wip` (`task=AGV2-030`, `branch=feat/agv2-030-beta1-security`, UTC start timestamp)
+created as the first local action and kept until every criterion is green, this handoff commit is
+pushed, and the exact final tip is verified green on all four workflows. Never
+staged/committed/pushed (gitignored).
+
+### Recommended next step
+**Begin AGV2-031 Beta 1 release hardening: production deployment profile, architecture/CODEOWNERS
+enforcement, fault-injection/recovery release gates, and Beta readiness documentation.** (AGV2-030 is
+now complete pending the final tip's four green workflows and PR #4 update; do not merge PR #4
+automatically.)
 
 ## AGV2-029V — Embeddings verification closure (index integrity, null semantics, bounded inputs)
 

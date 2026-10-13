@@ -71,13 +71,14 @@ These rules are authoritative for work launched from `docs/development/current-t
 generic interactive workflow boilerplate below.
 
 - `docs/development/current-task.md` is the canonical active assignment.
+- **Branch policy after AGV2-029:** `main` is the canonical protected branch. Every new task starts from the latest verified `origin/main` on a task-specific branch using the repository naming convention (`feat/`, `fix/`, `docs/`, `chore/`, or `refactor/`). The active task file names the exact branch. The historical persistent `v2` development branch is retired for new work; do not checkout, commit to, or push `v2` unless a future recovery task explicitly says to. Never push task implementation directly to `main`. After a reviewed merge and green post-merge `main` CI, create the next task branch from that updated `main`.
 - **WIP marker protocol:** for every task launched from `current-task.md`, the first local repository
   action after entering the repo is to create the root file `.aethergate-wip`. Keep it present for
   the entire active task. It is an operator-visible local marker only: it is gitignored, must never be
   staged/committed/pushed, and must contain no secrets. Safe contents are the task ID, branch, and a
   start timestamp. If context is compacted/restarted and the task is still incomplete, recreate the
   marker if it is missing. Remove `.aethergate-wip` only after all task completion criteria are green,
-  the handoff is updated, all required commits are pushed to `origin/v2`, and the remote branch has
+  the handoff is updated, all required commits are pushed to the active task branch named in `docs/development/current-task.md`, and the remote branch has
   been verified. If the task is blocked or incomplete, leave the marker in place.
 - `docs/development/agent-handoff.md` is the canonical previous-task state.
 - After any context compaction, summarization, restart, or uncertainty about what remains to do,
@@ -89,9 +90,9 @@ generic interactive workflow boilerplate below.
   Then inspect `git status` / recent history and continue the task from repo state.
 - Do not ask the user to choose among commit/push/stop options when the active task already specifies
   the required completion behavior.
-- If the active task says to commit and push to `origin/v2`, do that automatically after required
+- If the active task says to commit and push to the active task branch named in `docs/development/current-task.md`, do that automatically after required
   verification succeeds. Never push directly to `main`.
-- Do not invoke the generic `commit` shortcut/version-bump workflow merely because a scoped v2 task
+- Do not invoke the generic `commit` shortcut/version-bump workflow merely because a scoped task
   is ready to commit. Follow the active task's explicit conventional-commit instructions instead.
 - Before asking the user a question, re-read the active task. If the answer or safe default is already
   specified there, continue without interrupting the user.
@@ -99,7 +100,7 @@ generic interactive workflow boilerplate below.
   genuine blocker remains after best effort, record it in `agent-handoff.md`, commit/push the
   truthful state if the task permits, and stop.
 - A task is complete only when its stated completion criteria are satisfied, the handoff is updated,
-  commits are created, and required pushes are present on `origin/v2`.
+  commits are created, and required pushes are present on the active task branch.
 
 ## Common Principles
 - Don't assume. Don't hide confusion. Surface tradeoffs.

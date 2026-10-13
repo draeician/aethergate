@@ -39,6 +39,9 @@ def _isolate_settings_env(monkeypatch, tmp_path):
         "AETHERGATE_OIDC_REDIRECT_URI",
         "AETHERGATE_OIDC_WEB_CALLBACK_PATH",
         "AETHERGATE_OIDC_DEVICE_CLIENT_ID",
+        "AETHERGATE_SECRET_BACKEND",
+        "AETHERGATE_SECRET_DIRECTORY",
+        "AETHERGATE_EGRESS_REQUIRE_LITERAL_IP",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
@@ -146,6 +149,54 @@ def test_disabled_features_are_warnings():
     result = run_checks(_dev_settings())
     assert any("OIDC is disabled" in w for w in result.warnings)
     assert any("bootstrap token is unset" in w for w in result.warnings)
+
+
+def test_dev_env_secret_backend_is_warning_only():
+    result = run_checks(_dev_settings(secret_backend="env"))
+    assert result.ok, result.errors
+    assert any("secret backend" in w for w in result.warnings)
+
+
+def test_prod_env_secret_backend_is_invalid():
+    result = run_checks(_dev_settings(app_env="prod", secret_backend="env"))
+    assert not result.ok
+    assert any("secret backend" in e for e in result.errors)
+
+
+def test_prod_file_secret_backend_valid(tmp_path):
+    result = run_checks(
+        _dev_settings(
+            app_env="prod",
+            secret_backend="file",
+            secret_directory=str(tmp_path),
+        )
+    )
+    assert result.ok, result.errors
+
+
+def test_file_secret_backend_requires_directory():
+    result = run_checks(_dev_settings(secret_backend="file", secret_directory=None))
+    assert not result.ok
+    assert any("AETHERGATE_SECRET_DIRECTORY" in e for e in result.errors)
+
+
+def test_file_secret_backend_rejects_relative_directory():
+    result = run_checks(
+        _dev_settings(secret_backend="file", secret_directory="relative/secrets")
+    )
+    assert not result.ok
+    assert any("absolute" in e for e in result.errors)
+
+
+def test_file_secret_backend_rejects_missing_directory(tmp_path):
+    result = run_checks(
+        _dev_settings(
+            secret_backend="file",
+            secret_directory=str(tmp_path / "missing"),
+        )
+    )
+    assert not result.ok
+    assert any("does not exist" in e for e in result.errors)
 
 
 def test_run_checks_never_prints_secrets(capsys, monkeypatch):

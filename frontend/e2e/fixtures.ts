@@ -37,11 +37,46 @@ export async function setIdpSubject(subject: string): Promise<void> {
   }
 }
 
+/**
+ * Wait until the client auth state has resolved to a terminal state after a
+ * navigation: either the authenticated Dashboard heading is visible, or the
+ * unauthenticated OIDC sign-in link is visible. Returns which one won.
+ *
+ * The app renders a "Loading…" placeholder while its async
+ * ``/admin/v1/auth/session`` probe is in flight, so a single immediate
+ * ``isVisible()`` poll after ``goto()`` races that request and can observe
+ * neither terminal state. Callers must wait for this helper rather than
+ * deciding from one non-blocking visibility poll.
+ */
+export async function waitForAuthState(page: Page): Promise<"authenticated" | "unauthenticated"> {
+  const signIn = page.getByRole("link", { name: /sign in with oidc/i });
+  const dashboard = page.getByRole("heading", { name: "Dashboard" });
+  let resolved: "authenticated" | "unauthenticated" | null = null;
+  await expect
+    .poll(
+      async () => {
+        if (await dashboard.isVisible()) {
+          resolved = "authenticated";
+        } else if (await signIn.isVisible()) {
+          resolved = "unauthenticated";
+        }
+        return resolved;
+      },
+      { timeout: 30_000, message: "auth state did not resolve after navigation" },
+    )
+    .not.toBeNull();
+  return resolved!;
+}
+
 /** Complete the real OIDC authorization-code + PKCE flow for a subject. */
 export async function loginAs(page: Page, subject: string): Promise<void> {
   await setIdpSubject(subject);
   await page.goto("/");
-  if (await page.getByRole("link", { name: /sign in with oidc/i }).isVisible()) {
+  // Wait until the client resolves its session before acting. A lone
+  // isVisible() poll here races the in-flight session fetch (the app shows
+  // "Loading…" first) and could skip the sign-in click entirely.
+  const state = await waitForAuthState(page);
+  if (state === "unauthenticated") {
     await page.getByRole("link", { name: /sign in with oidc/i }).click();
   }
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({
