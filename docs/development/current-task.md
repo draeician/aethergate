@@ -6,6 +6,82 @@ AGV2-031
 ## Title
 Beta 1 release hardening — isolated production deployment, recovery gates, architecture ownership, and release evidence
 
+## Independent reviewer HOLD — 2026-10-13 (corrective closure)
+
+**AGV2-031 is not approved for merge or Beta 1 GO.** The prior substantive
+implementation and live nomnom evidence have been reviewed and the five required
+PR workflows did pass at exactly `ee7fbec7857dd2459d1b1c4a1fee6a5d464fb5c6` (backend
+`38347083171`, frontend `38347083164`, schema-secret-gate
+`38347083165`, alpha-golden-path `38347083197`, beta-release-gate
+`38347083170`). The baseline post-AGV2-030 merge checks also passed.
+However, these results do not close the following source-level release issues.
+
+**Required narrow corrective closure (no unrelated functionality):**
+
+1. **Worker liveness false negative.** In `src/aethergate/worker.py`,
+   `Path(heartbeat_file).touch()` happens only *before* awaited `_run_once()`.
+   A legitimate `service.run_complete()` / stream may run for the default
+   120-second inference timeout, whereas the Beta profile's
+   `AETHERGATE_WORKER_HEARTBEAT_TIMEOUT_SECONDS` is 90 seconds. The healthcheck
+   can therefore declare a busy but healthy worker unhealthy. Use a separately
+   scheduled event-loop heartbeat or another demonstrably correct progress
+   signal; keep actual hangs/crashes detectable. Add deterministic active,
+   long-running-dispatch and clean-stop/restart tests, not only idle-loop tests.
+   Resolve the documented false `docker restart` unhealthy behavior or
+   demonstrate its actual cause and honest operator mitigation.
+2. **Acceptance-script failure cleanup / collision safety.**
+   `scripts/ci/beta_release_gate.sh` and
+   `scripts/ci/beta_nomnom_acceptance.sh` do a `compose down -v` only on
+   the success path, not under `set -e` failure, signal or interruption.
+   Their predictable default Compose project names can accidentally adopt
+   existing disposable projects if reused. Add safe `EXIT`/`INT`/`TERM`
+   teardown guards that target only a project proven owned by the current
+   script run; fail closed on name/resource collision rather than touching
+   unrelated containers/volumes. CI's `if: always()` teardown is not a
+   substitute for safe operator-local live nomnom scripts. Include
+   deterministic failure-injection / collision regression proof and avoid
+   exposing ephemeral secret values.
+3. **Architecture check bypass.**
+   `scripts/ci/architecture_boundaries.py:_imported_names` ignores
+   `ast.ImportFrom.level`. For instance `from ..persistence import models`
+   inside an API module yields `persistence.models`, so the current
+   `aethergate.persistence.models` rule misses it; likewise a relative
+   import from persistence to higher layers can bypass enforcement. Resolve
+   import destinations relative to the importing package and add red-before /
+   green-after fixture tests for direct and relative imports (including
+   `from . import ...`). Enforce the documented invariants without
+   false-positives on permitted imports.
+4. **Explicit database outage/recovery release gate.** Section 3 of the
+   original assignment required testing real readiness/dispatch behavior
+   while PostgreSQL is unavailable and after recovery. The new
+   `tests/test_recovery.py` covers service-instance restarts and provider
+   failure, and `beta_release_gate.sh` covers idle worker stop/start and
+   database backup/restore, but neither explicitly creates a database outage
+   during queued/in-progress work. Add a deterministic, *disposable-stack*
+   DB outage/recovery proof: readiness fails closed; no admitted-but-lost
+   work / unguarded dispatch; restore DB; validate persisted queue/settlement
+   invariants; safe teardown. Or document any narrow scenario that cannot
+   safely be tested and retain a release NO-GO for it. Do not inject outages
+   into the long-lived dev/prod stack.
+
+**Operator-controlled release prerequisite:** The readiness matrix correctly
+shows `main` branch protection / independent CODEOWNERS review enforcement
+as **NO-GO**. GitHub branch protection must be configured and verified,
+with an eligible reviewer distinct from the PR author if required; merely
+committing CODEOWNERS does not enforce review.
+
+Resume the existing AGV2-031 task branch, recreate/preserve the local gitignored
+`.aethergate-wip` before other local repo work, update tests and release
+evidence, and require **all five** workflows green on the *new exact final*
+PR SHA. Maintain PR #5 as draft/open/unmerged; do not tag, publish, deploy,
+or announce Beta 1 as released. The earlier ntfy notification was
+acknowledged (HTTP 200) but was **sent prematurely** before the later live
+proof; do not resend it automatically or claim it certifies the corrected
+final head. Record final review readiness and ask the operator whether
+another phone alert is desired rather than duplicating the original alert.
+
+---
+
 ## Status and release authority
 **Assigned, not implemented.** This task prepares a defensible Beta 1 release candidate; it does NOT declare Beta 1 released. The operator must approve final release/tag/cutover separately after independently reviewed CI, operational acceptance, and the post-merge main gate.
 
