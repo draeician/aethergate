@@ -1,3 +1,37 @@
+# Independent review checkpoint — 2026-10-13 UTC
+
+- Branch: `feat/agv2-030-beta1-security`; canonical `main` is still
+  `7c47cd8575dc96265c02e17333ee88bda920de99`; PR #4 is open,
+  mergeable, and **unmerged**, with a nine-commit branch difference before this
+  corrective checkpoint. No migration files changed; head remains `0017`.
+- Verified previously reviewed head:
+  `f724da1f261cac7706e3d160e7894cbb072e5088`; all four PR workflows
+  completed/success for this SHA: backend `38324984097`, frontend
+  `38324984044`, schema-secret-gate `38324984142`,
+  alpha-golden-path `38324984032`. Source-code/security tests, OIDC
+  delayed-session regression, pinned LiteLLM redirect fixture, and expected
+  production secret resolver logic were inspected independently.
+- **FAIL / HOLD:** `docs/development/current-task.md` section 11 live nomnom
+  production-policy proof is still **unexecuted**. The operator-facing agent
+  correctly retained local `.aethergate-wip` and did not merge.
+- **New narrow independent-review finding:** `_is_ip_literal` in
+  `src/aethergate/egress.py` removes trailing periods before Python IP
+  parsing. That accepts `192.168.22.50.` under a matching allowlist even
+  though it is not a strict IP literal. It must be rejected in production,
+  including multiple-dot variants, with red-before/green-after tests. Also
+  verify no unanticipated HTTP proxy transport circumvents the literal
+  address's direct-connection assertion; treat proxy risk as a question to
+  verify rather than a proven exploit.
+- Active next action is **narrow AGV2-030 corrective closure**: strict
+  literal-IP validation, transport direct-connect verification, and the full
+  disposable nomnom section-11 proof. Then update handoff/PR and obtain all
+  four CI gates on the exact new final PR head. Preserve `.aethergate-wip`,
+  never push directly to `main` or retired `v2`, do not auto-merge PR #4.
+- The historical pre-implementation checkpoint and older completion summary
+  below are **superseded by this independent review HOLD**.
+
+---
+
 # Resume checkpoint - 2026-10-12 (per-task branch policy)
 
 > Superseded: this checkpoint predates the AGV2-030 implementation. See the
