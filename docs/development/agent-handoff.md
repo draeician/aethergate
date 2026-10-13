@@ -1,3 +1,17 @@
+## AGV2-031 operator completion alert (requested; NOT SENT)
+
+The operator explicitly requests an urgent ntfy.sh phone alert **only when
+AGV2-031 is complete and ready for independent review**. The exact curl
+command, safe payload, URL, headers and release-gate trigger are now canonical
+in `docs/development/current-task.md`, section 9 on the AGV2-031 task branch.
+
+**No alert is due yet.** An open draft PR or initial CI passes do not satisfy
+the completion trigger. At final completion, send once, verify delivery,
+and record the delivery result in a PR comment and final response. Do not
+send credentials or other sensitive details.
+
+---
+
 # AGV2-031 kickoff — 2026-10-13 UTC (active)
 
 - **AGV2-030 complete and merged.** GitHub PR #4 is closed/merged; canonical main merge SHA `abce2245444efc616b617b53746ba4c4427da689` includes reviewer-approved Beta security foundation. Its feature head `630b3546c899ef8f7b20710447e37565319b0538` passed all four PR-event workflows: backend 38334919438; frontend 38334919423; schema-secret-gate 38334919416; alpha-golden-path 38334919443.
