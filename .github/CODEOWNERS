@@ -1,0 +1,35 @@
+# AetherGate v2 — code ownership.
+#
+# The repository's single known owner is @draeician; no organizations, teams, or
+# additional reviewers have been appointed yet. Ownership is therefore mapped to
+# @draeician per bounded area so CODEOWNERS review requests route to a real,
+# reachable account while workstreams remain conceptually separated (see
+# docs/development/agent-workstreams.md). Update individual paths here only when
+# real teams/owners are appointed — do not invent GitHub teams.
+
+# Contracts (OpenAI + admin schemas, generated clients, fixtures) — integrator-owned.
+/src/aethergate/contracts/        @draeician
+/frontend/src/generated/          @draeician
+/sdk/                             @draeician
+
+# Persistence / data model / migrations — platform-quality + integrator.
+/src/aethergate/persistence/      @draeician
+/src/aethergate/migrations/       @draeician
+
+# Security-sensitive: egress, secrets, encryption, identity/auth.
+/src/aethergate/egress.py         @draeician
+/src/aethergate/secrets.py        @draeician
+/src/aethergate/encryption.py     @draeician
+/src/aethergate/identity/         @draeician
+
+# Scheduler / accounting / inference authority.
+/src/aethergate/scheduler/        @draeician
+/src/aethergate/accounting/       @draeician
+/src/aethergate/inference/        @draeician
+
+# Deployment, CI, and operations (release-hardening scope).
+/deploy/                          @draeician
+/scripts/                         @draeician
+/.github/workflows/               @draeician
+/docs/operations/                 @draeician
+/docs/releases/                   @draeician
