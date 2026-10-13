@@ -23,7 +23,6 @@ import argparse
 import asyncio
 import logging
 import signal
-import time
 import uuid
 from pathlib import Path
 
@@ -70,6 +69,28 @@ async def _run_once(worker_id: str, service) -> str:
     return "idle"
 
 
+async def _heartbeat_loop(
+    worker_id: str,
+    heartbeat_file: str,
+    heartbeat_seconds: float,
+) -> None:
+    """Refresh the liveness heartbeat file on a fixed cadence.
+
+    Runs as a separate event-loop task so a long-running dispatch — or a graceful
+    shutdown while an in-flight request drains — cannot make a busy but healthy
+    worker appear stale. Because this task is scheduled on the same event loop as
+    the dispatch, a genuinely hung worker (CPU-blocked, not awaiting I/O) also
+    starves it, so a real stall is still detected by the container healthcheck.
+    """
+    Path(heartbeat_file).parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            Path(heartbeat_file).touch()
+        except OSError:
+            logger.warning("worker %s could not update heartbeat file", worker_id)
+        await asyncio.sleep(heartbeat_seconds)
+
+
 async def run(
     worker_id: str,
     *,
@@ -80,30 +101,35 @@ async def run(
     heartbeat_seconds: float = 30.0,
 ) -> None:
     service = build_scheduling_service()
-    last_heartbeat = 0.0
-    while True:
-        if shutdown_event is not None and shutdown_event.is_set():
-            logger.info("worker %s received shutdown; no longer claiming", worker_id)
-            return
-        if heartbeat_file and time.monotonic() - last_heartbeat >= heartbeat_seconds:
-            try:
-                Path(heartbeat_file).parent.mkdir(parents=True, exist_ok=True)
-                Path(heartbeat_file).touch()
-                last_heartbeat = time.monotonic()
-            except OSError:
-                logger.warning("worker %s could not update heartbeat file", worker_id)
-        try:
-            result = await _run_once(worker_id, service)
-            if once:
+    heartbeat_task: asyncio.Task | None = None
+    if heartbeat_file:
+        heartbeat_task = asyncio.create_task(
+            _heartbeat_loop(worker_id, heartbeat_file, heartbeat_seconds)
+        )
+    try:
+        while True:
+            if shutdown_event is not None and shutdown_event.is_set():
+                logger.info("worker %s received shutdown; no longer claiming", worker_id)
                 return
-            if result in ("idle", "full", "quota", "budget", "paused"):
+            try:
+                result = await _run_once(worker_id, service)
+                if once:
+                    return
+                if result in ("idle", "full", "quota", "budget", "paused"):
+                    await asyncio.sleep(poll_interval)
+                # "dispatched"/"processed" loop again immediately to drain the queue.
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the worker must survive transient failures
+                logger.exception("worker cycle failed")
                 await asyncio.sleep(poll_interval)
-            # "dispatched"/"processed" loop again immediately to drain the queue.
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - the worker must survive transient failures
-            logger.exception("worker cycle failed")
-            await asyncio.sleep(poll_interval)
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 
 def main() -> None:

@@ -171,7 +171,8 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: float = Field(
         default=30.0, validation_alias="AETHERGATE_WORKER_HEARTBEAT_SECONDS"
     )
-    # Optional path the worker touches each poll cycle to expose a real liveness
+    # Optional path the worker touches on a fixed cadence (a dedicated event-loop
+    # task, independent of the claim/dispatch loop) to expose a real liveness
     # signal to the container healthcheck. Unset (None) disables it, so dev/test
     # and existing deployments are unaffected. The production Beta profile sets it
     # to a tmpfs path and pairs it with ``python -m aethergate.worker_healthcheck``.

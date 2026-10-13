@@ -1,9 +1,11 @@
 """Worker liveness healthcheck (container health probe).
 
 The worker has no HTTP surface, so its container healthcheck reads a heartbeat
-file the worker refreshes each poll cycle (see ``AETHERGATE_WORKER_HEARTBEAT_FILE``
-and ``worker.run``). Exit code 0 means the heartbeat is fresh; 1 means the worker
-is stalled or the file is missing.
+file the worker refreshes on a fixed cadence from a dedicated event-loop task
+(see ``AETHERGATE_WORKER_HEARTBEAT_FILE`` and ``worker.run``). The cadence is
+independent of the claim/dispatch loop, so a long-running dispatch does not make
+a healthy worker appear stale. Exit code 0 means the heartbeat is fresh; 1 means
+the worker is stalled or the file is missing.
 
 Usage (from the worker container):
 
