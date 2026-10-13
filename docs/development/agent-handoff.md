@@ -1,3 +1,14 @@
+# AGV2-031 kickoff — 2026-10-13 UTC (active)
+
+- **AGV2-030 complete and merged.** GitHub PR #4 is closed/merged; canonical main merge SHA `abce2245444efc616b617b53746ba4c4427da689` includes reviewer-approved Beta security foundation. Its feature head `630b3546c899ef8f7b20710447e37565319b0538` passed all four PR-event workflows: backend 38334919438; frontend 38334919423; schema-secret-gate 38334919416; alpha-golden-path 38334919443.
+- **Post-merge main workflow evidence pending:** The GitHub integration available to the architect does not surface main push-event runs. Confirm all four completed/success with head_sha `abce2245444efc616b617b53746ba4c4427da689` using authenticated GitHub UI/gh/API before AGV2-031 implementation. No claim that an unobserved push run passed or failed.
+- **New branch:** `feat/agv2-031-beta1-release-hardening` created directly from the above main merge SHA. This is the only active task branch. Legacy persistent `v2` is retired and AGV2-030 branch remains historical.
+- **AGV2-031 assignment:** Beta 1 release hardening, not a shipped release or tag. Scope: isolated production deployment/profile, recovery/fault-injection evidence, architecture ownership/CODEOWNERS plus actual review-enforcement validation, Beta 1 runbook and GO/NO-GO release record. See `docs/development/current-task.md` on the task branch.
+- AGV2-030 baseline: 833 backend collected / exit 0, 89 frontend tests passed, full local Playwright 32 passed / 7 skipped, 7 CI browser golden checks; migration head `0017`. Real nomnom proof recorded under the preceding AGV2-030 handoff.
+- **Release safety:** No deployment of production, no public release/tag, no automatic PR merge. Opencode must first create gitignored `.aethergate-wip` as its first local repository action, then read task/handoff, verify main post-merge CI, and proceed with scoped changes. Preserve all older handoff history below.
+
+---
+
 # AGV2-030 corrective closure — complete (2026-10-13 UTC)
 
 - Branch: `feat/agv2-030-beta1-security`; canonical `main` is still
