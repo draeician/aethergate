@@ -93,6 +93,49 @@ def test_literal_ip_policy_rejects_allowlisted_hostname():
         policy.validate("http://ollama.internal:11434")
 
 
+# --- strict literal-IP: trailing-dot numerical hostnames must not pass ------
+#
+# ``192.168.22.50.`` is an FQDN spelling, not a strict IP literal. The
+# production literal-IP policy must reject it (and multi-dot variants) even when
+# that exact spelling is deliberately allowlisted, while still allowing plain
+# IPv4/IPv6 literals and dev/test service-DNS names.
+
+
+def test_literal_ip_rejects_allowlisted_trailing_dot_hostname():
+    policy = DestinationPolicy({"192.168.22.50."}, require_literal_ip=True)
+    with pytest.raises(DestinationDenied):
+        policy.validate("http://192.168.22.50.:11434")
+
+
+def test_literal_ip_rejects_allowlisted_multi_trailing_dot_hostname():
+    policy = DestinationPolicy({"192.168.22.50.."}, require_literal_ip=True)
+    with pytest.raises(DestinationDenied):
+        policy.validate("http://192.168.22.50..:11434")
+
+
+def test_literal_ip_rejects_allowlisted_triple_trailing_dot_hostname():
+    policy = DestinationPolicy({"192.168.22.50..."}, require_literal_ip=True)
+    with pytest.raises(DestinationDenied):
+        policy.validate("http://192.168.22.50...:11434")
+
+
+def test_literal_ip_rejects_trailing_dot_when_both_spellings_allowlisted():
+    policy = DestinationPolicy(
+        {"192.168.22.50", "192.168.22.50."}, require_literal_ip=True
+    )
+    # Plain literal still allowed.
+    policy.validate("http://192.168.22.50:11434")
+    # Trailing-dot spelling denied even though it is explicitly allowlisted.
+    with pytest.raises(DestinationDenied):
+        policy.validate("http://192.168.22.50.:11434")
+
+
+def test_literal_ip_rejects_trailing_dot_url_when_plain_ip_allowlisted():
+    policy = DestinationPolicy({"192.168.22.50"}, require_literal_ip=True)
+    with pytest.raises(DestinationDenied):
+        policy.validate("http://192.168.22.50.:11434")
+
+
 def test_literal_ip_policy_still_rejects_metadata_and_link_local():
     policy = DestinationPolicy({"169.254.169.254", "169.254.1.1"}, require_literal_ip=True)
     with pytest.raises(DestinationDenied):

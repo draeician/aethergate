@@ -60,8 +60,15 @@ def _is_forbidden_host(host: str) -> bool:
 
 
 def _is_ip_literal(host: str) -> bool:
+    """Return ``True`` only for a strict IP-literal ``host``.
+
+    Parses the host exactly as spelled with no trailing-dot normalization: a
+    host like ``192.168.22.50.`` is a DNS-name spelling (an FQDN with a terminal
+    dot), not a literal address, and must be rejected under the production
+    literal-IP policy. ``ipaddress`` already accepts upper/lower IPv6 hex.
+    """
     try:
-        ipaddress.ip_address(host.rstrip(".").lower())
+        ipaddress.ip_address(host)
     except ValueError:
         return False
     return True
@@ -168,3 +175,92 @@ def install_redirect_safety() -> None:
             _force_no_redirect(getattr(entry, "value", entry))
 
     _REDIRECT_GUARD_INSTALLED = True
+
+
+_PROXY_GUARD_INSTALLED = False
+
+
+def _strip_env_proxy(client: object) -> None:
+    """Neutralize an httpx client's implicit env-proxy routing.
+
+    httpx resolves ``HTTP(S)_PROXY``/``ALL_PROXY`` in ``AsyncClient.__init__``,
+    populating ``_mounts`` (and ``trust_env`` only affects that construction-time
+    pass). Mutating ``_trust_env`` alone is therefore too late for the httpx
+    fallback transport, which constructs the client with ``trust_env=True``;
+    the computed proxy mounts must be dropped as well.
+    """
+    try:
+        client._trust_env = False  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - best-effort hardening
+        pass
+    try:
+        client._mounts = {}  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - best-effort hardening
+        pass
+
+
+def _force_no_proxy(handler: object) -> None:
+    """Disable env-proxy trust on an already-created httpx client wrapper."""
+    if handler is None:
+        return
+    client = getattr(handler, "client", None)
+    if client is not None:
+        _strip_env_proxy(client)
+
+
+def install_proxy_safety() -> None:
+    """Force the pinned LiteLLM transport never to honor implicit env proxies.
+
+    The production literal-IP policy asserts "validated IP == connected IP", so
+    the transport must connect **directly** to the allowlisted address. An
+    implicit ``HTTP_PROXY``/``HTTPS_PROXY``/``ALL_PROXY`` would route the
+    connection through a proxy instead, breaking that guarantee.
+
+    Pinned LiteLLM's aiohttp transport reads ``HTTP_PROXY``/``HTTPS_PROXY``/
+    ``ALL_PROXY`` via ``LiteLLMAiohttpTransport._get_proxy_settings`` unless
+    ``litellm.disable_aiohttp_trust_env`` is ``True`` (it is ``False`` by
+    default), and the httpx fallback path (``DISABLE_AIOHTTP_TRANSPORT`` /
+    ``LITELLM_HTTP2``) constructs ``httpx.AsyncClient`` with ``trust_env=True``
+    by default, resolving env proxies into ``_mounts`` at construction time.
+    This guard pins ``litellm.disable_aiohttp_trust_env=True`` and, for every
+    future and already-created client, forces ``trust_env=False`` and drops the
+    computed env-proxy mounts so neither transport honors env proxies.
+    Idempotent.
+    """
+    global _PROXY_GUARD_INSTALLED
+    if _PROXY_GUARD_INSTALLED:
+        return
+
+    import litellm
+    from litellm.llms.custom_httpx import http_handler as _http_handler
+
+    # The aiohttp transport reads HTTP(S)_PROXY/ALL_PROXY via
+    # LiteLLMAiohttpTransport._get_proxy_settings unless
+    # ``disable_aiohttp_trust_env`` is set (it is False by default). Pin it so
+    # the literal-IP upstream is never routed through an implicit env proxy.
+    litellm.disable_aiohttp_trust_env = True
+    # Also keep the aiohttp ClientSession trust_env off (belt-and-suspenders).
+    litellm.aiohttp_trust_env = False
+
+    original_create_client = _http_handler.AsyncHTTPHandler.create_client
+    if not getattr(original_create_client, "_aethergate_no_proxy", False):
+
+        def create_client(self, timeout, event_hooks, ssl_verify=None, shared_session=None):
+            client = original_create_client(
+                self, timeout, event_hooks, ssl_verify, shared_session
+            )
+            _strip_env_proxy(client)
+            return client
+
+        create_client._aethergate_no_proxy = True  # type: ignore[attr-defined]
+        _http_handler.AsyncHTTPHandler.create_client = create_client  # type: ignore[method-assign]
+
+    _force_no_proxy(getattr(litellm, "module_level_aclient", None))
+    _force_no_proxy(getattr(litellm, "module_level_client", None))
+    cache = getattr(litellm, "in_memory_llm_clients_cache", None)
+    data = getattr(cache, "cache_dict", None)
+    if isinstance(data, dict):
+        for entry in list(data.values()):
+            _force_no_proxy(getattr(entry, "value", entry))
+
+    _PROXY_GUARD_INSTALLED = True
