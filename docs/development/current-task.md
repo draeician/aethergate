@@ -6,6 +6,61 @@ AGV2-030
 ## Title
 Beta 1 security foundation - production provider-secret backend + egress DNS/redirect closure
 
+## Independent reviewer HOLD — 2026-10-13 UTC
+
+Status: **AGV2-030 NOT COMPLETE / PR #4 MUST NOT MERGE.** The OIDC preflight,
+provider-secret backend, redirect-escape regression tests, and all four offline
+PR CI workflows succeeded on the previously reviewed task tip
+`f724da1f261cac7706e3d160e7894cbb072e5088`. Migration head is unchanged
+(`0017`). This does not substitute for the section-11 live nomnom proof.
+
+An independent code review also identified one narrow production DNS-policy
+edge case in `src/aethergate/egress.py:_is_ip_literal`:
+
+- It calls `ipaddress.ip_address(host.rstrip(".").lower())`, so a URL host
+  spelled `192.168.22.50.` is accepted as a "literal IP" when that exact
+  hostname is allowlisted. `urllib.parse.urlsplit` preserves the terminal dot
+  and `ipaddress.ip_address("192.168.22.50.")` rejects it. This violates the
+  task's strict production **literal-IP-only** guarantee. Multiple trailing
+  dots likewise must not pass. The problem is in validation; no external
+  network access is needed to demonstrate it.
+
+**Correction required before live completion:**
+
+1. Add deterministic *red-before/green-after* unit regression tests for
+   trailing-dot numerical hostnames (single and multiple dots) with those exact
+   spellings deliberately allowlisted, under `require_literal_ip=True`.
+   Require strict Python IP-literal syntax; preserve valid allowlisted IPv4
+   and bracketed IPv6, plus dev/test DNS semantics. Do not normalize a
+   hostname into an address and claim it was literal.
+2. Remove the bypass with the smallest safe policy change; ensure catalog
+   create/update and dispatch reject it under production policy, with no
+   secret resolution or HTTP dispatch for rejected URLs.
+3. Verify that the pinned LiteLLM/httpx production route actually connects
+   directly to the literal address, not to an implicit environment HTTP(S)
+   proxy that would defeat the "validated IP = connected IP" assurance. This
+   is a targeted transport verification, **not** an assertion that a proxy
+   bypass has been observed. If a proxy can intervene, fail closed and cover
+   it with deterministic tests.
+4. Complete **all** section-11 nomnom proof on disposable resources only:
+   inspect existing models, deploy the literal-IP + file-backend production
+   policy with auth bypass off, run official Python SDK Models and real Chat
+   against the allowlisted private-LAN IP, run vision/embedding only if
+   installed/capable without downloading models, prove hostname and
+   metadata/link-local denial, capture safe evidence, and tear down *only*
+   disposable resources. Do not touch unrelated services or change an
+   existing IdP merely to satisfy this test. Use production-policy test mode
+   if the real production OIDC issuer cannot be configured safely.
+5. Update `docs/development/agent-handoff.md` and PR #4 with exact commands,
+   results, limits, final SHA and four matching PR CI run IDs. Maintain the
+   existing `.aethergate-wip` until complete and independently verified.
+   **Do not push `main` or `v2`; do not merge PR #4.**
+
+This is corrective closure within AGV2-030, **not** a new Beta workstream.
+Retain all original security gates and original section-11 acceptance criteria.
+
+---
+
 ## Active Branch
 
 Work only on `feat/agv2-030-beta1-security`, created from canonical `main` commit
