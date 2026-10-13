@@ -32,6 +32,10 @@ ENV_FILE="$WORKDIR/env/.env"
 SECRET_DIR="$WORKDIR/secrets"
 API_PORT="${BETA_SMOKE_API_PORT:-18081}"
 
+# Set to 1 only after this run has created compose project resources, so the
+# teardown trap never tears down a project this run did not itself create.
+STARTED=0
+
 log() { printf '[beta-release-gate] %s\n' "$*"; }
 die() { printf '[beta-release-gate] error: %s\n' "$*" >&2; exit 1; }
 
@@ -57,6 +61,31 @@ compose() {
         -f deploy/beta1/compose.smoke.yaml \
         "$@"
 }
+
+# A leftover compose project with our fixed name must never be silently adopted
+# or torn down. Fail closed before creating anything if the project already
+# owns containers, networks, or volumes (compose labels them with the project name).
+project_exists() {
+    local containers networks volumes
+    containers="$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)"
+    networks="$(docker network ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)"
+    volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)"
+    [[ -n "${containers}${networks}${volumes}" ]]
+}
+
+# Teardown on success, `set -e` failure, and INT/TERM alike. Only tears down the
+# project this run created (STARTED=1), and only by its own project name, never a
+# shared dev/nomnom stack. Idempotent.
+cleanup() {
+    if [[ "$STARTED" == "1" ]]; then
+        STARTED=0
+        log "tearing down disposable project '$PROJECT'"
+        compose down -v >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 write_env() {
     cat > "$ENV_FILE" <<EOF
@@ -92,6 +121,10 @@ wait_worker_healthy() {
     die "worker did not become healthy"
 }
 
+if project_exists; then
+    die "compose project '$PROJECT' already exists (leftover from a prior run). Remove it explicitly or set BETA_SMOKE_PROJECT to a different name; refusing to adopt or tear down unrelated resources."
+fi
+
 log "building Beta 1 image"
 docker build -t aethergate-beta1:local -f deploy/v2/Dockerfile . >/dev/null
 
@@ -99,6 +132,7 @@ log "writing disposable secrets"
 write_env
 
 log "starting postgres + fake-ollama"
+STARTED=1
 compose up -d --no-deps postgres fake-ollama >/dev/null 2>&1 || compose up -d postgres fake-ollama >/dev/null 2>&1
 for _ in $(seq 1 30); do
     if docker exec "${PROJECT}-postgres-1" pg_isready -U aethergate -d aethergate >/dev/null 2>&1; then break; fi
@@ -138,6 +172,44 @@ compose start worker >/dev/null 2>&1
 wait_worker_healthy
 wait_ready "http://127.0.0.1:${API_PORT}/health/ready"
 
+log "database outage / recovery gate (readiness fails closed, no lost work)"
+compose stop postgres >/dev/null 2>&1
+
+# Readiness must fail closed (503) while PostgreSQL is unreachable.
+readiness_code=""
+for _ in $(seq 1 30); do
+    readiness_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${API_PORT}/health/ready" 2>/dev/null || echo 000)"
+    if [[ "$readiness_code" == "503" ]]; then break; fi
+    sleep 1
+done
+if [[ "$readiness_code" != "503" ]]; then
+    die "readiness did not fail closed during DB outage (got ${readiness_code:-none})"
+fi
+
+# A new request during the outage must never be admitted; 401/500/503 all mean
+# the request was not durably enqueued and nothing was dispatched upstream.
+outage_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+    -X POST "http://127.0.0.1:${API_PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer outage-probe' \
+    -d '{"model":"golden-model","messages":[{"role":"user","content":"probe"}]}' \
+    2>/dev/null || echo 000)"
+if [[ "$outage_code" == "200" || "$outage_code" == "201" ]]; then
+    die "request was admitted during DB outage (HTTP ${outage_code})"
+fi
+log "outage: readiness 503, request not admitted (HTTP ${outage_code})"
+
+log "restoring PostgreSQL and verifying recovery"
+compose start postgres >/dev/null 2>&1
+wait_ready "http://127.0.0.1:${API_PORT}/health/ready"
+wait_worker_healthy
+
+log "post-outage SDK smoke (persisted state + settlement intact)"
+"$PYTHON_BIN" scripts/ci/beta_smoke.py \
+    --phase post \
+    --base-url "http://127.0.0.1:${API_PORT}" \
+    --workdir "$WORKDIR"
+
 log "backup"
 rm -f "$WORKDIR/backup.dump"
 AETHERGATE_DB_CONTAINER="${PROJECT}-postgres-1" \
@@ -157,6 +229,4 @@ log "post-restore SDK smoke (same credentials)"
     --base-url "http://127.0.0.1:${API_PORT}" \
     --workdir "$WORKDIR"
 
-log "tear down disposable project"
-compose down -v >/dev/null 2>&1 || true
-log "Beta 1 release gate complete"
+log "Beta 1 release gate complete (disposable project torn down by exit trap)"

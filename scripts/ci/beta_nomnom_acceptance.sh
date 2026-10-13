@@ -28,6 +28,10 @@ API_PORT="${BETA_NOMNOM_API_PORT:-18082}"
 ENV_FILE="$WORKDIR/env/.env"
 SECRET_DIR="$WORKDIR/secrets"
 
+# Set to 1 only after this run has created compose project resources, so the
+# teardown trap never tears down a project this run did not itself create.
+STARTED=0
+
 log() { printf '[beta-nomnom] %s\n' "$*"; }
 die() { printf '[beta-nomnom] error: %s\n' "$*" >&2; exit 1; }
 
@@ -59,6 +63,31 @@ compose() {
         "$@"
 }
 
+# A leftover compose project with our fixed name must never be silently adopted
+# or torn down. Fail closed before creating anything if the project already
+# owns containers, networks, or volumes (compose labels them with the project name).
+project_exists() {
+    local containers networks volumes
+    containers="$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)"
+    networks="$(docker network ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)"
+    volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)"
+    [[ -n "${containers}${networks}${volumes}" ]]
+}
+
+# Teardown on success, `set -e` failure, and INT/TERM alike. Only tears down the
+# project this run created (STARTED=1), and only by its own project name, never a
+# shared dev/nomnom stack. Idempotent.
+cleanup() {
+    if [[ "$STARTED" == "1" ]]; then
+        STARTED=0
+        log "tearing down disposable project '$PROJECT'"
+        compose down -v >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
 wait_ready() {
     local url="$1" tries="${2:-90}"
     for _ in $(seq 1 "$tries"); do
@@ -67,6 +96,10 @@ wait_ready() {
     done
     die "readiness did not pass: $url"
 }
+
+if project_exists; then
+    die "compose project '$PROJECT' already exists (leftover from a prior run). Remove it explicitly or set BETA_NOMNOM_PROJECT to a different name; refusing to adopt or tear down unrelated resources."
+fi
 
 log "building Beta 1 image"
 docker build -t aethergate-beta1:local -f deploy/v2/Dockerfile . >/dev/null
@@ -82,6 +115,7 @@ EOF
 chmod 600 "$ENV_FILE"
 
 log "starting postgres + migrating empty DB to head"
+STARTED=1
 compose up -d --no-deps postgres >/dev/null 2>&1 || compose up -d postgres >/dev/null 2>&1
 for _ in $(seq 1 30); do
     if docker exec "${PROJECT}-postgres-1" pg_isready -U aethergate -d aethergate >/dev/null 2>&1; then break; fi
@@ -150,6 +184,4 @@ if gp._sdk_inference(base_url, key, "golden-model", stream=True) != "ok_stream":
 gp._log("beta live nomnom SDK Models/Chat complete")
 PY
 
-log "tear down disposable project"
-compose down -v >/dev/null 2>&1 || true
-log "Beta 1 live nomnom acceptance complete"
+log "Beta 1 live nomnom acceptance complete (disposable project torn down by exit trap)"
