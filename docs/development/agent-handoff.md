@@ -1,3 +1,31 @@
+# AGV2-031 independent reviewer HOLD — 2026-10-13
+
+- The previous `ee7fbec7857dd2459d1b1c4a1fee6a5d464fb5c6` feature SHA
+  passed all five PR CI workflows. The live nomnom proof is recorded in the
+  handoff below (not replayed by the remote reviewer). PR #5 is open/draft,
+  mergeable and unmerged.
+- Four corrective release-hardening issues remain, detailed in
+  `docs/development/current-task.md` under **Independent reviewer HOLD**:
+  worker heartbeat falsely becomes stale during a long real dispatch; local
+  acceptance scripts omit failure-path teardown and project-collision guards;
+  the architecture test does not resolve relative Python imports; and the
+  required real PostgreSQL outage/recovery safety gate is not explicitly
+  exercised by the new recovery tests or release script.
+- `main` branch protection and independent review enforcement remain
+  operator NO-GO actions. No release/tag or automatic merge is authorized.
+- The original ntfy notification has been acknowledged once, but it was
+  sent before final live proof and before independent review. Do not
+  automatically send another alert; operator can explicitly request a
+  corrected final notification.
+- Resume the original AGV2-031 per-task branch, preserve/recreate the
+  local gitignored WIP marker, close the focused defects and all remaining
+  release evidence gaps, then obtain five green PR CI workflows on the
+  corrected **exact SHA**, update PR #5 and re-request independent review.
+  The older completion record below is retained as historical evidence,
+  **not** as final release approval.
+
+---
+
 ## AGV2-031 operator completion alert (requested; NOT SENT)
 
 The operator explicitly requests an urgent ntfy.sh phone alert **only when
