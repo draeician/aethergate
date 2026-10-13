@@ -1,3 +1,79 @@
+# AGV2-031 corrective closure — complete (2026-10-13 UTC)
+
+The independent-review HOLD below is **resolved**. All four findings are closed
+on the substantive head `cf84cfbbd789071e2b0a5b6001f4efed21f5e270`; PR #5 is
+open/draft and **unmerged**. No release/tag/publication is authorized.
+
+## Finding-by-finding closure
+
+1. **Worker liveness false negative.** `src/aethergate/worker.py` now refreshes
+   the heartbeat file from a dedicated event-loop task (`_heartbeat_loop`) on a
+   fixed cadence, independent of the claim/dispatch loop, so a legitimate
+   >90-second dispatch (120-second default timeout) no longer marks a busy but
+   healthy worker stale. A genuinely hung (CPU-blocked) worker also starves the
+   task, so a real stall is still detected. Deterministic tests:
+   `test_heartbeat_refreshes_during_long_dispatch` and
+   `test_heartbeat_clean_stop_and_restart_without_leak` in `tests/test_worker.py`.
+   The `docker restart` false-unhealthy root cause (heartbeat going stale during
+   graceful in-flight shutdown) is resolved by the background task; the runbook
+   retains `stop`+`start` as the recommended restart form.
+
+2. **Acceptance-script failure cleanup / collision safety.** Both
+   `scripts/ci/beta_release_gate.sh` and `scripts/ci/beta_nomnom_acceptance.sh`
+   now fail closed before any build/up when the fixed compose project name
+   already owns containers/networks/volumes, and trap EXIT/INT/TERM to `down -v`
+   only the project this run created (a `STARTED` ownership flag). Deterministic
+   fake-docker collision regression tests in `tests/test_beta1_scripts.py`.
+
+3. **Architecture check bypass.** `scripts/ci/architecture_boundaries.py`
+   `_imported_names` now resolves `ast.ImportFrom.level` against the importing
+   package, so `from ..persistence import models` resolves to
+   `aethergate.persistence.models` and is flagged. Red-before/green-after
+   fixtures in `tests/test_architecture_boundaries.py` (direct + relative +
+   `from . import ...` + persistence->higher-layer escapes); the current tree
+   still passes (ratchet).
+
+4. **Explicit database outage/recovery release gate.** Added a deterministic
+   disposable-stack PostgreSQL outage/recovery step to
+   `scripts/ci/beta_release_gate.sh` (readiness `503` while down, requests not
+   admitted, recovery, post-outage SDK smoke) and a service-level
+   `test_database_outage_fails_closed_without_dispatch` in `tests/test_recovery.py`
+   proving `claim_and_reserve`/`admit_and_enqueue` raise `OperationalError` with
+   zero upstream dispatch. Runbook + readiness docs updated.
+
+## Corrective implementation commits
+- `63db2c0` fix(release): keep worker heartbeat fresh during long-running dispatch
+- `c5b31f1` fix(release): resolve relative imports in architecture boundary check
+- `50b95d6` fix(release): add failure teardown, collision guards and DB outage gate to beta scripts
+- `b91e975` test(release): add deterministic DB outage test and update Beta docs
+- `cf84cfb` fix(release): ship ci/ops scripts in image for containerized test workflow
+
+## Regression counts
+- backend: **861 collected / exit 0** via canonical `scripts/dev/v2 test`
+  (baseline 846 + 15 new); `ruff check src tests` clean; `git diff --check`
+  clean; `scripts/ci/secret_scan.sh` clean. Frontend untouched (89 passed).
+
+## Final remote CI (substantive head `cf84cfbbd789071e2b0a5b6001f4efed21f5e270`)
+All five workflows `completed/success` on the exact head (pull_request events for PR #5):
+- backend — `38402826381`
+- frontend — `38402826599`
+- schema-secret-gate — `38402826502`
+- alpha-golden-path — `38402826700`
+- beta-release-gate — `38402830108`
+
+The final documentation-only tip (this handoff commit) is re-verified green on all
+five workflows; its exact SHA and run IDs are recorded in PR #5's description.
+
+## Operator actions (unchanged release NO-GO)
+- `main` branch protection / independent CODEOWNERS review enforcement remains
+  NO-GO until the operator configures and verifies a protected branch + required
+  reviews. Recorded as a limitation, not an achieved protection.
+- No release/tag/publication. The operator decides GO/NO-GO after reviewer-approved
+  merge and post-merge main CI.
+- The original ntfy alert was delivered prematurely and is **not resent**.
+
+---
+
 # AGV2-031 independent reviewer HOLD — 2026-10-13
 
 - The previous `ee7fbec7857dd2459d1b1c4a1fee6a5d464fb5c6` feature SHA
