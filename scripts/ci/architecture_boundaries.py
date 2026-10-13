@@ -64,41 +64,88 @@ def _top_package(module: str) -> str:
     return ".".join(parts[:2]) if len(parts) >= 2 else module
 
 
-def _imported_names(tree: ast.Module) -> list[str]:
-    """Fully-qualified names for every import (``import a.b`` / ``from a.b import c``)."""
+def _package_of(module: str) -> str:
+    """The containing package of a module, as Python resolves relative imports.
+
+    For a package's ``__init__`` (e.g. ``aethergate``), the containing package is
+    the package itself; for a submodule (``aethergate.api.health``) it is the
+    dotted parent (``aethergate.api``).
+    """
+    if "." not in module:
+        return module
+    return module.rpartition(".")[0]
+
+
+def _resolve_import_from(package: str, node: ast.ImportFrom) -> str | None:
+    """Resolve an ``ast.ImportFrom`` to the absolute dotted module it names.
+
+    Relative imports (``node.level > 0``) are resolved against ``package`` exactly
+    as CPython resolves them: ``level - 1`` leading components of the containing
+    package are dropped before appending ``node.module``. This prevents
+    ``from ..persistence import models`` (and friends) from being reported only by
+    their bare trailing module name, which previously let them slip past the
+    ``aethergate.persistence.models`` rule.
+    """
+    if node.level == 0:
+        return node.module
+    parts = package.split(".") if package else []
+    drop = node.level - 1
+    base_parts = parts[: max(0, len(parts) - drop)]
+    base = ".".join(base_parts)
+    if node.module:
+        return f"{base}.{node.module}" if base else node.module
+    return base or None
+
+
+def _imported_names(module: str, tree: ast.Module) -> list[str]:
+    """Fully-qualified names for every import (``import a.b`` / ``from a.b import c``).
+
+    ``from ... import ...`` names are resolved to their absolute form using
+    :func:`_resolve_import_from`, so a relative import that reaches a protected
+    layer is reported as such instead of by its ambiguous tail module.
+    """
+    package = _package_of(module)
     names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 names.append(alias.name)
         elif isinstance(node, ast.ImportFrom):
-            if node.module is None:
+            resolved = _resolve_import_from(package, node)
+            if resolved is None:
                 continue
             for alias in node.names:
                 if alias.name == "*":
                     continue
-                names.append(f"{node.module}.{alias.name}")
+                names.append(f"{resolved}.{alias.name}")
     return names
+
+
+def _module_violations(module: str, tree: ast.Module) -> list[str]:
+    """All boundary violations for a single module, keyed by resolved imports."""
+    package = _top_package(module)
+    problems: list[str] = []
+    for imported in _imported_names(module, tree):
+        if package == "aethergate.cli" and _top_package(imported) == "aethergate.persistence":
+            problems.append(f"{module}: CLI imports persistence ({imported})")
+        if package == "aethergate.api" and (
+            imported == "aethergate.persistence.models"
+            or imported.startswith("aethergate.persistence.models.")
+        ):
+            problems.append(f"{module}: router imports raw ORM models ({imported})")
+        if package == "aethergate.persistence" and _top_package(imported) in HIGHER_PACKAGES:
+            problems.append(f"{module}: persistence imports higher layer ({imported})")
+        if package == "aethergate.persistence" and imported == "aethergate.main":
+            problems.append(f"{module}: persistence imports entrypoint ({imported})")
+    return problems
 
 
 def _violations() -> list[str]:
     problems: list[str] = []
     for path in sorted(SRC_ROOT.rglob("*.py")):
         module = _module_of(path)
-        package = _top_package(module)
         tree = ast.parse(path.read_text(), filename=str(path))
-        for imported in _imported_names(tree):
-            if package == "aethergate.cli" and _top_package(imported) == "aethergate.persistence":
-                problems.append(f"{module}: CLI imports persistence ({imported})")
-            if package == "aethergate.api" and (
-                imported == "aethergate.persistence.models"
-                or imported.startswith("aethergate.persistence.models.")
-            ):
-                problems.append(f"{module}: router imports raw ORM models ({imported})")
-            if package == "aethergate.persistence" and _top_package(imported) in HIGHER_PACKAGES:
-                problems.append(f"{module}: persistence imports higher layer ({imported})")
-            if package == "aethergate.persistence" and imported == "aethergate.main":
-                problems.append(f"{module}: persistence imports entrypoint ({imported})")
+        problems.extend(_module_violations(module, tree))
     return problems
 
 
