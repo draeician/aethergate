@@ -167,6 +167,11 @@ class LiteLLMChatAdapter:
             kwargs["presence_penalty"] = params.presence_penalty
         if params.seed is not None:
             kwargs["seed"] = params.seed
+        # Route thinking policy resolved to a concrete reasoning effort. LiteLLM's
+        # Ollama transport maps this onto Ollama's ``think`` field; ``None`` sends
+        # no directive and leaves the provider default in effect.
+        if request.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = request.reasoning_effort
         return kwargs
 
     def _usage(self, usage: object) -> Usage:

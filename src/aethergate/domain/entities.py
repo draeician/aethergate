@@ -28,6 +28,7 @@ from aethergate.domain.enums import (
     RequestState,
     ResourceScopeType,
     Role,
+    ThinkingPolicy,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -418,6 +419,7 @@ class RouteBinding(Entity):
     upstream_model: str | None = None
     quota_group_id: QuotaGroupId | None = None
     default_output_tokens: int | None = None
+    thinking_policy: ThinkingPolicy = ThinkingPolicy.INHERIT
     is_active: bool = True
 
     @field_validator("default_output_tokens")

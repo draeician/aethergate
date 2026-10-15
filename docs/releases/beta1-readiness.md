@@ -10,7 +10,7 @@ a hosted multi-tenant service.
 The package version is `0.1.0` (see `pyproject.toml` / `src/aethergate/__init__.py`).
 There is no release-tag/SemVer-bump policy this task is required to advance, so
 **no version bump is made to label Beta 1**; the status is recorded here instead.
-Migration head is **`0017`**.
+Migration head is **`0018`**.
 
 The runtime/dev dependency graph is locked in the committed `constraints.txt`
 (consumed by CI, the Docker image, and the canonical local install). See
@@ -56,7 +56,15 @@ Alpha 1 gates recorded in `docs/releases/alpha1-readiness.md`:
   services, CLI never imports persistence, and the API never imports persistence
   models; module ownership is codified in `.github/CODEOWNERS`;
 - an operator runbook (`docs/operations/beta1-runbook.md`) documents install,
-  secrets, bootstrap, catalog, backup/restore, recovery, and failure modes.
+  secrets, bootstrap, catalog, backup/restore, recovery, and failure modes;
+- **per-route thinking policy** (migration `0018`): a route's
+  `thinking_policy` (`inherit`/`off`/`on`/`low`/`medium`/`high`) is resolved at
+  dispatch into the upstream `reasoning_effort`; an explicit policy overrides any
+  client-supplied `reasoning_effort`, and level policies are rejected unless the
+  upstream can represent a distinct level. See `docs/architecture/provider-model.md`;
+- **stable LAN + Tailscale access** (`scripts/ops/beta1-access`,
+  `docs/operations/beta1-access.md`) fronts the loopback API for the internal
+  pilot without weakening the loopback-only bind or enabling Funnel.
 
 ## Exact gates
 
@@ -64,8 +72,9 @@ The four Alpha 1 CI workflows remain required and green on the final SHA:
 
 - **backend**: Python 3.12 + PostgreSQL 16, `ruff check src tests`,
   `git diff --check`, `pytest` (including the recovery/fault-injection and
-  production-compose tests), empty -> head migration, `0016 -> 0017` migration,
-  `python -m aethergate.config_check`, deterministic OpenAPI generation;
+  production-compose tests), empty -> head migration, `0016 -> 0017` and
+  `0017 -> 0018` migrations, `python -m aethergate.config_check`, deterministic
+  OpenAPI generation;
 - **frontend**: Node 22, `npm ci`, `npm run test`, `npm run lint`,
   `npm run build`, `npx tsc -b --noEmit`, OpenAPI/generated-client drift;
 - **schema-secret-gate**: `git diff --check`, repository secret/canary scan,

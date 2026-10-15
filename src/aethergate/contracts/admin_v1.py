@@ -29,6 +29,7 @@ from aethergate.domain.enums import (
     QuotaMetric,
     ResourceScopeType,
     Role,
+    ThinkingPolicy,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -480,6 +481,7 @@ class RouteBindingCreate(ContractModel):
     upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
     default_output_tokens: int | None = Field(default=None, ge=1)
+    thinking_policy: ThinkingPolicy = ThinkingPolicy.INHERIT
     is_active: bool = True
 
 
@@ -491,6 +493,7 @@ class RouteBindingRead(ContractModel):
     upstream_model: str | None = None
     quota_group_id: QuotaGroupId | None = None
     default_output_tokens: int | None = None
+    thinking_policy: ThinkingPolicy
     is_active: bool
 
 
@@ -498,6 +501,7 @@ class RouteBindingUpdate(ContractModel):
     upstream_model: str | None = Field(default=None, min_length=1)
     quota_group_id: QuotaGroupId | None = None
     default_output_tokens: int | None = Field(default=None, ge=1)
+    thinking_policy: ThinkingPolicy | None = None
     is_active: bool | None = None
 
 

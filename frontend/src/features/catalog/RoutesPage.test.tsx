@@ -38,6 +38,7 @@ describe("RoutesPage", () => {
       upstream_model: null,
       quota_group_id: null,
       default_output_tokens: null,
+      thinking_policy: "inherit",
       is_active: true,
     });
 
@@ -57,6 +58,7 @@ describe("RoutesPage", () => {
         model_alias_id: "m1",
         provider_account_id: "pa1",
         endpoint_id: "e1",
+        thinking_policy: "inherit",
         is_active: true,
       }),
     );

@@ -229,6 +229,7 @@ async def chat_completions(
         frequency_penalty=body.frequency_penalty,
         presence_penalty=body.presence_penalty,
         seed=body.seed,
+        reasoning_effort=body.reasoning_effort,
     )
 
     enqueued = await service.admit_and_enqueue(

@@ -563,6 +563,10 @@ class RouteBinding(Base, TimestampMixin):
             "default_output_tokens IS NULL OR default_output_tokens >= 1",
             name="ck_route_bindings_default_output_positive",
         ),
+        CheckConstraint(
+            "thinking_policy IN ('inherit', 'off', 'on', 'low', 'medium', 'high')",
+            name="ck_route_bindings_thinking_policy",
+        ),
         Index(
             "uq_route_bindings_one_active_per_alias",
             "model_alias_id",
@@ -586,6 +590,9 @@ class RouteBinding(Base, TimestampMixin):
         ForeignKey("quota_groups.id"), nullable=True, index=True
     )
     default_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    thinking_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="inherit", server_default="inherit"
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 

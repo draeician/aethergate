@@ -61,9 +61,13 @@ services:
       AETHERGATE_OIDC_DEVICE_CLIENT_ID: ${AETHERGATE_OIDC_DEVICE_CLIENT_ID:-}
       AETHERGATE_OIDC_DEVICE_SCOPES: ${AETHERGATE_OIDC_DEVICE_SCOPES:-openid}
     ports:
-      # Loopback-only, ephemeral host port. Docker picks a free port; TLS and
-      # public exposure are the reverse proxy's responsibility.
-      - "127.0.0.1::8000"
+      # Loopback-only host port. Leave AETHERGATE_API_HOST_PORT unset for an
+      # ephemeral Docker-assigned port (default; discover with `compose port`).
+      # Set it to a fixed value (e.g. 39549) so a stable host-level listener or
+      # Tailscale Serve target survives container restart/recreation. TLS and
+      # public exposure are the host proxy's responsibility; never bind a LAN or
+      # wildcard address here.
+      - "127.0.0.1:${AETHERGATE_API_HOST_PORT:-}:8000"
     volumes:
       - type: bind
         source: ${AETHERGATE_SECRET_HOST_DIR:?set AETHERGATE_SECRET_HOST_DIR to a read-only provider-secret directory}

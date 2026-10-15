@@ -143,6 +143,7 @@ def _to_route_binding(binding: domain.RouteBinding) -> RouteBindingRead:
         upstream_model=binding.upstream_model,
         quota_group_id=binding.quota_group_id,
         default_output_tokens=binding.default_output_tokens,
+        thinking_policy=binding.thinking_policy,
         is_active=binding.is_active,
     )
 
@@ -612,6 +613,7 @@ async def create_route_binding(
             upstream_model=body.upstream_model,
             quota_group_id=body.quota_group_id,
             default_output_tokens=body.default_output_tokens,
+            thinking_policy=body.thinking_policy,
             is_active=body.is_active,
         )
     return _to_route_binding(binding)
@@ -675,6 +677,7 @@ async def update_route_binding(
             clear_quota_group_id=clear_quota,
             default_output_tokens=None if clear_default else body.default_output_tokens,
             clear_default_output_tokens=clear_default,
+            thinking_policy=body.thinking_policy,
             is_active=body.is_active,
         )
     return _to_route_binding(binding)

@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+#
+# AetherGate Beta 1 — LAN + Tailscale access front-end (host tooling).
+#
+# Fronts the loopback-bound Beta 1 API (deploy/beta1/compose.yaml) with two
+# host-level listeners so remote clients reach the *same* service:
+#
+#   * LAN: a socat listener on <LAN_IP>:<LAN_PORT> (default 8088), run as a
+#     systemd --user unit with linger so it survives logout and reboot. Plain
+#     HTTP (authorized for the internal pilot; see docs/operations/beta1-access.md
+#     for the bearer-token exposure and the HTTPS migration path).
+#   * Tailnet: Tailscale Serve terminating HTTPS on the MagicDNS name, e.g.
+#     https://<host>.<tailnet>.ts.net/v1. Requires Serve enabled on the tailnet
+#     (a one-time Tailscale admin-console toggle). Funnel is never enabled.
+#
+# The API container port stays bound to 127.0.0.1 only. Set
+# AETHERGATE_API_HOST_PORT in deploy/beta1/.env to a fixed value so these
+# listeners keep a stable upstream across container restart/recreation.
+#
+# Usage:
+#   scripts/ops/beta1-access install [--lan-port 8088] [--api-port 39549] [--lan-ip A.B.C.D]
+#   scripts/ops/beta1-access status
+#   scripts/ops/beta1-access remove
+#
+# This tool never prints secrets and never binds a wildcard address.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BETA_DIR="$REPO_ROOT/deploy/beta1"
+COMPOSE_FILE="$BETA_DIR/compose.yaml"
+ENV_FILE="$BETA_DIR/.env"
+UNIT_NAME="aethergate-beta1-lan"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+UNIT_PATH="$UNIT_DIR/$UNIT_NAME.service"
+SOCAT_BIN="${SOCAT_BIN:-$(command -v socat || echo /usr/bin/socat)}"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*" >&2; }
+
+api_port() {
+    local p="${AETHERGATE_API_HOST_PORT:-}"
+    if [[ -z "$p" && -f "$ENV_FILE" ]]; then
+        p="$(grep -m1 '^AETHERGATE_API_HOST_PORT=' "$ENV_FILE" | cut -d= -f2- || true)"
+    fi
+    if [[ -z "$p" ]]; then
+        p="$(docker compose --project-directory "$BETA_DIR" --env-file "$ENV_FILE" \
+            -f "$COMPOSE_FILE" port api 8000 2>/dev/null | sed 's/.*://')"
+    fi
+    [[ -n "$p" ]] || die "could not determine the API loopback port"
+    printf '%s' "$p"
+}
+
+lan_ip() {
+    python3 - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    # No packets are sent; this only selects the primary non-loopback address.
+    sock.connect(("8.8.8.8", 80))
+    print(sock.getsockname()[0])
+except OSError:
+    print("")
+finally:
+    sock.close()
+PY
+}
+
+tailnet_dns() {
+    command -v tailscale >/dev/null 2>&1 || return 1
+    tailscale status --json 2>/dev/null | python3 -c \
+        'import sys, json; d = json.load(sys.stdin); print(d["Self"]["DNSName"].rstrip("."))'
+}
+
+install_access() {
+    local lan_port="8088" lan_ip_override="" api_port_override=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --lan-port) lan_port="$2"; shift 2 ;;
+            --api-port) api_port_override="$2"; shift 2 ;;
+            --lan-ip) lan_ip_override="$2"; shift 2 ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+    [[ -x "$SOCAT_BIN" ]] || die "socat not found (set SOCAT_BIN)"
+
+    local api lan bind
+    api="${api_port_override:-$(api_port)}"
+    lan="${lan_ip_override:-$(lan_ip)}"
+    [[ -n "$lan" ]] || die "could not determine LAN IPv4 address (pass --lan-ip)"
+    bind="$lan:$lan_port"
+
+    sleep 1
+
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_PATH" <<EOF
+[Unit]
+Description=AetherGate Beta 1 LAN listener ($bind -> 127.0.0.1:$api)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$SOCAT_BIN TCP-LISTEN:$lan_port,bind=$lan,fork,reuseaddr TCP:127.0.0.1:$api
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$UNIT_NAME.service"
+    info "LAN listener: http://$bind  (-> 127.0.0.1:$api)"
+
+    local dns
+    if dns="$(tailnet_dns)" && [[ -n "$dns" ]]; then
+        if tailscale serve --bg --https=443 "http://127.0.0.1:$api" 2>/dev/null; then
+            info "Tailscale Serve: https://$dns/v1"
+        else
+            info "Tailscale Serve not enabled on the tailnet; enable it at"
+            info "  https://login.tailscale.com/f/serve and re-run 'install'."
+        fi
+    fi
+}
+
+status_access() {
+    local api lan
+    api="$(api_port || true)"
+    lan="$(lan_ip || true)"
+    printf 'api_loopback_port: %s\n' "${api:-unknown}"
+    printf 'lan_ip:            %s\n' "${lan:-unknown}"
+    if systemctl --user is-active --quiet "$UNIT_NAME.service"; then
+        printf 'lan_listener:      active (%s)\n' "$(systemctl --user show -p ExecStart --value "$UNIT_NAME.service" | tr -d '"')"
+    else
+        printf 'lan_listener:      inactive\n'
+    fi
+    if command -v tailscale >/dev/null 2>&1; then
+        local dns
+        dns="$(tailnet_dns || true)"
+        printf 'tailnet_dns:       %s\n' "${dns:-unknown}"
+        printf -- '--- tailscale serve ---\n'
+        tailscale serve status 2>&1 || true
+    fi
+}
+
+remove_access() {
+    systemctl --user disable --now "$UNIT_NAME.service" 2>/dev/null || true
+    rm -f "$UNIT_PATH"
+    systemctl --user daemon-reload
+    if command -v tailscale >/dev/null 2>&1; then
+        tailscale serve reset 2>/dev/null || true
+    fi
+    info "removed LAN listener and Tailscale Serve config"
+}
+
+case "${1:-}" in
+    install) shift; install_access "$@" ;;
+    status) status_access ;;
+    remove) remove_access ;;
+    help|-h|--help|*) sed -n '2,30p' "${BASH_SOURCE[0]}"; [[ -z "${1:-}" || "$1" == help || "$1" == -h || "$1" == --help ]] || exit 1 ;;
+esac

@@ -29,7 +29,7 @@ Beta 1 carries the full Alpha 1 OpenAI-compatible + admin surface (see
   recovery, a real PostgreSQL outage/recovery gate, and backup/restore — offline,
   with no model downloads.
 
-Migration head: **0017**.
+Migration head: **0018**.
 
 ## Layout
 
@@ -43,6 +43,8 @@ Migration head: **0017**.
 - `scripts/ops/v2` — operator recovery tooling (backup/restore/migrate/
   diagnostics). Operates directly on PostgreSQL.
 - `scripts/ci/beta_release_gate.sh` — the disposable production release gate.
+- `scripts/ops/beta1-access` — host-level LAN + Tailscale Serve front-end for the
+  loopback API. See `docs/operations/beta1-access.md`.
 
 ## Secrets
 
@@ -160,12 +162,17 @@ principal, or enable JIT provisioning deliberately. The dev IdP
 
 ### TLS / reverse proxy expectations
 
-- The API binds loopback only (`127.0.0.1::8000`). Terminate TLS at an
+- The API binds loopback only (`127.0.0.1:<port>`). Terminate TLS at an
   operator-managed reverse proxy in front of it.
 - The proxy must preserve `Authorization`, `Cookie`, and `X-CSRF-Token` headers,
   set `Host`, and not strip `Set-Cookie`; long-held non-stream and SSE inference
   need generous read timeouts.
 - PostgreSQL is **not** host-published; the API must sit behind TLS termination.
+- To keep a host proxy's upstream stable across container restart/recreation, set
+  `AETHERGATE_API_HOST_PORT` in `deploy/beta1/.env` to a fixed loopback port
+  (otherwise Docker assigns an ephemeral port on each recreate).
+- LAN + Tailscale access (host listeners, ports, plaintext-HTTP exposure, and the
+  HTTPS migration path) is documented in `docs/operations/beta1-access.md`.
 
 ## Catalog / provider setup
 

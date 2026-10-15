@@ -30,8 +30,18 @@ interface RouteForm {
   upstreamModel: string;
   quotaGroupId: string;
   defaultOutputTokens: string;
+  thinkingPolicy: RouteBindingCreate["thinking_policy"];
   isActive: boolean;
 }
+
+const THINKING_POLICIES: RouteBindingCreate["thinking_policy"][] = [
+  "inherit",
+  "off",
+  "on",
+  "low",
+  "medium",
+  "high",
+];
 
 const emptyForm: RouteForm = {
   id: null,
@@ -41,6 +51,7 @@ const emptyForm: RouteForm = {
   upstreamModel: "",
   quotaGroupId: "",
   defaultOutputTokens: "",
+  thinkingPolicy: "inherit",
   isActive: true,
 };
 
@@ -97,6 +108,7 @@ export default function RoutesPage() {
       upstreamModel: binding.upstream_model ?? "",
       quotaGroupId: binding.quota_group_id ?? "",
       defaultOutputTokens: binding.default_output_tokens != null ? String(binding.default_output_tokens) : "",
+      thinkingPolicy: binding.thinking_policy,
       isActive: binding.is_active,
     });
     setActionError(null);
@@ -109,6 +121,7 @@ export default function RoutesPage() {
       model_alias_id: form.modelAliasId,
       provider_account_id: form.providerAccountId,
       endpoint_id: form.endpointId,
+      thinking_policy: form.thinkingPolicy,
       is_active: form.isActive,
     };
     if (form.upstreamModel.trim()) body.upstream_model = form.upstreamModel.trim();
@@ -148,6 +161,9 @@ export default function RoutesPage() {
       if (Number.isFinite(v) && v !== original.default_output_tokens) patch.default_output_tokens = v;
     } else if (original.default_output_tokens != null) {
       patch.default_output_tokens = null;
+    }
+    if (form.thinkingPolicy !== original.thinking_policy) {
+      patch.thinking_policy = form.thinkingPolicy;
     }
     if (Object.keys(patch).length === 0) {
       setModalOpen(false);
@@ -209,15 +225,16 @@ export default function RoutesPage() {
               <th className="px-4 py-3">Account</th>
               <th className="px-4 py-3">Upstream model</th>
               <th className="px-4 py-3">Quota group</th>
+              <th className="px-4 py-3">Thinking</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3"></th>
             </tr>
           </thead>
           <tbody>
             {list.loading && !list.data ? (
-              <tr><td colSpan={7} className="px-4 py-6 text-[var(--ag-text-muted)]">Loading…</td></tr>
+              <tr><td colSpan={8} className="px-4 py-6 text-[var(--ag-text-muted)]">Loading…</td></tr>
             ) : (list.data?.items ?? []).length === 0 ? (
-              <tr><td colSpan={7}><EmptyState message="No route bindings." /></td></tr>
+              <tr><td colSpan={8}><EmptyState message="No route bindings." /></td></tr>
             ) : (
               (list.data?.items ?? []).map((b) => (
                 <tr key={b.id} className="border-b border-[var(--ag-border)] last:border-0 hover:bg-[var(--ag-surface-2)]/40">
@@ -226,6 +243,7 @@ export default function RoutesPage() {
                   <td className="px-4 py-3 font-mono text-xs text-[var(--ag-text-muted)]">{b.provider_account_id}</td>
                   <td className="px-4 py-3 text-xs">{b.upstream_model ?? "—"}</td>
                   <td className="px-4 py-3 font-mono text-xs text-[var(--ag-text-muted)]">{b.quota_group_id ?? "—"}</td>
+                  <td className="px-4 py-3 text-xs">{b.thinking_policy}</td>
                   <td className="px-4 py-3">
                     <StatusBadge label={b.is_active ? "Active" : "Inactive"} tone={b.is_active ? "active" : "inactive"} />
                   </td>
@@ -283,6 +301,13 @@ export default function RoutesPage() {
             </Field>
             <Field label="Default output tokens" htmlFor="route-default-tokens">
               <NumberInput id="route-default-tokens" min={1} step={1} value={form.defaultOutputTokens} onChange={(e) => setForm({ ...form, defaultOutputTokens: e.target.value })} placeholder="Optional" />
+            </Field>
+            <Field label="Thinking policy" htmlFor="route-thinking" hint="Administrative override of upstream reasoning; always wins over a client-supplied reasoning_effort.">
+              <Select id="route-thinking" value={form.thinkingPolicy} onChange={(e) => setForm({ ...form, thinkingPolicy: e.target.value as RouteBindingCreate["thinking_policy"] })}>
+                {THINKING_POLICIES.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </Select>
             </Field>
             <Toggle id="route-active" label="Active" checked={form.isActive} onChange={(v) => setForm({ ...form, isActive: v })} />
             <ErrorBanner message={actionError} />

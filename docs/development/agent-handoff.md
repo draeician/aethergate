@@ -1,3 +1,78 @@
+# AGV2-032 — LAN/Tailscale access, model discovery, admin & thinking controls (2026-10-15 UTC)
+
+Branch `feat/agv2-032-lan-tailscale-admin-thinking`, from post-AGV2-031 `origin/main`
+`79838ec65a46a8c6936ca0176330507bf2155984`. PR open for independent review, **unmerged**; no tag,
+publication, or release. WIP marker `.aethergate-wip` (task `AGV2-032`).
+
+## Delivered
+
+- **Per-route thinking policy** (migration `0018`, reversible): `RouteBinding.thinking_policy`
+  (`inherit`/`off`/`on`/`low`/`medium`/`high`, default `inherit`) + CHECK constraint. New module
+  `src/aethergate/thinking.py`. Resolved at dispatch (`InferenceService._build_request`) into
+  upstream `reasoning_effort`; **explicit administrative policy always overrides client-supplied
+  `reasoning_effort`** (clients cannot change routing). `low`/`medium`/`high` are rejected at
+  configuration time (`catalog/admin.py`) unless the upstream can represent a distinct level — the
+  pinned LiteLLM Ollama transport forwards a level only for `gpt-oss`, so non-`gpt-oss` Ollama
+  accepts only `inherit`/`off`/`on`. Contracts `RouteBindingCreate/Read/Update`; router pass-through;
+  scheduler payload round-trips `reasoning_effort` (legacy payloads -> None). Responses `reasoning`
+  remains explicitly rejected (documented scope decision).
+- **Model discovery:** additive `capabilities: list[str]` on the OpenAI `/v1/models` `ModelObject`
+  (`api/openai_models.py`); no routing/endpoint/provider leak.
+- **Admin CLI:** `create-provider-account`, `create-endpoint`, `create-model-alias`,
+  `create-route-binding` (`--thinking-policy`), `update-route-binding`, `credentials create`.
+- **Access front-end:** `scripts/ops/beta1-access` (install/status/remove) provisions a socat
+  `systemd --user` unit for `<LAN_IP>:8088 -> 127.0.0.1:<api>` and `tailscale serve --bg --https=443`
+  for the MagicDNS name; `docs/operations/beta1-access.md`. The API container stays bound to
+  `127.0.0.1`; Funnel is never enabled. `deploy/beta1/compose.yaml` honours
+  `AETHERGATE_API_HOST_PORT` (documented in `deploy/beta1/env.example`) for a stable upstream.
+- OpenAPI + TS client regenerated; frontend `RoutesPage` gains a thinking-policy selector/column.
+- Docs updated: `docs/architecture/provider-model.md`, `docs/development/README.md`,
+  `docs/operations/beta1-runbook.md` (head `0018`), `docs/releases/beta1-readiness.md`.
+
+## Verification (local, before PR)
+
+- `scripts/dev/v2 test` -> **900 passed** (baseline 865); `ruff check src tests` clean;
+  `git diff --check` clean; `scripts/ci/secret_scan.sh` clean.
+- Frontend: `npm run lint` clean, `npx tsc -b --noEmit` clean, `npm run test` -> **89 passed**,
+  `npm run build` green.
+- Isolated `scripts/ci/beta_release_gate.sh` (production profile + fake Ollama) -> **EXIT 0**: empty
+  DB -> `0018`, config_check VALID, SDK Models/Chat/Embeddings, worker restart, PostgreSQL outage
+  fail-closed with queued work preserved and drained exactly once, backup -> destructive restore ->
+  `0018` -> post-restore SDK.
+
+## Live acceptance on nomnom (`aethergate-beta1`)
+
+- Migrated live DB `0017 -> 0018`; recreated api/worker from `aethergate-beta1:local`;
+  `/health/ready` 200; api stays on `127.0.0.1:39549` (`AETHERGATE_API_HOST_PORT=39549`).
+- `scripts/ops/beta1-access install` -> LAN listener `http://192.168.22.50:8088` active (401 without
+  key, 200 with the inference key). `/v1/models` now reports capabilities
+  (`nomic-embed`=embedding, `qwen3-2b`=text, `qwen3-vl`=text+image).
+- Reproduced the `inherit` reasoning leak on `qwen3-2b` (`...\n</think>\n\n4`), then set its route
+  binding (`39a1519d4cad4e93a612922ca721efcf`) `thinking_policy=off`:
+  - non-stream `'4'`; `reasoning_effort="high"` from the client still `'4'` (administrative wins);
+  - stream `'4'`; persisted across api+worker restart; head still `0018`; verified over the LAN IP.
+  - `PATCH ... {"thinking_policy":"low"}` -> **HTTP 400** `invalid_request` ("level is not supported
+    by this route's upstream; use 'inherit', 'off', or 'on'"); policy stayed `off`.
+  - `nomic-embed` embeddings returned 768 dims.
+
+## Operator-only blocker
+
+Tailscale Serve is **not enabled on the tailnet** (`https://login.tailscale.com/f/serve?node=nwjx2TALce11CNTRL`).
+`tailscale serve` prints the enable link and does not configure; the tailnet HTTPS listener
+(`https://nomnom.tail5750dd.ts.net/v1`) activates once the operator enables Serve and re-runs
+`scripts/ops/beta1-access install`. LAN access is unaffected.
+
+## Outstanding / limitations
+
+- No second physical client exercised live; loopback + own-LAN-IP + MagicDNS resolution were used.
+- Level policies (`low`/`medium`/`high`) are enforced and unit-tested but not live-verified: no
+  `gpt-oss` Ollama model is present on the pilot.
+- The frontend has no dedicated UI test for the new thinking-policy selector beyond the updated
+  fixtures; backend precedence/validation is covered in `tests/test_thinking.py`,
+  `tests/test_catalog_admin.py`, `tests/test_inference_boundary.py`, `tests/test_adapter.py`.
+
+---
+
 # AGV2-031-PM1 — post-merge Beta gate correction — complete (2026-10-15 UTC)
 
 Corrects the post-merge `main` Beta release-gate regression. Branch
