@@ -249,7 +249,11 @@ target a disposable stack by name; omit them to target the standard v2 dev stack
   (claiming fails closed on the unreachable database). No work is silently lost:
   requests are either durably queued before the outage or rejected, never
   admitted-then-dropped. After PostgreSQL recovers, readiness returns `200` and
-  the worker resumes draining the durable queue.
+  the worker resumes draining the durable queue. A transient database error while
+  an API call is waiting for a terminal result does **not** durably cancel the
+  admitted request (only a genuine client disconnect does), so a request that was
+  durably queued before the outage is preserved and drains exactly once after
+  recovery.
 - Prefer `docker compose stop <svc>` then `docker compose start <svc>` over
   `docker restart <container>`: a single `docker restart` does not reset the
   container healthcheck state machine, so the worker heartbeat probe can report a

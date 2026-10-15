@@ -71,6 +71,10 @@ def _snapshot(client: httpx.Client) -> dict:
         "queued_total": summary.get("queued_total", 0),
         "in_flight_total": summary.get("in_flight_total", 0),
         "outcome_unknown_total": summary.get("outcome_unknown_total", 0),
+        # Per-state counts identify exactly which terminal state replaced QUEUED if
+        # a request is lost (for example ``{"cancelled": 1}``); counts are not
+        # secret and never include payloads.
+        "counts_by_state": summary.get("counts_by_state", {}),
         "usage_total": usage_total,
         "ledger_total": ledger_total,
         "attempts_total": retry["attempted_requests"] + retry["retry_attempts"],
@@ -138,32 +142,35 @@ def stage_verify_persisted(args: argparse.Namespace) -> int:
     baseline = _load_state(workdir)["baseline"]
     with _admin_client(args.base_url, workdir) as client:
         snapshot = _snapshot(client)
+    observed = json.dumps(snapshot)
     _require(
         snapshot["requests_total"] == baseline["requests_total"] + 1,
         "the queued request was not persisted across the outage (or a denied "
-        "request was durably admitted)",
+        f"request was durably admitted); observed={observed}",
     )
     _require(
         snapshot["queued_total"] == 1,
-        "persisted queued request was lost during the outage",
+        "persisted queued request was lost during the outage "
+        f"(observed={observed}); counts_by_state="
+        f"{json.dumps(snapshot.get('counts_by_state', {}))}",
     )
     _require(
         snapshot["outcome_unknown_total"] == 0,
-        "outage produced an ambiguous outcome_unknown request (double-dispatch risk)",
+        f"outage produced an ambiguous outcome_unknown request; observed={observed}",
     )
     _require(
         snapshot["usage_total"] == baseline["usage_total"],
-        "denied request created a usage record during the outage",
+        f"denied request created a usage record during the outage; observed={observed}",
     )
     _require(
         snapshot["ledger_total"] == baseline["ledger_total"],
-        "denied request created a ledger entry during the outage",
+        f"denied request created a ledger entry during the outage; observed={observed}",
     )
     _require(
         snapshot["attempts_total"] == baseline["attempts_total"],
-        "denied request created an execution attempt during the outage",
+        f"denied request created an execution attempt during the outage; observed={observed}",
     )
-    gp._log(f"outage persisted state verified: {json.dumps(snapshot)}")
+    gp._log(f"outage persisted state verified: {observed}")
     return 0
 
 
@@ -180,32 +187,36 @@ def stage_verify_drained(args: argparse.Namespace) -> int:
     baseline = _load_state(workdir)["baseline"]
     with _admin_client(args.base_url, workdir) as client:
         snapshot = _snapshot(client)
+    observed = json.dumps(snapshot)
     _require(
         snapshot["requests_total"] == baseline["requests_total"] + 1,
-        "request count changed unexpectedly after drain (duplicate/lost request)",
+        f"request count changed unexpectedly after drain (duplicate/lost request); "
+        f"observed={observed}",
     )
     _require(
         snapshot["queued_total"] == 0 and snapshot["in_flight_total"] == 0,
-        "queue was not fully drained after recovery",
+        f"queue was not fully drained after recovery; observed={observed}",
     )
     _require(
         snapshot["outcome_unknown_total"] == 0,
-        "drained request was not reconciled cleanly (outcome_unknown)",
+        f"drained request was not reconciled cleanly (outcome_unknown); observed={observed}",
     )
     _require(
         snapshot["usage_total"] == baseline["usage_total"] + 1,
-        "queued request did not settle exactly once (usage records)",
+        f"queued request did not settle exactly once (usage records); observed={observed}",
     )
     _require(
         snapshot["ledger_total"] == baseline["ledger_total"] + 1,
-        "queued request did not settle exactly once (ledger entries)",
+        f"queued request did not settle exactly once (ledger entries); observed={observed}",
     )
     _require(
         snapshot["attempts_total"] == baseline["attempts_total"] + 1,
-        "queued request was dispatched more than once (duplicate attempts)",
+        f"queued request was dispatched more than once (duplicate attempts); "
+        f"observed={observed}",
     )
-    gp._log(f"outage recovery verified (no lost work, no duplicate settlement): "
-            f"{json.dumps(snapshot)}")
+    gp._log(
+        f"outage recovery verified (no lost work, no duplicate settlement): {observed}"
+    )
     return 0
 
 

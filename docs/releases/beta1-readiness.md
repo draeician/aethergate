@@ -43,8 +43,10 @@ Alpha 1 gates recorded in `docs/releases/alpha1-readiness.md`:
   (`tests/test_recovery.py`, `tests/test_scheduler_hardening.py`) covering worker
   restart, API restart, provider failure, PostgreSQL outage (fail-closed, no
   unguarded dispatch, and an in-flight request lost to an outage surfaces as
-  `outcome_unknown` with exactly one attempt and no duplicate settlement), and
-  scheduler lease/outcome recovery;
+  `outcome_unknown` with exactly one attempt and no duplicate settlement), API-side
+  waiter errors (a transient database error preserves durably admitted queued work
+  while a genuine client disconnect still cancels it), and scheduler
+  lease/outcome recovery;
 - a **live nomnom acceptance** (`scripts/ci/beta_nomnom_acceptance.sh`) proves the
   beta1 profile against the real internal Ollama on its allowlisted literal IP —
   prod `config_check` VALID, official Python SDK Models/Chat with bypass off, and

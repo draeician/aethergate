@@ -1,224 +1,63 @@
-# AetherGate — Current Task
+# AetherGate — Active Task
 
-## Task ID
-AGV2-031
+## Identity
 
-## Title
-Beta 1 release hardening — isolated production deployment, recovery gates, architecture ownership, and release evidence
+- **Task:** AGV2-031-PM1 — correct post-merge Beta 1 release-gate regression.
+- **Status:** BLOCKED RELEASE — implementation not started on this corrective branch.
+- **Repository:** `draeician/aethergate`
+- **Only task branch:** `fix/agv2-031-postmerge-beta-gate`, created exactly from reviewed post-AGV2-031 `main` merge SHA `5695637e821e8c4dd33051e3d937cf3b6c88c628`.
+- **Original AGV2-031 PR:** https://github.com/draeician/aethergate/pull/5 (merged); do not modify or reopen it.
+- **Current Beta 1 state:** code is merged, but Beta 1 NOT tagged, published or deployed. Release gate is RED on new main; Beta GO/NO-GO is HOLD.
+- **Historical `v2` branch:** retired. Never push to it or directly to `main`.
 
-## Independent reviewer HOLD — 2026-10-13 (corrective closure)
+## FIRST local repository action: WIP marker
 
-**AGV2-031 is not approved for merge or Beta 1 GO.** The prior substantive
-implementation and live nomnom evidence have been reviewed and the five required
-PR workflows did pass at exactly `ee7fbec7857dd2459d1b1c4a1fee6a5d464fb5c6` (backend
-`38347083171`, frontend `38347083164`, schema-secret-gate
-`38347083165`, alpha-golden-path `38347083197`, beta-release-gate
-`38347083170`). The baseline post-AGV2-030 merge checks also passed.
-However, these results do not close the following source-level release issues.
+Before syncing, checking out branches or implementing changes, create the gitignored root `.aethergate-wip` with `task=AGV2-031-PM1`, `branch=fix/agv2-031-postmerge-beta-gate`, and UTC start time. Keep it until all corrective completion gates, final handoff and final-head PR CI pass. Never commit it or include credentials. Follow `AGENTS.md` and `project_spec.md`; reread this file and `docs/development/agent-handoff.md` after compaction.
 
-**Required narrow corrective closure (no unrelated functionality):**
+## Verified failure — exact post-merge main CI
 
-1. **Worker liveness false negative.** In `src/aethergate/worker.py`,
-   `Path(heartbeat_file).touch()` happens only *before* awaited `_run_once()`.
-   A legitimate `service.run_complete()` / stream may run for the default
-   120-second inference timeout, whereas the Beta profile's
-   `AETHERGATE_WORKER_HEARTBEAT_TIMEOUT_SECONDS` is 90 seconds. The healthcheck
-   can therefore declare a busy but healthy worker unhealthy. Use a separately
-   scheduled event-loop heartbeat or another demonstrably correct progress
-   signal; keep actual hangs/crashes detectable. Add deterministic active,
-   long-running-dispatch and clean-stop/restart tests, not only idle-loop tests.
-   Resolve the documented false `docker restart` unhealthy behavior or
-   demonstrate its actual cause and honest operator mitigation.
-2. **Acceptance-script failure cleanup / collision safety.**
-   `scripts/ci/beta_release_gate.sh` and
-   `scripts/ci/beta_nomnom_acceptance.sh` do a `compose down -v` only on
-   the success path, not under `set -e` failure, signal or interruption.
-   Their predictable default Compose project names can accidentally adopt
-   existing disposable projects if reused. Add safe `EXIT`/`INT`/`TERM`
-   teardown guards that target only a project proven owned by the current
-   script run; fail closed on name/resource collision rather than touching
-   unrelated containers/volumes. CI's `if: always()` teardown is not a
-   substitute for safe operator-local live nomnom scripts. Include
-   deterministic failure-injection / collision regression proof and avoid
-   exposing ephemeral secret values.
-3. **Architecture check bypass.**
-   `scripts/ci/architecture_boundaries.py:_imported_names` ignores
-   `ast.ImportFrom.level`. For instance `from ..persistence import models`
-   inside an API module yields `persistence.models`, so the current
-   `aethergate.persistence.models` rule misses it; likewise a relative
-   import from persistence to higher layers can bypass enforcement. Resolve
-   import destinations relative to the importing package and add red-before /
-   green-after fixture tests for direct and relative imports (including
-   `from . import ...`). Enforce the documented invariants without
-   false-positives on permitted imports.
-4. **Explicit database outage/recovery release gate.** Section 3 of the
-   original assignment required testing real readiness/dispatch behavior
-   while PostgreSQL is unavailable and after recovery. The new
-   `tests/test_recovery.py` covers service-instance restarts and provider
-   failure, and `beta_release_gate.sh` covers idle worker stop/start and
-   database backup/restore, but neither explicitly creates a database outage
-   during queued/in-progress work. Add a deterministic, *disposable-stack*
-   DB outage/recovery proof: readiness fails closed; no admitted-but-lost
-   work / unguarded dispatch; restore DB; validate persisted queue/settlement
-   invariants; safe teardown. Or document any narrow scenario that cannot
-   safely be tested and retain a release NO-GO for it. Do not inject outages
-   into the long-lived dev/prod stack.
+Merged commit: `5695637e821e8c4dd33051e3d937cf3b6c88c628`.
 
-**Operator-controlled release prerequisite:** The readiness matrix correctly
-shows `main` branch protection / independent CODEOWNERS review enforcement
-as **NO-GO**. GitHub branch protection must be configured and verified,
-with an eligible reviewer distinct from the PR author if required; merely
-committing CODEOWNERS does not enforce review.
+GitHub **push-event** workflows at this SHA:
+- schema-secret-gate `38681868088`: completed / SUCCESS.
+- frontend `38681868242`: completed / SUCCESS.
+- beta-release-gate `38681868099`: completed / **FAILURE**.
+- backend `38681868122`: last independently observed in_progress.
+- alpha-golden-path `38681868090`: last independently observed in_progress.
 
-Resume the existing AGV2-031 task branch, recreate/preserve the local gitignored
-`.aethergate-wip` before other local repo work, update tests and release
-evidence, and require **all five** workflows green on the *new exact final*
-PR SHA. Maintain PR #5 as draft/open/unmerged; do not tag, publish, deploy,
-or announce Beta 1 as released. The earlier ntfy notification was
-acknowledged (HTTP 200) but was **sent prematurely** before the later live
-proof; do not resend it automatically or claim it certifies the corrected
-final head. Record final review readiness and ask the operator whether
-another phone alert is desired rather than duplicating the original alert.
+GitHub Beta job `116247985882` failed in `scripts/ci/beta_release_gate.sh`, after:
+1. production `config_check RESULT: VALID`, bootstrap/SDK smoke, worker stop;
+2. baseline snapshot `requests_total=4; queued_total=0; usage=4; ledger=4; attempts=4`;
+3. legitimate inference credential enqueues a request; barrier `requests_total=5; queued_total=1; in_flight=0` (at 2026-10-15T04:32:49Z);
+4. PostgreSQL stop; readiness `503`; legitimate credential request fails closed HTTP `500`;
+5. after PostgreSQL restart, `beta_db_outage.py --stage verify-persisted` exits with **`FAIL: persisted queued request was lost during the outage`** (at 2026-10-15T04:32:52Z). No logs currently establish which terminal state replaced QUEUED.
 
----
+PR #5's final-head `d3319091a91baabe8f29adeec023dc584d5626f2` passed all five **PR-event** CI workflows, but this post-merge main push-run failed. Never count earlier green PR CI as a substitute for this red push-run; never claim Beta 1 released.
 
-## Status and release authority
-**Assigned, not implemented.** This task prepares a defensible Beta 1 release candidate; it does NOT declare Beta 1 released. The operator must approve final release/tag/cutover separately after independently reviewed CI, operational acceptance, and the post-merge main gate.
+## Root-cause investigation — REQUIRED
 
-## Canonical branch
-- Work ONLY on `feat/agv2-031-beta1-release-hardening`.
-- This branch was created directly from canonical `main` merge SHA `abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4 merged).
-- Historical long-lived `v2` and the completed AGV2-030 feature branch must not be used as new development bases; never push directly to main.
-- Keep one scoped task/PR; no unsolicited changes to unrelated OpenAI features.
+The new test currently uses a background HTTP `curl --max-time 600` to submit synchronous Chat Completions while the worker is deliberately stopped. Once PostgreSQL drops, the API-side `wait_for_terminal` may raise and the `finally` block in `src/aethergate/api/openai_chat.py` calls `_schedule_durable_cancel`. The scheduler intentionally cancels queued requests on client failure/disconnect. **This is a hypothesis, not a verified root cause.** Inspect actual post-outage request IDs/states and client life cycle before changing code.
 
-## WIP marker — FIRST LOCAL REPOSITORY ACTION
-Immediately upon entering the local repository (before checkout/pull/inspection or implementation), create gitignored root `.aethergate-wip` if it is missing, with:
-- task=AGV2-031
-- branch=feat/agv2-031-beta1-release-hardening
-- started_at=<UTC timestamp>
+First determine whether the missing queued request was CANCELLED, EXPIRED, DISPATCHED, or otherwise mutated, and exactly why. Instrument safe state/count logs in the disposable test (never output credentials or payloads), add a reproducible deterministic failing test, and preserve correct cancellation/durable-accounting semantics. Do NOT suppress or weaken legitimate disconnect cancellation to make the gate green.
 
-Never stage/commit/push this file or store secrets in it. Leave it in place while blocked/incomplete. Remove it ONLY after all acceptance gates, final handoff, commits/push, four exact-final-SHA PR CI workflows and an open, verified PR are complete. After context compaction, reread AGENTS.md, project_spec.md, this task, and agent-handoff.md before proceeding.
+## Minimal supported correction
 
-## 0. REQUIRED preflight — post-merge main CI
-- GitHub confirms PR #4 merged via `abce2245444efc616b617b53746ba4c4427da689` and main points to that SHA.
-- AGV2-030 feature HEAD `630b3546c899ef8f7b20710447e37565319b0538` had all four green PR workflows: backend 38334919438, frontend 38334919423, schema-secret-gate 38334919416, alpha-golden-path 38334919443.
-- **Post-merge main push-event CI remains NOT VERIFIED** by the architect: the available GitHub connector reports only PR-triggered runs and cannot demonstrate the four runs on main merge SHA. This is an evidence gap, NOT a declared failure or success.
-- Before starting release-hardening *implementation*, use authenticated GitHub Actions UI or gh/API with appropriate access to verify that backend, frontend, schema-secret-gate, and alpha-golden-path all completed/success with head_sha **exactly** `abce2245444efc616b617b53746ba4c4427da689`. Record exact run IDs and the evidence mechanism in agent-handoff.md. If any is red, root-cause and repair within a scoped change before continuing. If the check is inaccessible, record a truthful release hold and do not imply success.
-- The **branch and these assignment docs** may be prepared before that external CI evidence is available; this exception does not waive the release preflight.
+- Make the release-gate's persisted-queued-work proof **reliably deterministic and faithful to product behavior** through PostgreSQL outage and restore. If the long-lived HTTP waiter cannot safely survive a DB outage by design, arrange a durable queued fixture **without a live cancellable API waiter** using a disposable-only test harness against the real scheduler/persistence layer. Continue to prove a valid issued inference credential returns 200 before the outage, gets a real 5xx (NOT 401/403/000) while PostgreSQL is down, and 200 after recovery. Confirm rejected requests leave zero rows/attempts/ledger entries.
+- Prove the queued request is preserved across DB stop/start, drains **exactly once** with one attempt, one usage record, one ledger entry and no spurious `outcome_unknown`. Preserve a *separate* in-flight-post-dispatch outage test with conservative `OUTCOME_UNKNOWN` and no double settlement.
+- Explicitly test normal client cancellation semantics on DB failure so the fixture does not hide a genuine lost-work/scheduler defect. Tighten failure diagnostics to identify observed state and include no secrets.
+- Reproduce the prior red case before the fix; add targeted regression and test repeatability. Run the disposable Beta gate at least 3 times on fresh projects with no manual retries treated as success. Do not touch long-lived nomnom/developer projects.
+- Maintain `prod` hardcoded policy, file secrets, literal-IP egress, no auth bypass, isolation, read-only/non-root, migration head `0017`, no new provider downloads.
+- Full canonical `scripts/dev/v2 test`, ruff, frontend lint/test/build/TS, schema/canary, Alpha golden, Beta release gate, migration/restore, official SDK supported paths. On **exact final PR head** require all five PR-event workflows completed/success.
+- Update `docs/operations/beta1-runbook.md` and `docs/releases/beta1-readiness.md` only where verified behavior changes. Update the handoff with reproduction, root cause, red-before/green-after evidence, exact commits, run IDs and any limitation.
 
-## Starting state — factual baseline
-- Merged core: Models, Chat Completions text/stream/inline vision, Responses text/inline vision subset, Embeddings; one real supported provider kind (Ollama via pinned LiteLLM 1.104.0).
-- Durable PostgreSQL scheduler, quota/admission, signed accounting ledger and budgets, project/RBAC identity, OIDC browser auth, Linux CLI/device flow, admin API and web console, offline golden-path plus backup/restore.
-- AGV2-030 closed production file-backed provider-secret selection, literal-IP-only production upstream destinations, redirect and implicit proxy escape paths; successful reported disposable live nomnom SDK Models/Chat/vision/embedding proof.
-- Migration head **0017**. No schema change is anticipated for this release-hardening task.
-- Last verified AGV2-030 reference baseline: backend 833 tests collected / exit 0; frontend 89 passed; full local Playwright 32 passed / 7 skipped; offline CI browser golden 7 passed.
-- Current `deploy/v2/compose.yaml` is Alpha/dev-oriented; it hardcodes development env/container names and has no Beta production profile. `.github/CODEOWNERS` does not exist as of the baseline. `docs/releases/beta1-readiness.md` does not exist.
-- Read `project_spec.md`, `AGENTS.md`, `docs/development/agent-workstreams.md`, `docs/architecture/v2-overview.md`, `docs/architecture/security.md`, `docs/operations/alpha-runbook.md`, `docs/releases/alpha1-readiness.md` before design/implementation.
+## PR, merge, release and phone alert
 
-## 1. Product target / definition of done
-Deliver a reproducible, least-privilege, single-company/self-hosted Beta 1 **release candidate**, with a documented install/upgrade/restore/rollback procedure and repeatable failure/recovery evidence. The release decision must be traceable to exact git SHAs, CI run IDs, tests and a disposable production-policy nomnom acceptance run. Correctness of scheduler/accounting/security wins over uptime claims, UI polish or throughput.
+Push corrected scoped commits to `fix/agv2-031-postmerge-beta-gate`, update its existing draft PR to `main`, then make it ready for independent technical review **without merging it**. The operator has given ChatGPT standing direction to finish the release work; ChatGPT will independently review, merge the exact verified SHA, and verify all five POST-MERGE push runs on the new main. Release/tag/deploy decisions occur only after post-merge CI green; do not create tags, publish a release, or deploy production while the gate is red.
 
-## 2. Production deployment profile (primary implementation scope)
-Provide a clearly named, isolated Beta production Compose deployment/profile (prefer `deploy/beta1/` unless a more robust repo-native layout is demonstrated) and operator-facing sample configuration **without** committing any live secrets.
+`main` still lacks branch protection / enforced review; do not misrepresent this as resolved. Where GitHub admin access exists, configure a safe branch rule requiring PRs and the five checks after ensuring it does not break the operator's ability to continue work. Do not invent formal reviewer approvals.
 
-Mandatory invariants:
-- `AETHERGATE_ENV=prod`; `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`; `AETHERGATE_SECRET_BACKEND=file` with existing absolute `AETHERGATE_SECRET_DIRECTORY` and read-only externally projected files; no production env secret backend or env fallback.
-- `AETHERGATE_UPSTREAM_ALLOWLIST` explicit literal private/public IPs as approved; strict literal-IP production policy and no redirect or implicit proxy escape. No new bypass switches. FileSecretResolver requires no fake credential for anonymous real Ollama.
-- PostgreSQL not host-published; API not publicly exposed over plaintext HTTP. Provide loopback-only API binding or an explicitly documented trusted TLS-terminating reverse-proxy integration. Never include the deterministic development IdP/fake provider in the production profile. Document TLS and real-issuer responsibility; do not falsely claim TLS exists if operator-managed.
-- Distinct Compose project, networks, volumes, container names and host ports from long-lived `aethergate-v2` dev or any existing nomnom services. Avoid hardcoded `container_name` collisions; use explicit disposable project identifiers for acceptance. No `down -v` on shared resources.
-- Run containers with minimum needed privileges/non-root where supported; bounded resources; reproducible pinned application/dependency images; real API/worker health checks and unambiguous readiness. If read-only rootfs/tmpfs controls are practical, test them; document any exception.
-- Separate migration step and credentialed bootstrap lifecycle; no auto-destructive database operations or insecure pre-seeded credentials on app startup.
-- Fail closed for invalid configuration or absent mounts/keys and verify the actual worker/runtime uses production settings (not just the config-check command). Do not echo secrets in compose output, diagnostics or logs.
-- Test production configuration shape deterministically in CI, including negative/invalid-prod cases. Avoid installing kubernetes/Helm/cloud stacks for this milestone.
+**Standing notification rule:** `AGENTS.md` requires one urgent `https://ntfy.sh/draeician_alerts` alert when **this new corrective task AGV2-031-PM1** is fully complete and independently review-ready. Do not send for partial/blocked runs; do not duplicate the older AGV2-031 notification. Include PR link and exact SHA, verify HTTP 2xx, and record delivery in PR conversation (not via a final-head-changing commit).
 
-## 3. Recovery, resilience and safe fault-injection release gates
-Implement **automated, repeatable release checks** on a disposable stack, using deterministic barriers/fixture hooks rather than arbitrary timing sleeps. Extend existing `scripts/ci/golden_path.py`, operations tooling, or a clearly named Beta CI check without weakening established tests. At minimum prove and record:
+## Completion response
 
-1. Worker termination/restart while requests are queued/in progress: queued work is not lost; leases expire/recover according to the documented state machine; ambiguous upstream execution remains `outcome_unknown` where appropriate, not silently re-dispatched or billed twice.
-2. API restart while work exists: durable persisted work and authentication/config state survive; no phantom concurrency/quotas/budget reservations.
-3. Database outage and recovery: readiness goes non-ready / requests fail safely; no fresh unguarded dispatch, corrupt admission, or silent data loss; recovery uses documented operations.
-4. Provider HTTP timeout/connection failure/429, and redirected/denied upstream: safe errors/cooldowns, no hidden LiteLLM retry bypass, quota and budget invariants preserved.
-5. Backup -> destructive restore **only on disposable database** -> migration head 0017 -> post-restore official Python and JS SDK golden smoke, appropriate audit/accounting state checks.
-6. Lost/unavailable file-projected provider secret and queue-key unavailability: fail closed without leaking data or minting synthetic success; document queue-key-loss unrecoverability and operator restore procedure.
-
-Use faithful domain behavior for cancellations, reservations, settlement, manual reconciliation, and audit. Do not claim external upstream execution is exactly-once when state cannot establish it. Where product limits make a scenario unsupportable, write down the evidence-backed limitation rather than concealing it.
-
-## 4. Architecture boundaries and CODEOWNERS
-- `docs/development/agent-workstreams.md` asserts dependency-direction enforcement by architecture tests and CODEOWNERS, but no CODEOWNERS file exists at baseline. Add `.github/CODEOWNERS` with **actual verified repository owner(s)** (the known current owner is `@draeician`); do not invent organizations, teams or reviewers. Map bounded areas to declared code ownership, or explicitly use a minimal safe owner mapping until real teams are appointed.
-- Add focused, executable architectural boundary checks (Python AST/import or equivalent) proving routers/CLI do not host persistence policy and that dependencies follow the documented direction where mechanically enforceable. Prefer ratcheted checks and defined exception evidence over global imports that falsely fail or ignore known cases.
-- Document how GitHub branch protection/CODEOWNERS review enforcement is configured and verify the *actual hosted setting* where access permits. Merely checking in CODEOWNERS does not itself enforce review approvals. If enforcement cannot be inspected/activated, mark it an explicit operator action and release limitation, not as an achieved protection.
-- Preserve workstream ownership and contracts; no unrelated structural refactor or new public API shape.
-
-## 5. Beta 1 operator docs / release evidence
-Deliver:
-- `docs/operations/beta1-runbook.md` with preflight, isolated install, TLS/auth issuer prerequisites, secrets projection/rotation, API + worker startup, migration, rollback/restore, health, observability/diagnostics, recovery handling, and safe teardown.
-- `docs/releases/beta1-readiness.md` with a checkable GO/NO-GO matrix: code/contract/support scope, security, deployment isolation, auth/egress, backup+restore, fault/recovery, exact-SHA CI, live acceptance, key-loss limitations, branch protections, known limitations, rollback, and operator signoff.
-- Truthfully update `README.md` and relevant developer/architecture docs only where new release behavior requires it; retain `docs/releases/alpha1-readiness.md` as historical evidence (no retroactive rewriting).
-- Explicitly state Beta 1 **does not mean** high availability, full OpenAI Responses, new providers, complete billing, SaaS tenancy, cloud secret-manager integrations, or performance SLOs invented without measurement.
-- Decide version/tag/release publication **only by an explicit operator-approved policy** after post-merge green CI. Do not tag, publish container images, or deploy public production automatically.
-
-## 6. CI / regression requirements
-Keep four established GitHub workflows, and add targeted release-hardening verification to the appropriate CI route. All required checks must be pass/fail actionable, with safe/short operational logs; no manual-only success substituted for deterministic CI.
-
-Re-run:
-- Full backend suite (>= reference 833 tests, accounting for legitimate test updates), ruff, full frontend unit suite (reference 89), lint/build/TypeScript.
-- Playwright local full suite and CI golden path (reference 7 CI browser tests), official pinned Python and JS SDK supported API surface.
-- Strict secrets/content canary scan, no-legacy guard + self-test, `git diff --check`, OpenAPI/client two-pass drift, workflow syntax validation.
-- Clean migration empty -> 0017 and populated 0016 -> 0017, and **no new migration** unless separately justified and approved.
-- Deterministic production configuration/deployment smoke and fault-injection recovery tests in addition to AGV2-030 file-secret/egress/redirect/proxy tests.
-- Disposable nomnom (real Ollama models already installed, **no downloads**): at minimum official Python SDK Models/Chat with auth bypass off on the real allowlisted literal-IP upstream; vision/embedding where available. Test production-policy startup and teardown. Do not interfere with other nomnom/developer services.
-- Preserve reproducibility from `constraints.txt`, package versions, and existing lock mechanisms; do not silently upgrade pinned LiteLLM/OpenAI SDKs.
-
-On the **EXACT FINAL task branch SHA** require four completed/success runs with that SHA (backend, frontend, schema-secret-gate, alpha-golden-path), plus any new release-gate workflow. Create/update an open draft PR to main so `pull_request` workflows run; the existing branch `push` workflow filters historically include main/v2 only. No false attribution of a branch-push run.
-
-## 7. No-scope / release safety
-NO unrelated new endpoints, provider kinds, Responses tools/MCP/files, audio/image generation, HA cluster, Redis authority, multi-tenant SaaS, cloud secret-manager SDK matrix, general UI redesign, or data import from retired v1. Do not damage data or services outside disposable test environments. Do not change migrations, auth/audit/quotas/security semantics to force tests green.
-
-## 8. Handoff and PR policy
-- Record exact verified `main` post-merge CI preflight or explicit blocker; implementation commits, regression counts, safe command/evidence summaries, fault/recovery results, nomnom proof, known limitations and exact final SHA/run IDs in `docs/development/agent-handoff.md`.
-- Push scoped conventional commits to `origin/feat/agv2-031-beta1-release-hardening`. Open or update one draft/feature PR `feat/agv2-031-beta1-release-hardening -> main`, with scope, risk, proof, missing operator actions, final exact SHA and all run IDs. Never merge it automatically.
-- Keep `.aethergate-wip` until all completion conditions are satisfied, the handoff is pushed and remote PR head/CI are verified; leave it in place on a block.
-- At final handoff, state **ready for independent review** rather than claiming Beta 1 publicly shipped. After reviewer-approved merge and four successful post-merge main workflows, the operator decides GO/NO-GO for Beta 1.
-
-## 9. Operator phone alert — REQUIRED after completion
-
-**Operator request:** When AGV2-031 work is fully complete and PR #5 is
-**ready for independent review**, send an urgent notification to the operator's
-phone through the specified ntfy topic. The recipient and message transport
-have been explicitly authorized for this milestone. This alert is not a Beta
-release announcement or an authorization to merge or publish.
-
-Do **not** send on initial assignment preparation, partial implementation,
-a blocked milestone, first green CI alone, or a merely opened draft PR.
-
-**Trigger (all conditions must be met):** the required baseline and exact-final
-task-branch CI gates are verified green, deterministic and live operational
-acceptance criteria are complete, the final handoff is committed and pushed,
-PR #5 contains the final SHA/evidence and is ready for independent review,
-and the local `.aethergate-wip` lifecycle conditions have been satisfied.
-The PR remains **unmerged**. Send only once after final evidence has been
-published (a later commit changes the exact final SHA and requires re-verification).
-
-Run from the repository root, with `HEAD` equal to the verified final PR head:
-
-```bash
-curl \
-  -H "Title: Priority alert" \
-  -H "Priority: urgent" \
-  -H "Tags: rotating_light" \
-  -d "AetherGate AGV2-031 is complete and ready for independent review. PR #5: https://github.com/draeician/aethergate/pull/5 . Final commit: $(git rev-parse HEAD)" \
-  https://ntfy.sh/draeician_alerts
-```
-
-Preserve the specified Title/Priority/Tags headers and ntfy endpoint. The
-`-d` message replaces the operator's `Hi` and identifies the milestone,
-review PR and exact commit. Ensure it contains no credentials, keys, tokens,
-prompts, confidential diagnostics or other sensitive values. Check that the
-ntfy endpoint returned a successful HTTP 2xx response/accepted message. If
-delivery is not confirmed, report that clearly in the final handoff rather
-than claiming the phone alert was delivered; avoid duplicate deliveries after
-an acknowledged success. Record the notification outcome in a PR comment
-(without changing the reviewed commit SHA) and in the final agent response.
-
-## Assignment disposition
-This branch and task are **prepared**. The next actor is OpenCode on nomnom, with ChatGPT as independent architect/reviewer. Do not begin release implementation unless section 0 post-merge CI is positively verified and captured.
+State root cause, test proof, final branch SHA, five green PR CI run IDs, live acceptance evidence/limits, phone alert receipt, PR URL, and unresolved operator-only blockers. No routine confirmation prompts; implement the whole assigned fix.

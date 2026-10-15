@@ -1,3 +1,114 @@
+# AGV2-031-PM1 — post-merge Beta gate correction — complete (2026-10-15 UTC)
+
+Corrects the post-merge `main` Beta release-gate regression. Branch
+`fix/agv2-031-postmerge-beta-gate`, draft PR **#6** (open, **unmerged**); no
+Beta 1 tag/publication/deployment.
+
+## Reproduction — failing post-merge run 38681868099
+
+Push-event `beta-release-gate` `38681868099` (job `116247985882`) failed in the
+disposable outage gate: a request durably queued with the worker stopped
+(`queued_total=1`) was **gone** after PostgreSQL stop/restart —
+`beta_db_outage.py --stage verify-persisted` → *persisted queued request was
+lost during the outage*.
+
+## Root cause (verified)
+
+The OpenAI endpoints cancelled durably admitted work whenever their terminal
+waiter raised — a `finally: if result is None: _schedule_durable_cancel(...)`.
+While PostgreSQL was unreachable the API-side `wait_for_terminal` poll raised
+`OperationalError`; `result` stayed `None` and the detached cancellation task
+then durably cancelled the **QUEUED** request. A transient server-side database
+error is **not** a client disconnect.
+
+The loss is a **race** on the detached cancel task's DB connection: it only
+destroys the request if it acquires a connection *after* PostgreSQL restarts
+(while the DB is down `request_cancellation` fails and is swallowed). This is why
+the failure reproduced on the `main` push run while the PR-event run on the same
+code (`0d6e077`, run `38682249095`) passed the outage gate — the earlier green
+runs did **not** clear the defect. The fix removes the race.
+
+## Fix
+
+Only cancel on response-cycle cancellation (client disconnect / server
+shutdown), never on a transient server error:
+- non-streaming `chat`/`responses`/`embeddings` waiters replaced
+  `finally: if result is None: cancel` with
+  `except asyncio.CancelledError: cancel; raise` — an `OperationalError` now
+  propagates (real `5xx`) while the request stays `QUEUED`;
+- `chat`/`responses` SSE generators cancel only on a directly-detected
+  `is_disconnected()`, `asyncio.CancelledError`, or `GeneratorExit`; a stream
+  broken by a server error no longer cancels the request.
+
+`scripts/ci/beta_db_outage.py` failure diagnostics now include the observed
+snapshot and `counts_by_state` (no secrets), naming the terminal state that
+replaced `QUEUED`.
+
+## Red-before / green-after evidence
+
+New deterministic tests in `tests/test_recovery.py`:
+- `test_api_db_error_waiter_preserves_queued_work` — **red before** (request went
+  `cancelled`), **green after** (`queued`, claimable, drains to `succeeded`);
+- `test_api_stream_db_error_preserves_queued_work` — red before / green after;
+- `test_api_client_disconnect_still_cancels_queued_work` — client disconnect still
+  durably cancels (green both before and after; cancellation semantics preserved);
+- the existing `test_stream_disconnect_cancels_queued_request` stays green.
+
+Run against the unfixed image, the two server-error tests failed; against the
+fixed image all pass.
+
+## Operational acceptance
+
+`scripts/ci/beta_release_gate.sh` run **3×** on fresh disposable projects, all
+`EXIT=0`. Each outage section observed: pre-outage `200`; barrier
+`queued_total=1`; readiness `503`; denied valid request `HTTP 500`; **persisted
+`queued_total=1`**; drained `counts_by_state={"succeeded":5}` with
+usage/ledger/attempts each `+1`; post-outage `200`.
+
+## Regression counts
+
+- backend: **865 collected / exit 0** via canonical `scripts/dev/v2 test`
+  (862 + 3 new); `ruff check src tests` clean; `git diff --check` clean;
+  `scripts/ci/secret_scan.sh` clean; `architecture_boundaries.py` OK;
+  `no_legacy_v1.sh` clean; OpenAPI generation no drift (frontend
+  `generated/openapi.json`); frontend lint / 89 tests / build / `tsc -b` clean.
+
+## Commits
+
+- `ce68e6c` fix(api): preserve durably admitted work on transient DB errors
+
+## Final remote CI (corrected head `ce68e6c664bdca4cc3b0ad89b9189a762b774beb`)
+
+All five PR-event workflows `completed/success` on the exact head:
+- backend — `38685560485`
+- frontend — `38685560410`
+- schema-secret-gate — `38685560412`
+- alpha-golden-path — `38685560439`
+- beta-release-gate — `38685560416`
+
+The final documentation-only tip (this handoff commit) is re-verified green on all
+five workflows; its exact SHA and run IDs are recorded in PR #6's description.
+
+## Operator actions / limitations
+
+- `main` branch protection / enforced independent review remains an operator
+  action; do not treat CODEOWNERS as enforcement.
+- No Beta 1 tag/publication/deployment; the operator decides GO/NO-GO after
+  review, merge, and green post-merge `main` CI.
+- The gate's previous green PR-event runs were racy; the deterministic regression
+  tests (not the gate alone) are the authoritative red-before proof.
+
+---
+
+# AGV2-031 post-merge CI failure — AGV2-031-PM1 kickoff (superseded above)
+
+- PR #5 was operator-authorized and successfully merged to canonical `main` at `5695637e821e8c4dd33051e3d937cf3b6c88c628`, preserving previous AGV2-031 code head `d3319091a91baabe8f29adeec023dc584d5626f2`.
+- On this exact `main` merge SHA, push-event `beta-release-gate` workflow **38681868099** FAILED (job `116247985882`): verified queued request with worker stopped `queued_total=1`, PostgreSQL outage (readiness 503, valid request HTTP 500), then `beta_db_outage.py --stage verify-persisted` failed: **persisted queued request was lost during the outage**. This was not seen on the green feature-head PR CI. Link: https://github.com/draeician/aethergate/actions/runs/38681868099.
+- Two push workflows succeeded (frontend 38681868242, schema-secret-gate 38681868088). Backend 38681868122 and alpha-golden-path 38681868090 were still running at last check. Check their final results rather than assuming.
+- Do not auto-merge corrective PR. Repo `main` branch protection remains unconfigured as last verified.
+
+---
+
 # AGV2-031 DB outage gate correction — complete (2026-10-13 UTC)
 
 The additional independent-review finding (PR #5, 2026-10-13T13:30Z) is
