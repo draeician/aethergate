@@ -29,14 +29,16 @@ COPY --from=builder /opt/venv /opt/venv
 RUN groupadd --gid 10001 aethergate \
     && useradd --uid 10001 --gid aethergate --create-home aethergate
 
-# Source, tests, packaging config, and the v2 deploy files are copied for the
-# Alembic migrations and the containerized test workflow (`scripts/dev/v2 test`).
-# Only the two deploy files are copied here so `deploy/v2/.env` (generated
-# secrets) is never baked into the image.
+# Source, tests, packaging config, the v2 deploy files, and the CI/ops scripts
+# are copied for the Alembic migrations and the containerized test workflow
+# (`scripts/dev/v2 test`). Only the two deploy files are copied here so
+# `deploy/v2/.env` (generated secrets) is never baked into the image.
 COPY --chown=aethergate:aethergate pyproject.toml ./
 COPY --chown=aethergate:aethergate src ./src
 COPY --chown=aethergate:aethergate tests ./tests
+COPY --chown=aethergate:aethergate scripts ./scripts
 COPY --chown=aethergate:aethergate deploy/v2/compose.yaml deploy/v2/Dockerfile ./deploy/v2/
+COPY --chown=aethergate:aethergate deploy/beta1/compose.yaml deploy/beta1/env.example ./deploy/beta1/
 
 RUN chown aethergate:aethergate /app
 

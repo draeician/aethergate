@@ -9,9 +9,12 @@ PostgreSQL/Alembic/scheduler runtime under `src/aethergate/`. The retired v1
 SQLModel/SQLite application has been removed from the tree; there is no v1 data
 import path. See `docs/migrations/v1-to-v2.md` for the clean-cutover decision.
 
-This repository is at **Alpha 1** (internal/self-hosted). See
-`docs/releases/alpha1-readiness.md` for scope and gates, and
-`docs/operations/alpha-runbook.md` for the operator runbook.
+This repository is at **Alpha 1** (internal/self-hosted) with a **Beta 1
+release candidate** under independent review. See
+`docs/releases/alpha1-readiness.md` for Alpha scope and gates, and
+`docs/releases/beta1-readiness.md` for the Beta 1 GO/NO-GO record. Operator
+runbooks are `docs/operations/alpha-runbook.md` (dev/alpha) and
+`docs/operations/beta1-runbook.md` (production profile).
 
 ## Supported today (Alpha 1)
 
@@ -75,9 +78,12 @@ backup/restore, upgrade), follow `docs/operations/alpha-runbook.md`.
 - `src/aethergate/` — the current application (API, worker, scheduler,
   accounting, identity, catalog, observability, contracts, admin/CLI surfaces).
 - `frontend/` — web console (React + TypeScript).
-- `deploy/v2/` — the canonical Compose stack and container image definition
-  (`deploy/v2/Dockerfile`, `deploy/v2/compose*.yaml`). There is no root
+- `deploy/v2/` — the canonical dev/alpha Compose stack and container image
+  definition (`deploy/v2/Dockerfile`, `deploy/v2/compose*.yaml`). There is no root
   Dockerfile or root Compose file.
+- `deploy/beta1/` — the isolated Beta 1 production Compose profile
+  (`compose.yaml`, `env.example`) and its CI-only acceptance override
+  (`compose.smoke.yaml`). Never used for dev.
 - `scripts/dev/v2` — canonical development helper.
 - `scripts/ops/v2` — canonical operator recovery tooling (backup/restore/
   diagnostics).
@@ -90,8 +96,10 @@ or add duplicate root Docker/Compose definitions).
 
 ## Documentation
 
-- Operator runbook: `docs/operations/alpha-runbook.md`
+- Operator runbook: `docs/operations/alpha-runbook.md` (dev/alpha) and
+  `docs/operations/beta1-runbook.md` (Beta 1 production)
 - Alpha status: `docs/releases/alpha1-readiness.md`
+- Beta 1 status: `docs/releases/beta1-readiness.md`
 - Architecture: `docs/architecture/`
 - Development: `docs/development/README.md`
 - Web console: `docs/web-console.md`

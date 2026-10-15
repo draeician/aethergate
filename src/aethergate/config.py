@@ -171,6 +171,14 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: float = Field(
         default=30.0, validation_alias="AETHERGATE_WORKER_HEARTBEAT_SECONDS"
     )
+    # Optional path the worker touches on a fixed cadence (a dedicated event-loop
+    # task, independent of the claim/dispatch loop) to expose a real liveness
+    # signal to the container healthcheck. Unset (None) disables it, so dev/test
+    # and existing deployments are unaffected. The production Beta profile sets it
+    # to a tmpfs path and pairs it with ``python -m aethergate.worker_healthcheck``.
+    worker_heartbeat_file: str | None = Field(
+        default=None, validation_alias="AETHERGATE_WORKER_HEARTBEAT_FILE"
+    )
     # Default shared-quota-group cooldown when a provider returns 429 without an
     # explicit Retry-After value. Applied only when the route carries a group.
     provider_429_cooldown_seconds: float = Field(

@@ -102,6 +102,56 @@ generic interactive workflow boilerplate below.
 - A task is complete only when its stated completion criteria are satisfied, the handoff is updated,
   commits are created, and required pushes are present on the active task branch.
 
+## Standing operator notification rule — completion ntfy alert
+
+**Operator directive (2026-10-13):** For **every future AetherGate agent task**
+launched through `docs/development/current-task.md`, send **one** urgent phone
+notification to the operator when the task is fully completed and ready for
+their review. This is a standing default across milestones, not specific to
+AGV2-031. Follow this even if a future task's handoff forgets to repeat it.
+
+**Trigger:** The task's actual definition of done is satisfied, required
+implementation/tests and any live acceptance are complete, the handoff and
+PR/artifacts are updated, the final head/CI are verified, and the final
+reviewable result is published. A PR can remain unmerged; the alert means
+"ready for review", NOT "merged", "deployed", or "released". Never send a
+successful-completion alert for assignment preparation, incomplete work,
+unverified/red CI, or a blocked task. Do not bypass release approval gates.
+
+Run from the local repository with verified task ID, review URL (typically the
+PR), and exact final pushed SHA. Preserve the operator-requested headers and
+destination; replace the old sample body with the real task/review details:
+
+```bash
+curl --fail --silent --show-error --max-time 15 \
+  -H "Title: Priority alert" \
+  -H "Priority: urgent" \
+  -H "Tags: rotating_light" \
+  -d "AetherGate ${TASK_ID} complete and ready for review. ${REVIEW_URL} | SHA ${FINAL_SHA}" \
+  https://ntfy.sh/draeician_alerts
+```
+
+Populate `TASK_ID`, `REVIEW_URL`, and `FINAL_SHA` from verified state rather
+than placeholders. For a task without a PR/commit, use its actual final review
+artifact/reference and omit nonexistent fields, but still notify on successful
+completion. The notification MUST NOT contain credentials, tokens, prompt
+text, secrets, private diagnostic contents, or operational logs.
+
+Send **only once per successfully completed task/review handoff**, after final
+verification. Treat HTTP 2xx as delivered; record the result in the PR
+conversation or handoff where possible **without creating a new commit after
+verifying the final SHA**, and mention delivery success/failure in the final
+agent reply. If delivery fails or is indeterminate, state that clearly; do
+not claim success or blindly retry and create duplicate alerts. Do not send
+an additional alert for a docs-only update, rerun, or review comment.
+
+**AGV2-031 exception:** An earlier notification for PR #5 was already delivered
+once (before live acceptance), and the operator was informed. Do not
+retroactively resend it for AGV2-031 in response to this standing-rule update;
+apply this rule automatically to subsequent tasks. This notification rule
+does not authorize merging PRs, enabling branch protections, tagging,
+publishing, or deploying releases.
+
 ## Common Principles
 - Don't assume. Don't hide confusion. Surface tradeoffs.
 - Minimum code that solves the problem. Nothing speculative.

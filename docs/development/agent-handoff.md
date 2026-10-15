@@ -1,3 +1,315 @@
+# AGV2-031 DB outage gate correction — complete (2026-10-13 UTC)
+
+The additional independent-review finding (PR #5, 2026-10-13T13:30Z) is
+**resolved** on the corrected substantive head
+`d979d7e8b1662792145135e6f1fa4b7b5022a33d`. PR #5 remains open/draft/**unmerged**.
+No release/tag/publication; no duplicate ntfy alert.
+
+## Finding: vacuous DB outage proof
+
+The old `scripts/ci/beta_release_gate.sh` outage step POSTed with
+`Authorization: Bearer outage-probe` (not a real issued credential) and accepted
+`401`/`500`/`503`/connection failure as "denied". An invalid key can be rejected
+even with a healthy database, so it did not prove that a **valid** request fails
+closed *because PostgreSQL is unavailable*, and it arranged no preexisting
+queued/in-flight work.
+
+## Correction
+
+`scripts/ci/beta_release_gate.sh` now:
+- reads the real persisted `AETHERGATE_BETA_INFERENCE_KEY` /
+  `AETHERGATE_BETA_ADMIN_KEY` from the mode-0600 `$WORKDIR/beta_secrets.env`
+  (value never printed or logged);
+- proves a valid request returns `200` **before** the outage;
+- stops the worker, durably enqueues one request (barrier: `queued_total == 1`),
+  then stops PostgreSQL and asserts readiness `503` and the valid request fails
+  closed with a `5xx` (explicitly rejecting vacuous `200`/`201`/`401`/`403`/`000`);
+- restores PostgreSQL and asserts the queued request persisted with **no** new
+  usage/ledger/attempt records from the denied request;
+- restarts the worker and asserts the queued request drains **exactly once**
+  (usage/ledger/attempts each `+1`, zero `outcome_unknown`), then a post-outage
+  valid request returns `200`.
+
+New helper `scripts/ci/beta_db_outage.py` performs the staged snapshots and
+assertions over the admin API (`queue/requests`, `queue/summary`,
+`usage-records`, `ledger-entries`, `observability/summary`).
+
+Focused regression: `test_database_outage_during_dispatch_no_double_settlement`
+in `tests/test_recovery.py` — an in-flight request lost to a DB outage recovers
+as `OUTCOME_UNKNOWN` with exactly one execution attempt, zero usage records and
+zero ledger entries (never re-dispatched or billed twice).
+
+## Verification
+
+- Local operational acceptance: `scripts/ci/beta_release_gate.sh` end-to-end
+  `EXIT=0`; the outage section observed pre-outage `200`, queued barrier
+  `queued_total=1`, readiness `503`, denied request `500`, persisted
+  `queued_total=1` with no denied-request records, drained `+1` usage/ledger/
+  attempt, post-outage `200`.
+- backend suite: **862 collected / exit 0** via canonical `scripts/dev/v2 test`;
+  `ruff check src tests` clean; `git diff --check` clean; secret scan clean.
+
+## Final remote CI (corrected substantive head `d979d7e8b1662792145135e6f1fa4b7b5022a33d`)
+
+All five workflows `completed/success` on the exact head (pull_request events for PR #5):
+- backend — `38413350247`
+- frontend — `38413351513`
+- schema-secret-gate — `38413350479`
+- alpha-golden-path — `38413350025`
+- beta-release-gate — `38413350285`
+
+The final documentation-only tip (this handoff commit) is re-verified green on all
+five workflows; its exact SHA and run IDs are recorded in PR #5's description.
+
+## Corrective commit
+
+- `d979d7e` fix(release): prove DB outage fails closed with a real credential
+
+## Operator actions (unchanged release NO-GO)
+
+- `main` branch protection / independent CODEOWNERS review enforcement remains
+  NO-GO until the operator configures and verifies a protected branch + required
+  independent reviews.
+- The original ntfy alert was delivered prematurely and is **not resent**; no
+  duplicate alert for AGV2-031.
+
+---
+
+# AGV2-031 four-finding corrective closure (superseded by the DB outage correction above)
+
+The independent-review HOLD below is **resolved**. All four findings are closed
+on the substantive head `cf84cfbbd789071e2b0a5b6001f4efed21f5e270`; PR #5 is
+open/draft and **unmerged**. No release/tag/publication is authorized.
+
+## Finding-by-finding closure
+
+1. **Worker liveness false negative.** `src/aethergate/worker.py` now refreshes
+   the heartbeat file from a dedicated event-loop task (`_heartbeat_loop`) on a
+   fixed cadence, independent of the claim/dispatch loop, so a legitimate
+   >90-second dispatch (120-second default timeout) no longer marks a busy but
+   healthy worker stale. A genuinely hung (CPU-blocked) worker also starves the
+   task, so a real stall is still detected. Deterministic tests:
+   `test_heartbeat_refreshes_during_long_dispatch` and
+   `test_heartbeat_clean_stop_and_restart_without_leak` in `tests/test_worker.py`.
+   The `docker restart` false-unhealthy root cause (heartbeat going stale during
+   graceful in-flight shutdown) is resolved by the background task; the runbook
+   retains `stop`+`start` as the recommended restart form.
+
+2. **Acceptance-script failure cleanup / collision safety.** Both
+   `scripts/ci/beta_release_gate.sh` and `scripts/ci/beta_nomnom_acceptance.sh`
+   now fail closed before any build/up when the fixed compose project name
+   already owns containers/networks/volumes, and trap EXIT/INT/TERM to `down -v`
+   only the project this run created (a `STARTED` ownership flag). Deterministic
+   fake-docker collision regression tests in `tests/test_beta1_scripts.py`.
+
+3. **Architecture check bypass.** `scripts/ci/architecture_boundaries.py`
+   `_imported_names` now resolves `ast.ImportFrom.level` against the importing
+   package, so `from ..persistence import models` resolves to
+   `aethergate.persistence.models` and is flagged. Red-before/green-after
+   fixtures in `tests/test_architecture_boundaries.py` (direct + relative +
+   `from . import ...` + persistence->higher-layer escapes); the current tree
+   still passes (ratchet).
+
+4. **Explicit database outage/recovery release gate.** Added a deterministic
+   disposable-stack PostgreSQL outage/recovery step to
+   `scripts/ci/beta_release_gate.sh` (readiness `503` while down, requests not
+   admitted, recovery, post-outage SDK smoke) and a service-level
+   `test_database_outage_fails_closed_without_dispatch` in `tests/test_recovery.py`
+   proving `claim_and_reserve`/`admit_and_enqueue` raise `OperationalError` with
+   zero upstream dispatch. Runbook + readiness docs updated.
+
+## Corrective implementation commits
+- `63db2c0` fix(release): keep worker heartbeat fresh during long-running dispatch
+- `c5b31f1` fix(release): resolve relative imports in architecture boundary check
+- `50b95d6` fix(release): add failure teardown, collision guards and DB outage gate to beta scripts
+- `b91e975` test(release): add deterministic DB outage test and update Beta docs
+- `cf84cfb` fix(release): ship ci/ops scripts in image for containerized test workflow
+
+## Regression counts
+- backend: **861 collected / exit 0** via canonical `scripts/dev/v2 test`
+  (baseline 846 + 15 new); `ruff check src tests` clean; `git diff --check`
+  clean; `scripts/ci/secret_scan.sh` clean. Frontend untouched (89 passed).
+
+## Final remote CI (substantive head `cf84cfbbd789071e2b0a5b6001f4efed21f5e270`)
+All five workflows `completed/success` on the exact head (pull_request events for PR #5):
+- backend — `38402826381`
+- frontend — `38402826599`
+- schema-secret-gate — `38402826502`
+- alpha-golden-path — `38402826700`
+- beta-release-gate — `38402830108`
+
+The final documentation-only tip (this handoff commit) is re-verified green on all
+five workflows; its exact SHA and run IDs are recorded in PR #5's description.
+
+## Operator actions (unchanged release NO-GO)
+- `main` branch protection / independent CODEOWNERS review enforcement remains
+  NO-GO until the operator configures and verifies a protected branch + required
+  reviews. Recorded as a limitation, not an achieved protection.
+- No release/tag/publication. The operator decides GO/NO-GO after reviewer-approved
+  merge and post-merge main CI.
+- The original ntfy alert was delivered prematurely and is **not resent**.
+
+---
+
+# AGV2-031 independent reviewer HOLD — 2026-10-13
+
+- The previous `ee7fbec7857dd2459d1b1c4a1fee6a5d464fb5c6` feature SHA
+  passed all five PR CI workflows. The live nomnom proof is recorded in the
+  handoff below (not replayed by the remote reviewer). PR #5 is open/draft,
+  mergeable and unmerged.
+- Four corrective release-hardening issues remain, detailed in
+  `docs/development/current-task.md` under **Independent reviewer HOLD**:
+  worker heartbeat falsely becomes stale during a long real dispatch; local
+  acceptance scripts omit failure-path teardown and project-collision guards;
+  the architecture test does not resolve relative Python imports; and the
+  required real PostgreSQL outage/recovery safety gate is not explicitly
+  exercised by the new recovery tests or release script.
+- `main` branch protection and independent review enforcement remain
+  operator NO-GO actions. No release/tag or automatic merge is authorized.
+- The original ntfy notification has been acknowledged once, but it was
+  sent before final live proof and before independent review. Do not
+  automatically send another alert; operator can explicitly request a
+  corrected final notification.
+- Resume the original AGV2-031 per-task branch, preserve/recreate the
+  local gitignored WIP marker, close the focused defects and all remaining
+  release evidence gaps, then obtain five green PR CI workflows on the
+  corrected **exact SHA**, update PR #5 and re-request independent review.
+  The older completion record below is retained as historical evidence,
+  **not** as final release approval.
+
+---
+
+## AGV2-031 operator completion alert (requested; NOT SENT)
+
+The operator explicitly requests an urgent ntfy.sh phone alert **only when
+AGV2-031 is complete and ready for independent review**. The exact curl
+command, safe payload, URL, headers and release-gate trigger are now canonical
+in `docs/development/current-task.md`, section 9 on the AGV2-031 task branch.
+
+**No alert is due yet.** An open draft PR or initial CI passes do not satisfy
+the completion trigger. At final completion, send once, verify delivery,
+and record the delivery result in a PR comment and final response. Do not
+send credentials or other sensitive details.
+
+---
+
+# AGV2-031 complete — ready for independent review (2026-10-13 UTC)
+
+## Status
+Beta 1 release hardening is **implemented and verified**. This is a release
+*candidate*, not a shipped release, tag, or public deployment. Branch
+`feat/agv2-031-beta1-release-hardening`, substantive code/test head
+`4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`, open draft PR **#5** (unmerged). All
+five PR workflows are green on the substantive head and on the final
+documentation-only tip; the final tip SHA and its five run IDs are recorded in
+PR #5's description. `.aethergate-wip` removed.
+
+## Section 0 preflight — post-merge main CI (verified)
+Green on main merge SHA `abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4):
+backend `38335810551`, frontend `38335811087`, schema-secret-gate `38335810559`,
+alpha-golden-path `38335810532` (evidence mechanism: `gh run view`/API).
+
+## Implementation commits
+- `9fea250` feat(release): add Beta 1 production profile and worker heartbeat healthcheck
+- `121d23a` feat(release): add recovery fault-injection tests and architecture boundary gate
+- `4fb56e0` feat(release): add Beta 1 release gate smoke and operator docs
+
+## Deliverables
+- `deploy/beta1/compose.yaml` (prod profile: postgres+api+worker, non-root,
+  read-only rootfs+tmpfs, loopback-only API, hardcoded prod invariants),
+  `deploy/beta1/env.example`, `deploy/beta1/compose.smoke.yaml` (CI-only fake
+  upstream on a literal IP). No hardcoded `container_name`; project-scoped naming.
+- Worker heartbeat: `AETHERGATE_WORKER_HEARTBEAT_FILE` in `config.py`, heartbeat
+  write in `worker.run`, and `src/aethergate/worker_healthcheck.py`.
+- `deploy/v2/Dockerfile` now ships the beta1 compose + env template.
+- Tests: `tests/test_beta1_compose.py` (10 shape/prod-invariant tests),
+  `tests/test_recovery.py` (3 worker/API restart + provider-failure recovery),
+  plus the existing `tests/test_scheduler_hardening.py` (20).
+- `scripts/ci/architecture_boundaries.py` (stdlib AST; persistence never reaches
+  up, CLI never imports persistence, routers never import raw ORM models), wired
+  into `schema-secret-gate.yml`; `.github/CODEOWNERS` maps bounded areas to
+  `@draeician`.
+- `scripts/ci/beta_smoke.py` + `scripts/ci/beta_release_gate.sh` +
+  `.github/workflows/beta-release-gate.yml`: disposable production release gate
+  (migrate -> prod `config_check` VALID -> one-use bootstrap + literal-IP catalog
+  + official SDK Models/Chat/Embeddings with bypass off -> worker restart recovery
+  -> backup -> destructive restore -> head 0017 -> post-restore SDK -> teardown).
+- `docs/operations/beta1-runbook.md`, `docs/releases/beta1-readiness.md`.
+
+## Regression counts
+- backend: **846 collected / exit 0** (baseline 833 + 13 new) via canonical
+  `scripts/dev/v2 test`; `ruff check src tests` clean; `git diff --check` clean;
+  `scripts/ci/secret_scan.sh` clean.
+- Local `scripts/ci/beta_release_gate.sh` end-to-end pass on a disposable stack
+  (offline, no model downloads): migration empty -> `0017`, prod `config_check`
+  VALID, Python SDK Models/Chat(non-stream+stream)/Embeddings, worker stop/start
+  recovery, backup/restore `0017`, post-restore SDK with the same credentials.
+- Note: a single `docker restart <worker>` does not reset the container
+  healthcheck state machine and can report a false `unhealthy` after a clean
+  SIGTERM shutdown even though the worker is live; `docker compose stop` + `start`
+  recovers cleanly. Documented in the runbook.
+
+## Final remote CI (substantive head `4fb56e06dc62d6040dbdb71e34f0e22c539d7d82`)
+All five workflows `completed/success` (pull_request events for PR #5):
+- backend — `38344290957`
+- frontend — `38344291014`
+- schema-secret-gate — `38344290966`
+- alpha-golden-path — `38344290975`
+- beta-release-gate — `38344290969`
+
+The final documentation-only tip (this handoff commit and its run IDs) is also
+verified green on all five workflows; its exact SHA and run IDs are recorded in
+PR #5's description.
+
+## Live nomnom proof — COMPLETE (2026-10-13 UTC)
+Disposable production-policy stack (`ag-beta1-nomnom`, ephemeral loopback API),
+torn down afterward; the long-lived dev stack was not touched.
+
+- Real internal Ollama at the allowlisted literal IP `192.168.22.50:11434`
+  (installed models inspected; no downloads).
+- beta1 production profile (`deploy/beta1/compose.yaml`) with `AETHERGATE_ENV=prod`,
+  `AETHERGATE_UPSTREAM_ALLOWLIST=192.168.22.50`, `AETHERGATE_SECRET_BACKEND=file`
+  + read-only empty secret dir, `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`,
+  `AETHERGATE_EGRESS_REQUIRE_LITERAL_IP=true`, generated queue key + bootstrap
+  token. `config_check` => VALID; migrations `0001 -> 0017` clean.
+- Official Python SDK (`openai==2.54.0`) with bypass off: `models.list()`
+  returns the three public aliases; `chat.completions.create` non-stream and
+  stream return non-empty content against `qwen3.8-2b-distill:Q6_K` on the
+  allowlisted literal IP.
+- Repeatable via `scripts/ci/beta_nomnom_acceptance.sh` (the offline CI gate uses
+  the deterministic fake Ollama; this live gate uses the real internal Ollama).
+- Tear-down: only the disposable `ag-beta1-nomnom` project removed (`down -v`);
+  no unrelated services touched.
+
+## Known limitations / explicit operator actions
+- **Branch protection not enabled.** `gh api
+  repos/draeician/aethergate/branches/main/protection` returns `404 Branch not
+  protected`, so the committed CODEOWNERS file does **not** enforce review until
+  the operator enables a protected branch + required reviews on `main`. Recorded
+  as a release limitation, not an achieved protection.
+- No release tag/publication; the operator decides GO/NO-GO for Beta 1 after
+  reviewer-approved merge and post-merge main CI.
+- OIDC is optional and its issuer must be HTTPS in `prod`; TLS termination is
+  operator-managed (API binds loopback only).
+
+## Recommended next step
+Independent review of PR **#5**; do **not** merge automatically. After reviewer
+approval + merge + green post-merge `main` CI, the operator decides Beta 1
+GO/NO-GO.
+
+---
+
+# AGV2-031 kickoff — 2026-10-13 UTC (superseded by the complete record above)
+
+- **AGV2-030 complete and merged.** GitHub PR #4 is closed/merged; canonical main merge SHA `abce2245444efc616b617b53746ba4c4427da689` includes reviewer-approved Beta security foundation. Its feature head `630b3546c899ef8f7b20710447e37565319b0538` passed all four PR-event workflows: backend 38334919438; frontend 38334919423; schema-secret-gate 38334919416; alpha-golden-path 38334919443.
+- **Post-merge main workflow evidence pending:** The GitHub integration available to the architect does not surface main push-event runs. Confirm all four completed/success with head_sha `abce2245444efc616b617b53746ba4c4427da689` using authenticated GitHub UI/gh/API before AGV2-031 implementation. No claim that an unobserved push run passed or failed.
+- **New branch:** `feat/agv2-031-beta1-release-hardening` created directly from the above main merge SHA. This is the only active task branch. Legacy persistent `v2` is retired and AGV2-030 branch remains historical.
+- **AGV2-031 assignment:** Beta 1 release hardening, not a shipped release or tag. Scope: isolated production deployment/profile, recovery/fault-injection evidence, architecture ownership/CODEOWNERS plus actual review-enforcement validation, Beta 1 runbook and GO/NO-GO release record. See `docs/development/current-task.md` on the task branch.
+- AGV2-030 baseline: 833 backend collected / exit 0, 89 frontend tests passed, full local Playwright 32 passed / 7 skipped, 7 CI browser golden checks; migration head `0017`. Real nomnom proof recorded under the preceding AGV2-030 handoff.
+- **Release safety:** No deployment of production, no public release/tag, no automatic PR merge. Opencode must first create gitignored `.aethergate-wip` as its first local repository action, then read task/handoff, verify main post-merge CI, and proceed with scoped changes. Preserve all older handoff history below.
+
+---
+
 # AGV2-030 corrective closure — complete (2026-10-13 UTC)
 
 - Branch: `feat/agv2-030-beta1-security`; canonical `main` is still

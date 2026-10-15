@@ -1,622 +1,224 @@
-# AetherGate - Current Task
+# AetherGate — Current Task
 
 ## Task ID
-AGV2-030
+AGV2-031
 
 ## Title
-Beta 1 security foundation - production provider-secret backend + egress DNS/redirect closure
+Beta 1 release hardening — isolated production deployment, recovery gates, architecture ownership, and release evidence
 
-## Independent reviewer HOLD — 2026-10-13 UTC
+## Independent reviewer HOLD — 2026-10-13 (corrective closure)
 
-Status: **AGV2-030 NOT COMPLETE / PR #4 MUST NOT MERGE.** The OIDC preflight,
-provider-secret backend, redirect-escape regression tests, and all four offline
-PR CI workflows succeeded on the previously reviewed task tip
-`f724da1f261cac7706e3d160e7894cbb072e5088`. Migration head is unchanged
-(`0017`). This does not substitute for the section-11 live nomnom proof.
+**AGV2-031 is not approved for merge or Beta 1 GO.** The prior substantive
+implementation and live nomnom evidence have been reviewed and the five required
+PR workflows did pass at exactly `ee7fbec7857dd2459d1b1c4a1fee6a5d464fb5c6` (backend
+`38347083171`, frontend `38347083164`, schema-secret-gate
+`38347083165`, alpha-golden-path `38347083197`, beta-release-gate
+`38347083170`). The baseline post-AGV2-030 merge checks also passed.
+However, these results do not close the following source-level release issues.
 
-An independent code review also identified one narrow production DNS-policy
-edge case in `src/aethergate/egress.py:_is_ip_literal`:
+**Required narrow corrective closure (no unrelated functionality):**
 
-- It calls `ipaddress.ip_address(host.rstrip(".").lower())`, so a URL host
-  spelled `192.168.22.50.` is accepted as a "literal IP" when that exact
-  hostname is allowlisted. `urllib.parse.urlsplit` preserves the terminal dot
-  and `ipaddress.ip_address("192.168.22.50.")` rejects it. This violates the
-  task's strict production **literal-IP-only** guarantee. Multiple trailing
-  dots likewise must not pass. The problem is in validation; no external
-  network access is needed to demonstrate it.
+1. **Worker liveness false negative.** In `src/aethergate/worker.py`,
+   `Path(heartbeat_file).touch()` happens only *before* awaited `_run_once()`.
+   A legitimate `service.run_complete()` / stream may run for the default
+   120-second inference timeout, whereas the Beta profile's
+   `AETHERGATE_WORKER_HEARTBEAT_TIMEOUT_SECONDS` is 90 seconds. The healthcheck
+   can therefore declare a busy but healthy worker unhealthy. Use a separately
+   scheduled event-loop heartbeat or another demonstrably correct progress
+   signal; keep actual hangs/crashes detectable. Add deterministic active,
+   long-running-dispatch and clean-stop/restart tests, not only idle-loop tests.
+   Resolve the documented false `docker restart` unhealthy behavior or
+   demonstrate its actual cause and honest operator mitigation.
+2. **Acceptance-script failure cleanup / collision safety.**
+   `scripts/ci/beta_release_gate.sh` and
+   `scripts/ci/beta_nomnom_acceptance.sh` do a `compose down -v` only on
+   the success path, not under `set -e` failure, signal or interruption.
+   Their predictable default Compose project names can accidentally adopt
+   existing disposable projects if reused. Add safe `EXIT`/`INT`/`TERM`
+   teardown guards that target only a project proven owned by the current
+   script run; fail closed on name/resource collision rather than touching
+   unrelated containers/volumes. CI's `if: always()` teardown is not a
+   substitute for safe operator-local live nomnom scripts. Include
+   deterministic failure-injection / collision regression proof and avoid
+   exposing ephemeral secret values.
+3. **Architecture check bypass.**
+   `scripts/ci/architecture_boundaries.py:_imported_names` ignores
+   `ast.ImportFrom.level`. For instance `from ..persistence import models`
+   inside an API module yields `persistence.models`, so the current
+   `aethergate.persistence.models` rule misses it; likewise a relative
+   import from persistence to higher layers can bypass enforcement. Resolve
+   import destinations relative to the importing package and add red-before /
+   green-after fixture tests for direct and relative imports (including
+   `from . import ...`). Enforce the documented invariants without
+   false-positives on permitted imports.
+4. **Explicit database outage/recovery release gate.** Section 3 of the
+   original assignment required testing real readiness/dispatch behavior
+   while PostgreSQL is unavailable and after recovery. The new
+   `tests/test_recovery.py` covers service-instance restarts and provider
+   failure, and `beta_release_gate.sh` covers idle worker stop/start and
+   database backup/restore, but neither explicitly creates a database outage
+   during queued/in-progress work. Add a deterministic, *disposable-stack*
+   DB outage/recovery proof: readiness fails closed; no admitted-but-lost
+   work / unguarded dispatch; restore DB; validate persisted queue/settlement
+   invariants; safe teardown. Or document any narrow scenario that cannot
+   safely be tested and retain a release NO-GO for it. Do not inject outages
+   into the long-lived dev/prod stack.
 
-**Correction required before live completion:**
+**Operator-controlled release prerequisite:** The readiness matrix correctly
+shows `main` branch protection / independent CODEOWNERS review enforcement
+as **NO-GO**. GitHub branch protection must be configured and verified,
+with an eligible reviewer distinct from the PR author if required; merely
+committing CODEOWNERS does not enforce review.
 
-1. Add deterministic *red-before/green-after* unit regression tests for
-   trailing-dot numerical hostnames (single and multiple dots) with those exact
-   spellings deliberately allowlisted, under `require_literal_ip=True`.
-   Require strict Python IP-literal syntax; preserve valid allowlisted IPv4
-   and bracketed IPv6, plus dev/test DNS semantics. Do not normalize a
-   hostname into an address and claim it was literal.
-2. Remove the bypass with the smallest safe policy change; ensure catalog
-   create/update and dispatch reject it under production policy, with no
-   secret resolution or HTTP dispatch for rejected URLs.
-3. Verify that the pinned LiteLLM/httpx production route actually connects
-   directly to the literal address, not to an implicit environment HTTP(S)
-   proxy that would defeat the "validated IP = connected IP" assurance. This
-   is a targeted transport verification, **not** an assertion that a proxy
-   bypass has been observed. If a proxy can intervene, fail closed and cover
-   it with deterministic tests.
-4. Complete **all** section-11 nomnom proof on disposable resources only:
-   inspect existing models, deploy the literal-IP + file-backend production
-   policy with auth bypass off, run official Python SDK Models and real Chat
-   against the allowlisted private-LAN IP, run vision/embedding only if
-   installed/capable without downloading models, prove hostname and
-   metadata/link-local denial, capture safe evidence, and tear down *only*
-   disposable resources. Do not touch unrelated services or change an
-   existing IdP merely to satisfy this test. Use production-policy test mode
-   if the real production OIDC issuer cannot be configured safely.
-5. Update `docs/development/agent-handoff.md` and PR #4 with exact commands,
-   results, limits, final SHA and four matching PR CI run IDs. Maintain the
-   existing `.aethergate-wip` until complete and independently verified.
-   **Do not push `main` or `v2`; do not merge PR #4.**
-
-This is corrective closure within AGV2-030, **not** a new Beta workstream.
-Retain all original security gates and original section-11 acceptance criteria.
+Resume the existing AGV2-031 task branch, recreate/preserve the local gitignored
+`.aethergate-wip` before other local repo work, update tests and release
+evidence, and require **all five** workflows green on the *new exact final*
+PR SHA. Maintain PR #5 as draft/open/unmerged; do not tag, publish, deploy,
+or announce Beta 1 as released. The earlier ntfy notification was
+acknowledged (HTTP 200) but was **sent prematurely** before the later live
+proof; do not resend it automatically or claim it certifies the corrected
+final head. Record final review readiness and ask the operator whether
+another phone alert is desired rather than duplicating the original alert.
 
 ---
 
-## Active Branch
+## Status and release authority
+**Assigned, not implemented.** This task prepares a defensible Beta 1 release candidate; it does NOT declare Beta 1 released. The operator must approve final release/tag/cutover separately after independently reviewed CI, operational acceptance, and the post-merge main gate.
 
-Work only on `feat/agv2-030-beta1-security`, created from canonical `main` commit
-`7c47cd8575dc96265c02e17333ee88bda920de99`.
+## Canonical branch
+- Work ONLY on `feat/agv2-031-beta1-release-hardening`.
+- This branch was created directly from canonical `main` merge SHA `abce2245444efc616b617b53746ba4c4427da689` (AGV2-030 PR #4 merged).
+- Historical long-lived `v2` and the completed AGV2-030 feature branch must not be used as new development bases; never push directly to main.
+- Keep one scoped task/PR; no unsolicited changes to unrelated OpenAI features.
 
-The historical persistent `v2` development branch is retired for new work.
-Do not merge, rebase, or copy AGV2-030 work onto `v2`.
-Never push task implementation directly to `main`.
-
-## WIP Marker - FIRST LOCAL ACTION
-
-Immediately after entering the repository, before pull/read/implementation work, create:
-
-`.aethergate-wip`
-
-Safe contents:
-- task=AGV2-030
-- branch=feat/agv2-030-beta1-security
+## WIP marker — FIRST LOCAL REPOSITORY ACTION
+Immediately upon entering the local repository (before checkout/pull/inspection or implementation), create gitignored root `.aethergate-wip` if it is missing, with:
+- task=AGV2-031
+- branch=feat/agv2-031-beta1-release-hardening
 - started_at=<UTC timestamp>
 
-The marker is gitignored.
-Never stage, commit, or push it.
-Keep it present for the entire incomplete task.
-If context is compacted/restarted and the task is incomplete, recreate it if missing.
-If blocked/incomplete, leave it present.
-
-Remove it only after:
-1. every local/live criterion below is green;
-2. all task commits are pushed to origin/feat/agv2-030-beta1-security;
-3. the exact final origin/feat/agv2-030-beta1-security SHA has all four required GitHub Actions green;
-4. the handoff is committed/pushed and remotely verified;
-5. the feature PR to main exists and is updated.
-
-## Starting Point
-
-The complete core OpenAI surface is now merged to main:
-- Models
-- Chat Completions text + inline-image input
-- Responses text + inline-image input subset
-- Embeddings
-
-Embeddings PR #3 is merged.
-
-Canonical main merge commit:
-`7c47cd8575dc96265c02e17333ee88bda920de99`
-
-All four post-merge main workflows are completed/success on that exact SHA:
-- backend: `38263020817`
-- frontend: `38263020743`
-- schema-secret-gate: `38263020802`
-- alpha-golden-path: `38263020770`
-
-Current green baseline:
-- backend: **758 passed**
-- frontend: **89 passed**
-- Playwright: **32 passed / 6 skipped**
-- migration head: **0017**
-- Python OpenAI SDK: `openai==2.54.0`
-- JavaScript OpenAI SDK: `openai@7.32.0`
-- LiteLLM: `1.104.0`
-
-This task begins Beta hardening. It is deliberately security-focused and does NOT declare Beta 1 complete.
-
-## 0. Required preflight - OIDC browser-login race before security implementation
-
-This task branch is the replacement for the historical `v2` queue. The historical
-`v2` branch remains available for audit; it is **not** a development base.
-AGV2-030 production security implementation must not begin until this narrow
-golden-path blocker is investigated, corrected, and verified.
-
-Evidence from the 2026-10-12 docs-only `v2` run:
-- `alpha-golden-path` run `38263913698` failed in the **second** Playwright
-  test, `catalog route to the fake Ollama upstream exists`, before its actual
-  catalog assertion: `loginAs()` timed out at the Dashboard heading.
-- The **first** OIDC login/dashboard browser test passed. Four subsequent
-  browser tests passed, as did earlier SDK, backup/restore, and smoke phases.
-- During the failed second login (about 14:38:42 UTC), nginx showed
-  `GET /admin/v1/auth/session -> 401`, but no subsequent request for
-  `/admin/v1/auth/oidc/login`. Later tests did make that redirect successfully.
-- `frontend/e2e/fixtures.ts:loginAs` calls `page.goto("/")` and immediately
-  uses `link.isVisible()`, which can return false while the client is still
-  discovering that the session is unauthenticated; the helper then waits
-  for Dashboard without ever clicking sign-in. This is a **supported race
-  hypothesis**, not yet a verified fix.
-- The later exact-SHA handoff run `38312457044` passed, along with backend
-  `38312457242`, frontend `38312457133`, and schema-secret
-  `38312457067` on `b715f780573b43d4046ddfbb6a6979c7fa368826`.
-  The earlier red run remains an observed defect, not "flaky" by decree.
-
-**Preflight action for the implementer:** preserve the first-local-action
-`.aethergate-wip` protocol; reproduce the suspect authentication loading
-transition deterministically (delay the session/auth-state response or use an
-equivalent controlled fixture), inspect safe test artifacts, and fix only the
-login readiness race if confirmed. Wait until either an authenticated Dashboard
-or a visible OIDC sign-in link appears; never silently skip the click based on
-an immediate visibility poll. Add a focused regression proof and require all
-four offline PR CI workflows green on the exact corrected head before beginning
-provider-secret/egress changes. If evidence instead reveals another root cause,
-fix that cause and document it. No timeout inflation or rerun-only disposition.
-
-## Why This Task Exists
-
-Independent architectural review of the current canonical main found two explicit production-boundary
-gaps that are already acknowledged in repository docs:
-
-1. `src/aethergate/scheduler/runtime.py` unconditionally constructs `EnvSecretResolver()`, while
-   `src/aethergate/secrets.py` and architecture docs explicitly say environment resolution is a
-   dev/test convenience and NOT the production provider-secret backend.
-
-2. `src/aethergate/egress.py` explicitly says redirect-following hardening is deferred. The current
-   policy validates only the configured URL host; it does not close DNS rebinding at the actual
-   connection boundary and does not prove a provider redirect cannot escape the allowed destination.
-
-Both conflict with settled security requirements in `project_spec.md`:
-- provider credentials live outside PostgreSQL behind a secret service/envelope boundary;
-- metadata destinations, DNS rebinding, and redirect escapes are blocked.
-
-AGV2-030 closes these production security gaps for the CURRENT supported provider path (Ollama /
-pinned LiteLLM). Do not broaden to new provider kinds.
-
-## 1. Compatibility / authority to read first
-
-Before implementation read:
-- `AGENTS.md`
-- `project_spec.md`
-- `docs/architecture/security.md`
-- `docs/architecture/provider-model.md`
-- `docs/operations/alpha-runbook.md`
-- `src/aethergate/secrets.py`
-- `src/aethergate/egress.py`
-- `src/aethergate/scheduler/runtime.py`
-- `src/aethergate/adapters/litellm.py`
-- pinned LiteLLM `1.104.0` transport implementation actually used by `acompletion` and `aembedding`.
-
-Do not guess redirect/DNS behavior from generic httpx defaults; inspect and prove the exact pinned
-LiteLLM path.
-
-## 2. Production provider-secret backend
-
-Keep the `SecretResolver` protocol.
-
-Add a production-suitable file-backed resolver intended for read-only secret projection from an
-external orchestrator/secret manager, e.g. Docker Secrets, Kubernetes projected secrets, systemd
-credentials, or an operator-managed read-only mount.
-
-Recommended shape:
-- `FileSecretResolver`
-- runtime resolver factory such as `build_secret_resolver(settings)`.
-
-### Configuration
-
-Add typed settings with explicit environment aliases:
-
-- `AETHERGATE_SECRET_BACKEND`
-  - allowed: `env` | `file`
-  - dev/test default may remain `env`
-  - **prod MUST NOT use env**
-
-- `AETHERGATE_SECRET_DIRECTORY`
-  - required/validated when backend=file
-  - use an absolute path
-  - production documentation should use a read-only mounted directory, for example
-    `/run/secrets/aethergate-provider`.
-
-No implicit fallback:
-- if prod is configured for file backend and the file is missing/invalid, fail closed;
-- never check an environment variable as a backup;
-- a canary secret present in `AETHERGATE_SECRET_*` must not rescue a missing file in prod.
-
-### Stable file identity
-
-Use the stable opaque `SecretRef.id` as the secret filename, not the human display name.
-
-Reason:
-- IDs are unique;
-- display-name normalization can collide;
-- user-controlled names must not become path traversal primitives.
-
-Example:
-`<secret_directory>/<secret_ref_id>`
-
-Validate the path component and resolved path safely.
-
-### File safety
-
-At minimum:
-- configured root must be absolute;
-- reject path escape/traversal;
-- candidate must resolve inside the configured root;
-- regular files only;
-- symlinks are permitted only when the resolved target remains inside the configured root
-  (needed for common secret projections);
-- reject symlink escape;
-- bounded file size (choose/document a conservative limit, e.g. 64 KiB);
-- UTF-8 text only;
-- reject empty secret material;
-- no NUL;
-- operator-friendly terminal newline handling must be explicit and tested
-  (removing one trailing LF/CRLF is acceptable if documented; never arbitrary whitespace stripping);
-- errors contain only safe SecretRef metadata, never file contents.
-
-Never return or log secret material except to the trusted adapter call that already consumes it.
-
-## 3. Runtime resolver factory
-
-Replace the production/runtime hard-coded `EnvSecretResolver()` in
-`src/aethergate/scheduler/runtime.py` with the typed resolver factory.
-
-Requirements:
-- API and worker construct the same resolver policy;
-- dev/test existing behavior remains easy;
-- prod cannot instantiate EnvSecretResolver through normal runtime configuration;
-- direct unit tests may instantiate EnvSecretResolver explicitly;
-- dev-only utilities may remain explicit if clearly dev-only and tested;
-- no secret resolver choice comes from a client request or database row.
-
-Add tests proving API/worker runtime construction selects the expected resolver.
-
-## 4. Config preflight
-
-Extend `python -m aethergate.config_check` without printing secrets.
-
-Prod:
-- env provider-secret backend = INVALID;
-- file backend with missing/non-absolute/unusable directory = INVALID;
-- file backend correctly configured = VALID (subject to existing config rules).
-
-Dev/test:
-- env remains supported;
-- file may also be selected for deterministic tests.
-
-Preflight output may name the backend/directory state, but never file names containing sensitive
-operator conventions if avoidable and never secret contents.
-
-## 5. DNS rebinding closure - fail closed, do not overclaim
-
-The current `DestinationPolicy` allowlists host strings and blocks literal metadata/link-local/etc.
-That is not sufficient to claim DNS-rebinding resistance.
-
-For CURRENT production Ollama support, choose ONE of these designs and prove it:
-
-### Preferred if pinned LiteLLM supports a safe custom transport
-Implement connection-level resolution/pinning such that:
-- the exact resolved IP used for the connection is validated;
-- DNS cannot change between validation and connect;
-- HTTPS semantics/SNI remain correct where applicable;
-- every address is checked against the destination policy.
-
-### Acceptable narrow Beta policy if safe connection-level pinning is not cleanly available
-Fail closed in `prod` by requiring the configured upstream `base_destination` host to be a literal
-IPv4/IPv6 address.
-
-This is acceptable for the current supported Ollama provider and the nomnom/private-LAN deployment.
-It eliminates the DNS-rebinding class rather than pretending a pre-connect lookup is sufficient.
-
-If this narrow policy is chosen:
-- dev/test may continue to use service DNS names for deterministic Compose CI;
-- docs must explicitly say production DNS upstream names remain disabled until transport-level
-  pinning exists;
-- do not add an insecure override such as "allow unsafe DNS" in prod.
-
-In all environments preserve:
-- explicit host allowlist;
-- supported schemes only;
-- no URL userinfo;
-- no missing host;
-- metadata/link-local/loopback/multicast/unspecified/reserved literal destinations;
-- explicitly allow authorized private-LAN literal IPs when allowlisted.
-
-Do not start rejecting RFC1918 private addresses generally: private Ollama is an intended deployment.
-
-## 6. Redirect escape closure
-
-Empirically inspect the pinned LiteLLM transport used by BOTH:
-- `acompletion` (Chat / Responses / vision);
-- `aembedding` (Embeddings).
-
-A provider HTTP redirect MUST NOT be able to make the client contact a different destination.
-
-Requirements:
-- prove whether redirects are followed today;
-- configure/replace the pinned client path so redirects are NOT followed, or enforce an equally strong
-  per-hop policy;
-- no hidden second request to the redirect target;
-- 301/302/303/307/308 must fail safely as provider/upstream errors unless the transport returns a
-  non-followed response that is safely mapped;
-- never follow a redirect to loopback, metadata, link-local, a non-allowlisted host, or another
-  private host;
-- do not trust the `Location` header merely because the original host was allowed;
-- redirect Location contents must not be reflected into logs/client errors.
-
-### Required real-transport proof
-
-Use a real local HTTP redirect fixture with the pinned LiteLLM transport, not only a monkeypatched
-adapter method.
-
-Create:
-- allowed origin fixture;
-- disallowed/canary target fixture that records hit count safely.
-
-For completion AND embedding transports:
-1. origin responds with each relevant redirect class;
-2. Location points to canary target;
-3. gateway/provider adapter returns safe failure;
-4. canary hit count remains **zero**.
-
-No network access outside the test environment.
-
-## 7. Catalog + dispatch share the same policy
-
-Endpoint create/update and dispatch-time route preparation must apply the same environment-aware
-destination policy.
-
-Prove:
-- destination denied at catalog create/update is never persisted;
-- if policy/config changes after a request was queued, dispatch-time validation still denies;
-- prod hostname destination cannot slip through because it was persisted under dev/test rules;
-- metadata/link-local literal destinations remain denied even if mistakenly present in the allowlist.
-
-No direct DB-policy duplication in routers.
-
-## 8. Provider-secret + egress interaction
-
-Secret resolution occurs only AFTER the route/destination has passed the appropriate dispatch-time
-security checks, or otherwise in an order that never exposes secret material to a denied destination.
-
-Prove a denied destination does not receive provider credentials.
-
-Do not log whether a particular secret value existed; safe "secret resolution failed" / "destination
-denied" categories are sufficient.
-
-## 9. Logging / diagnostics canaries
-
-Extend redaction/security tests with:
-- file-backed provider secret canary;
-- redirect Location canary;
-- secret directory/path canary where appropriate.
-
-No logs/diagnostics/handoff may contain:
-- provider secret contents;
-- raw Authorization header;
-- redirect Location if it contains sensitive query/userinfo;
-- file contents;
-- queue encryption key;
-- OIDC/DB/bootstrap secrets.
-
-Safe metadata:
-- secret backend kind;
-- SecretRef ID if existing policy already treats opaque IDs as safe;
-- destination-denied reason family;
-- HTTP status.
-
-## 10. Deterministic offline CI
-
-Extend existing deterministic tests/golden tooling without requiring Internet.
-
-The normal offline golden path may continue in dev/test mode with service DNS and env fixture secrets.
-
-Add explicit production-boundary tests that prove:
-- prod + env SecretResolver configuration rejected;
-- prod + file resolver works;
-- no env fallback in prod;
-- file path escape rejected;
-- prod egress DNS policy is enforced;
-- redirect canary never contacted by completion transport;
-- redirect canary never contacted by embedding transport.
-
-Do not weaken the existing fully offline CI requirement.
-
-## 11. Live nomnom proof
-
-Use nomnom for the real deployment check.
-
-Do not download models.
-
-Because the currently supported real provider is Ollama on the private LAN, verify using the actual
-allowlisted literal-IP endpoint.
-
-At minimum:
-1. inspect current installed models/resources;
-2. launch/recreate a disposable current AetherGate stack using the new production egress policy
-   (or a production-policy test mode that exercises the identical policy object);
-3. `bypass=false`;
-4. real official Python SDK Models + one Chat request succeeds against the literal private IP;
-5. existing vision request succeeds if the installed proven vision model is still available;
-6. embeddings live proof only if an embedding-capable model is installed - do not download one;
-7. hostname form of the same upstream is rejected in prod if the literal-IP policy was selected;
-8. metadata/link-local target denied;
-9. no unrelated services/resources touched;
-10. tear down only disposable resources.
-
-FileSecretResolver functionality may be proven deterministically if the real Ollama route has no
-provider credential. Do not invent a fake live credential requirement merely to satisfy a checklist.
-
-## 12. No migration
-
-Expected: **NO migration**.
-
-Migration head remains `0017`.
-Do not modify migrations `0001`-`0017`.
-
-Secret material remains outside PostgreSQL.
-No new plaintext credential columns.
-
-## 13. Documentation
-
-Update:
-- `docs/architecture/security.md`
-- `docs/architecture/provider-model.md`
-- `docs/architecture/v2-overview.md`
-- `docs/operations/alpha-runbook.md` (or add a clearly named Beta security section)
-- `docs/development/README.md`
-- README if its security/deferred statements become stale
-- `docs/development/agent-handoff.md`.
-
-Remove stale statements saying:
-- EnvSecretResolver is the only runtime resolver;
-- production secret backend is wholly deferred;
-- redirect hardening is still deferred,
-but only after the implementation/proof exists.
-
-Do NOT declare Beta 1 complete in this task.
-
-Document the exact chosen production DNS policy honestly:
-- transport-level pinning if actually implemented and proven; OR
-- literal-IP-only production upstreams until pinning is implemented.
-
-## 14. Regression gate
-
-Run the complete current gate:
-
-- backend full suite; baseline **758**
-- frontend unit/component; baseline **89**
-- full Playwright; baseline **32 passed / 6 skipped**
-- npm build
-- npm lint
-- `npx tsc -b --noEmit`
-- OpenAPI/client drift
-- ruff check src tests
-- git diff --check
-- secret/content/image/vector/redirect canary scans
-- no-legacy-v1 guard + self-test
-- migration empty -> 0017
-- populated 0016 -> 0017
-- config_check dev valid
-- config_check prod security cases
-- fake Ollama Chat + Responses + vision + embeddings
-- official Python SDK full supported surface
-- official JS SDK full supported surface
-- offline golden path
-- new redirect real-transport tests.
-
-Every red test must be root-caused.
-Do not weaken tests to accept redirects or prod env secrets.
-
-## 15. Feature PR + remote CI gate
-
-Push completed work to `origin/feat/agv2-030-beta1-security`.
-
-Create or update a PR from `feat/agv2-030-beta1-security` -> `main` (expected PR #4 if no other PR intervenes)
-before the final remote-CI decision. The repository's current push filters historically name `main`/`v2`,
-so task-branch CI may be supplied by the `pull_request` event. Do not wait forever for a branch-push run
-that is not configured to exist.
-
-On the EXACT FINAL PR HEAD SHA require all four workflows, from the PR event and/or any applicable push event:
-- backend = completed/success
-- frontend = completed/success
-- schema-secret-gate = completed/success
-- alpha-golden-path = completed/success.
-
-The workflow run's `head_sha` must equal the exact final task-branch SHA.
-
-If any is red:
-- inspect logs;
-- root-cause;
-- fix;
-- push;
-- wait for the PR workflows on the new head;
-- require all four green again on that exact new SHA.
-
-Update the PR description with the final SHA, security design choice, verification summary, and exact run IDs.
-Verify mergeable and leave it open/unmerged.
-
-Do not declare completion from local evidence alone.
-Do NOT merge automatically.
-Never push directly to main.
-
-## 16. No New Scope
-
-Do not implement:
-- production HA/failover;
-- new provider kinds;
-- Prometheus/OpenTelemetry exporters;
-- paging/alerting;
-- billing/invoice/payment;
-- hosted SaaS tenancy;
-- image generation/audio/tools/MCP/files;
-- unrelated UI redesign;
-- generic Vault/AWS/GCP SDK integrations.
-
-The file resolver is the production boundary for externally projected provider secrets; do not add a
-cloud-secret-manager matrix in this milestone.
-
-## 17. Handoff
-
-Record:
-- implementation commits;
-- exact provider-secret backend design;
-- file naming/path safety/newline/size semantics;
-- proof there is no prod env fallback;
-- exact production DNS policy selected and why;
-- pinned LiteLLM redirect behavior discovered;
-- exact mechanism preventing redirect follow;
-- completion + embedding redirect canary proof;
-- catalog + dispatch policy proof;
-- denied-destination/no-secret-exposure proof;
-- logging/canary results;
-- live nomnom result;
-- migration head 0017;
-- backend/frontend/Playwright counts;
-- exact final task-branch SHA + four workflow IDs/conclusions;
-- PR status/head;
-- WIP lifecycle;
-- exactly one recommended next step:
-
-  **Begin AGV2-031 Beta 1 release hardening: production deployment profile, architecture/CODEOWNERS
-  enforcement, fault-injection/recovery release gates, and Beta readiness documentation.**
-
-Never include secret contents, file contents, credentials, provider/session tokens, prompt/output
-content, encrypted payloads, redirect query contents, or large logs.
-
-## Commit / Push
-
-Use scoped conventional commits, for example:
-- `feat(security): add production provider secret resolver`
-- `fix(security): close upstream redirect and dns escape paths`
-- `test(security): prove production inference boundaries`
-- `docs: document beta security foundation`
-
-Use fewer/more commits if cleaner.
-
-Push all completed work to origin/feat/agv2-030-beta1-security.
-Never push directly to main.
-Do not ask whether to continue/commit/push.
-
-The task is complete only when:
-- production runtime cannot use env provider-secret resolution;
-- file-backed projected provider secrets work without DB persistence or env fallback;
-- DNS rebinding is actually closed for the supported production provider path (not merely
-  pre-resolved and claimed safe);
-- provider redirects cannot escape the configured destination for completion or embedding;
-- catalog and dispatch enforce the same destination policy;
-- denied destinations never receive provider credentials;
-- existing Chat/Responses/vision/embeddings regressions remain green;
-- migration head remains 0017;
-- all four remote workflows are green on the exact final origin/feat/agv2-030-beta1-security SHA;
-- a new `feat/agv2-030-beta1-security` -> `main` PR exists and remains unmerged;
-- handoff is complete;
-- `.aethergate-wip` is removed only after final remote verification.
+Never stage/commit/push this file or store secrets in it. Leave it in place while blocked/incomplete. Remove it ONLY after all acceptance gates, final handoff, commits/push, four exact-final-SHA PR CI workflows and an open, verified PR are complete. After context compaction, reread AGENTS.md, project_spec.md, this task, and agent-handoff.md before proceeding.
+
+## 0. REQUIRED preflight — post-merge main CI
+- GitHub confirms PR #4 merged via `abce2245444efc616b617b53746ba4c4427da689` and main points to that SHA.
+- AGV2-030 feature HEAD `630b3546c899ef8f7b20710447e37565319b0538` had all four green PR workflows: backend 38334919438, frontend 38334919423, schema-secret-gate 38334919416, alpha-golden-path 38334919443.
+- **Post-merge main push-event CI remains NOT VERIFIED** by the architect: the available GitHub connector reports only PR-triggered runs and cannot demonstrate the four runs on main merge SHA. This is an evidence gap, NOT a declared failure or success.
+- Before starting release-hardening *implementation*, use authenticated GitHub Actions UI or gh/API with appropriate access to verify that backend, frontend, schema-secret-gate, and alpha-golden-path all completed/success with head_sha **exactly** `abce2245444efc616b617b53746ba4c4427da689`. Record exact run IDs and the evidence mechanism in agent-handoff.md. If any is red, root-cause and repair within a scoped change before continuing. If the check is inaccessible, record a truthful release hold and do not imply success.
+- The **branch and these assignment docs** may be prepared before that external CI evidence is available; this exception does not waive the release preflight.
+
+## Starting state — factual baseline
+- Merged core: Models, Chat Completions text/stream/inline vision, Responses text/inline vision subset, Embeddings; one real supported provider kind (Ollama via pinned LiteLLM 1.104.0).
+- Durable PostgreSQL scheduler, quota/admission, signed accounting ledger and budgets, project/RBAC identity, OIDC browser auth, Linux CLI/device flow, admin API and web console, offline golden-path plus backup/restore.
+- AGV2-030 closed production file-backed provider-secret selection, literal-IP-only production upstream destinations, redirect and implicit proxy escape paths; successful reported disposable live nomnom SDK Models/Chat/vision/embedding proof.
+- Migration head **0017**. No schema change is anticipated for this release-hardening task.
+- Last verified AGV2-030 reference baseline: backend 833 tests collected / exit 0; frontend 89 passed; full local Playwright 32 passed / 7 skipped; offline CI browser golden 7 passed.
+- Current `deploy/v2/compose.yaml` is Alpha/dev-oriented; it hardcodes development env/container names and has no Beta production profile. `.github/CODEOWNERS` does not exist as of the baseline. `docs/releases/beta1-readiness.md` does not exist.
+- Read `project_spec.md`, `AGENTS.md`, `docs/development/agent-workstreams.md`, `docs/architecture/v2-overview.md`, `docs/architecture/security.md`, `docs/operations/alpha-runbook.md`, `docs/releases/alpha1-readiness.md` before design/implementation.
+
+## 1. Product target / definition of done
+Deliver a reproducible, least-privilege, single-company/self-hosted Beta 1 **release candidate**, with a documented install/upgrade/restore/rollback procedure and repeatable failure/recovery evidence. The release decision must be traceable to exact git SHAs, CI run IDs, tests and a disposable production-policy nomnom acceptance run. Correctness of scheduler/accounting/security wins over uptime claims, UI polish or throughput.
+
+## 2. Production deployment profile (primary implementation scope)
+Provide a clearly named, isolated Beta production Compose deployment/profile (prefer `deploy/beta1/` unless a more robust repo-native layout is demonstrated) and operator-facing sample configuration **without** committing any live secrets.
+
+Mandatory invariants:
+- `AETHERGATE_ENV=prod`; `AETHERGATE_ALLOW_INFERENCE_AUTH_BYPASS=false`; `AETHERGATE_SECRET_BACKEND=file` with existing absolute `AETHERGATE_SECRET_DIRECTORY` and read-only externally projected files; no production env secret backend or env fallback.
+- `AETHERGATE_UPSTREAM_ALLOWLIST` explicit literal private/public IPs as approved; strict literal-IP production policy and no redirect or implicit proxy escape. No new bypass switches. FileSecretResolver requires no fake credential for anonymous real Ollama.
+- PostgreSQL not host-published; API not publicly exposed over plaintext HTTP. Provide loopback-only API binding or an explicitly documented trusted TLS-terminating reverse-proxy integration. Never include the deterministic development IdP/fake provider in the production profile. Document TLS and real-issuer responsibility; do not falsely claim TLS exists if operator-managed.
+- Distinct Compose project, networks, volumes, container names and host ports from long-lived `aethergate-v2` dev or any existing nomnom services. Avoid hardcoded `container_name` collisions; use explicit disposable project identifiers for acceptance. No `down -v` on shared resources.
+- Run containers with minimum needed privileges/non-root where supported; bounded resources; reproducible pinned application/dependency images; real API/worker health checks and unambiguous readiness. If read-only rootfs/tmpfs controls are practical, test them; document any exception.
+- Separate migration step and credentialed bootstrap lifecycle; no auto-destructive database operations or insecure pre-seeded credentials on app startup.
+- Fail closed for invalid configuration or absent mounts/keys and verify the actual worker/runtime uses production settings (not just the config-check command). Do not echo secrets in compose output, diagnostics or logs.
+- Test production configuration shape deterministically in CI, including negative/invalid-prod cases. Avoid installing kubernetes/Helm/cloud stacks for this milestone.
+
+## 3. Recovery, resilience and safe fault-injection release gates
+Implement **automated, repeatable release checks** on a disposable stack, using deterministic barriers/fixture hooks rather than arbitrary timing sleeps. Extend existing `scripts/ci/golden_path.py`, operations tooling, or a clearly named Beta CI check without weakening established tests. At minimum prove and record:
+
+1. Worker termination/restart while requests are queued/in progress: queued work is not lost; leases expire/recover according to the documented state machine; ambiguous upstream execution remains `outcome_unknown` where appropriate, not silently re-dispatched or billed twice.
+2. API restart while work exists: durable persisted work and authentication/config state survive; no phantom concurrency/quotas/budget reservations.
+3. Database outage and recovery: readiness goes non-ready / requests fail safely; no fresh unguarded dispatch, corrupt admission, or silent data loss; recovery uses documented operations.
+4. Provider HTTP timeout/connection failure/429, and redirected/denied upstream: safe errors/cooldowns, no hidden LiteLLM retry bypass, quota and budget invariants preserved.
+5. Backup -> destructive restore **only on disposable database** -> migration head 0017 -> post-restore official Python and JS SDK golden smoke, appropriate audit/accounting state checks.
+6. Lost/unavailable file-projected provider secret and queue-key unavailability: fail closed without leaking data or minting synthetic success; document queue-key-loss unrecoverability and operator restore procedure.
+
+Use faithful domain behavior for cancellations, reservations, settlement, manual reconciliation, and audit. Do not claim external upstream execution is exactly-once when state cannot establish it. Where product limits make a scenario unsupportable, write down the evidence-backed limitation rather than concealing it.
+
+## 4. Architecture boundaries and CODEOWNERS
+- `docs/development/agent-workstreams.md` asserts dependency-direction enforcement by architecture tests and CODEOWNERS, but no CODEOWNERS file exists at baseline. Add `.github/CODEOWNERS` with **actual verified repository owner(s)** (the known current owner is `@draeician`); do not invent organizations, teams or reviewers. Map bounded areas to declared code ownership, or explicitly use a minimal safe owner mapping until real teams are appointed.
+- Add focused, executable architectural boundary checks (Python AST/import or equivalent) proving routers/CLI do not host persistence policy and that dependencies follow the documented direction where mechanically enforceable. Prefer ratcheted checks and defined exception evidence over global imports that falsely fail or ignore known cases.
+- Document how GitHub branch protection/CODEOWNERS review enforcement is configured and verify the *actual hosted setting* where access permits. Merely checking in CODEOWNERS does not itself enforce review approvals. If enforcement cannot be inspected/activated, mark it an explicit operator action and release limitation, not as an achieved protection.
+- Preserve workstream ownership and contracts; no unrelated structural refactor or new public API shape.
+
+## 5. Beta 1 operator docs / release evidence
+Deliver:
+- `docs/operations/beta1-runbook.md` with preflight, isolated install, TLS/auth issuer prerequisites, secrets projection/rotation, API + worker startup, migration, rollback/restore, health, observability/diagnostics, recovery handling, and safe teardown.
+- `docs/releases/beta1-readiness.md` with a checkable GO/NO-GO matrix: code/contract/support scope, security, deployment isolation, auth/egress, backup+restore, fault/recovery, exact-SHA CI, live acceptance, key-loss limitations, branch protections, known limitations, rollback, and operator signoff.
+- Truthfully update `README.md` and relevant developer/architecture docs only where new release behavior requires it; retain `docs/releases/alpha1-readiness.md` as historical evidence (no retroactive rewriting).
+- Explicitly state Beta 1 **does not mean** high availability, full OpenAI Responses, new providers, complete billing, SaaS tenancy, cloud secret-manager integrations, or performance SLOs invented without measurement.
+- Decide version/tag/release publication **only by an explicit operator-approved policy** after post-merge green CI. Do not tag, publish container images, or deploy public production automatically.
+
+## 6. CI / regression requirements
+Keep four established GitHub workflows, and add targeted release-hardening verification to the appropriate CI route. All required checks must be pass/fail actionable, with safe/short operational logs; no manual-only success substituted for deterministic CI.
+
+Re-run:
+- Full backend suite (>= reference 833 tests, accounting for legitimate test updates), ruff, full frontend unit suite (reference 89), lint/build/TypeScript.
+- Playwright local full suite and CI golden path (reference 7 CI browser tests), official pinned Python and JS SDK supported API surface.
+- Strict secrets/content canary scan, no-legacy guard + self-test, `git diff --check`, OpenAPI/client two-pass drift, workflow syntax validation.
+- Clean migration empty -> 0017 and populated 0016 -> 0017, and **no new migration** unless separately justified and approved.
+- Deterministic production configuration/deployment smoke and fault-injection recovery tests in addition to AGV2-030 file-secret/egress/redirect/proxy tests.
+- Disposable nomnom (real Ollama models already installed, **no downloads**): at minimum official Python SDK Models/Chat with auth bypass off on the real allowlisted literal-IP upstream; vision/embedding where available. Test production-policy startup and teardown. Do not interfere with other nomnom/developer services.
+- Preserve reproducibility from `constraints.txt`, package versions, and existing lock mechanisms; do not silently upgrade pinned LiteLLM/OpenAI SDKs.
+
+On the **EXACT FINAL task branch SHA** require four completed/success runs with that SHA (backend, frontend, schema-secret-gate, alpha-golden-path), plus any new release-gate workflow. Create/update an open draft PR to main so `pull_request` workflows run; the existing branch `push` workflow filters historically include main/v2 only. No false attribution of a branch-push run.
+
+## 7. No-scope / release safety
+NO unrelated new endpoints, provider kinds, Responses tools/MCP/files, audio/image generation, HA cluster, Redis authority, multi-tenant SaaS, cloud secret-manager SDK matrix, general UI redesign, or data import from retired v1. Do not damage data or services outside disposable test environments. Do not change migrations, auth/audit/quotas/security semantics to force tests green.
+
+## 8. Handoff and PR policy
+- Record exact verified `main` post-merge CI preflight or explicit blocker; implementation commits, regression counts, safe command/evidence summaries, fault/recovery results, nomnom proof, known limitations and exact final SHA/run IDs in `docs/development/agent-handoff.md`.
+- Push scoped conventional commits to `origin/feat/agv2-031-beta1-release-hardening`. Open or update one draft/feature PR `feat/agv2-031-beta1-release-hardening -> main`, with scope, risk, proof, missing operator actions, final exact SHA and all run IDs. Never merge it automatically.
+- Keep `.aethergate-wip` until all completion conditions are satisfied, the handoff is pushed and remote PR head/CI are verified; leave it in place on a block.
+- At final handoff, state **ready for independent review** rather than claiming Beta 1 publicly shipped. After reviewer-approved merge and four successful post-merge main workflows, the operator decides GO/NO-GO for Beta 1.
+
+## 9. Operator phone alert — REQUIRED after completion
+
+**Operator request:** When AGV2-031 work is fully complete and PR #5 is
+**ready for independent review**, send an urgent notification to the operator's
+phone through the specified ntfy topic. The recipient and message transport
+have been explicitly authorized for this milestone. This alert is not a Beta
+release announcement or an authorization to merge or publish.
+
+Do **not** send on initial assignment preparation, partial implementation,
+a blocked milestone, first green CI alone, or a merely opened draft PR.
+
+**Trigger (all conditions must be met):** the required baseline and exact-final
+task-branch CI gates are verified green, deterministic and live operational
+acceptance criteria are complete, the final handoff is committed and pushed,
+PR #5 contains the final SHA/evidence and is ready for independent review,
+and the local `.aethergate-wip` lifecycle conditions have been satisfied.
+The PR remains **unmerged**. Send only once after final evidence has been
+published (a later commit changes the exact final SHA and requires re-verification).
+
+Run from the repository root, with `HEAD` equal to the verified final PR head:
+
+```bash
+curl \
+  -H "Title: Priority alert" \
+  -H "Priority: urgent" \
+  -H "Tags: rotating_light" \
+  -d "AetherGate AGV2-031 is complete and ready for independent review. PR #5: https://github.com/draeician/aethergate/pull/5 . Final commit: $(git rev-parse HEAD)" \
+  https://ntfy.sh/draeician_alerts
+```
+
+Preserve the specified Title/Priority/Tags headers and ntfy endpoint. The
+`-d` message replaces the operator's `Hi` and identifies the milestone,
+review PR and exact commit. Ensure it contains no credentials, keys, tokens,
+prompts, confidential diagnostics or other sensitive values. Check that the
+ntfy endpoint returned a successful HTTP 2xx response/accepted message. If
+delivery is not confirmed, report that clearly in the final handoff rather
+than claiming the phone alert was delivered; avoid duplicate deliveries after
+an acknowledged success. Record the notification outcome in a PR comment
+(without changing the reviewed commit SHA) and in the final agent response.
+
+## Assignment disposition
+This branch and task are **prepared**. The next actor is OpenCode on nomnom, with ChatGPT as independent architect/reviewer. Do not begin release implementation unless section 0 post-merge CI is positively verified and captured.
