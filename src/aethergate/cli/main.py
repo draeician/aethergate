@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import click
@@ -483,6 +484,11 @@ def credentials_show(ctx: click.Context, credential_id: str, as_json: bool) -> N
 @click.option(
     "--audience", type=click.Choice(["inference", "admin"]), default="inference"
 )
+@click.option(
+    "--key-file", required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Save the one-time raw key to a new mode-0600 file (never stdout).",
+)
 @_json_opt
 @click.pass_context
 def credentials_create(
@@ -491,9 +497,14 @@ def credentials_create(
     principal_id: str,
     name: str,
     audience: str,
+    key_file: Path,
     as_json: bool,
 ) -> None:
-    """Create a scoped credential. The raw key is revealed exactly once."""
+    """Create a scoped credential; save its one-time raw key without printing."""
+    if key_file.exists():
+        raise UsageError("key file already exists; refusing to overwrite")
+    if not key_file.parent.is_dir():
+        raise UsageError("key file parent directory does not exist")
     with _client_ctx(ctx) as (_profile, client):
         data = client.post(
             "/admin/v1/credentials",
@@ -504,7 +515,19 @@ def credentials_create(
                 "audience": audience,
             },
         )
-    _emit_data(as_json, data)
+    try:
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data["raw_key"] + "\n")
+    except OSError as exc:
+        credential_id = data["credential"]["id"]
+        raise UsageError(
+            f"credential {credential_id} was issued but the key could not be saved; "
+            "revoke it through the admin API before retrying"
+        ) from exc
+    _emit_data(
+        as_json, {"credential": data["credential"], "key_file": str(key_file)}
+    )
 
 
 # --- role assignments -------------------------------------------------------

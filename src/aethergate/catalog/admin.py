@@ -926,7 +926,8 @@ async def update_route_binding(
             raise CatalogParentMismatchError(
                 "route quota group must belong to the route's provider account"
             )
-    if thinking_policy is not None:
+    # Revalidate effective route policy whenever either the model or policy changes.
+    if thinking_policy is not None or upstream_model is not None or clear_upstream_model:
         effective_upstream = (
             None
             if clear_upstream_model
@@ -936,7 +937,7 @@ async def update_route_binding(
             session,
             provider_account_id=existing.provider_account_id,
             upstream_model=effective_upstream,
-            thinking_policy=thinking_policy,
+            thinking_policy=thinking_policy or existing.thinking_policy,
         )
     updated = await repository.update_route_binding(
         session,

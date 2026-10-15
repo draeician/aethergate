@@ -924,6 +924,36 @@ async def test_route_thinking_level_allowed_for_level_capable_upstream(catalog_h
     assert resp.json()["thinking_policy"] == "medium"
 
 
+async def test_route_thinking_level_rechecked_on_model_change(catalog_http):
+    client, _ = catalog_http
+    sa_hdr = {"Authorization": f"Bearer {await _http_bootstrap(client)}"}
+    _, account, endpoint, alias = await _ollama_route_seed(
+        client, sa_hdr, upstream_model="gpt-oss:20b"
+    )
+    created = await client.post(
+        "/admin/v1/route-bindings",
+        json={
+            "model_alias_id": alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": "gpt-oss:20b",
+            "thinking_policy": "high",
+        },
+        headers=sa_hdr,
+    )
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+    response = await client.patch(
+        f"/admin/v1/route-bindings/{binding_id}",
+        json={"upstream_model": "qwen3.8-2b-distill:Q6_K"},
+        headers=sa_hdr,
+    )
+    assert response.status_code == 400, response.text
+    read = await client.get(f"/admin/v1/route-bindings/{binding_id}", headers=sa_hdr)
+    assert read.json()["upstream_model"] == "gpt-oss:20b"
+    assert read.json()["thinking_policy"] == "high"
+
+
 async def test_concurrent_route_activation_single_winner(
     catalog_engine, catalog_factory, monkeypatch
 ):

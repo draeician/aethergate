@@ -33,6 +33,37 @@ from aethergate.cli.errors import (
 from aethergate.cli.main import cli
 from aethergate.cli.tokenstore import KeyringTokenStore, MemoryTokenStore
 
+def test_credentials_create_writes_private_file_not_stdout(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from stat import S_IMODE
+
+    class FakeClient:
+        def post(self, path, body):
+            assert path == "/admin/v1/credentials"
+            assert body["audience"] == "inference"
+            return {"credential": {"id": "c1"}, "raw_key": "agk_test_secret"}
+
+    @contextmanager
+    def fake_ctx(_ctx):
+        yield None, FakeClient()
+
+    monkeypatch.setattr(main_module, "_client_ctx", fake_ctx)
+    path = tmp_path / "agent.key"
+    args = [
+        "credentials", "create", "--project", "p1", "--principal", "a1",
+        "--name", "agent", "--key-file", str(path), "--json",
+    ]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert path.read_text() == "agk_test_secret\n"
+    assert S_IMODE(path.stat().st_mode) == 0o600
+    assert "agk_test_secret" not in result.output
+    assert json.loads(result.output)["credential"]["id"] == "c1"
+    again = CliRunner().invoke(cli, args)
+    assert again.exit_code != 0
+    assert path.read_text() == "agk_test_secret\n"
+
+
 # --- profiles ---------------------------------------------------------------
 
 

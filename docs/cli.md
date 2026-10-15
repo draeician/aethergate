@@ -159,7 +159,7 @@ Core: `profile`, `auth login`/`logout`/`whoami`/`set-token`/`clear-token`, `comp
 
 - Projects: `projects list/show/create/update`.
 - Principals: `principals list/show/create`.
-- Credentials (metadata only): `credentials list/show`.
+- Credentials: `credentials list/show`, `credentials create --project ID --principal ID --name NAME --key-file PATH`. The raw key is saved once to a new mode-0600 file, never stdout.
 - Role assignments: `role-assignments list/show`.
 - Catalog: `providers list/show`, `create-provider`, `provider-accounts list/show`,
   `endpoints list/show`, `model-aliases list/show`, `route-bindings list/show`,
@@ -172,10 +172,9 @@ There is **no** generic "POST arbitrary JSON to an arbitrary path" escape hatch.
 (`pause`/`drain`/`resume`/`cancel`/`reconcile`) call the typed server endpoints and are subject to
 the same server-side RBAC; the CLI never bypasses server checks.
 
-**Direction (follow-up CLI coverage task):** create/update for endpoints, model aliases, and route
-bindings are not yet exposed as CLI write commands (only `providers` has `create-provider`). The
-backend CRUD surface exists; the CLI write expansion is intentionally deferred rather than exposed
-through an unsafe passthrough.
+Typed catalog write commands now cover `create-provider-account`, `create-endpoint`,
+`create-model-alias`, `create-route-binding`, and `update-route-binding`. No arbitrary-path
+mutation is exposed.
 
 ## Shell completion
 

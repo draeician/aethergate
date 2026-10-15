@@ -114,10 +114,27 @@ EOF
 
     local dns
     if dns="$(tailnet_dns)" && [[ -n "$dns" ]]; then
-        if tailscale serve --bg --https=443 "http://127.0.0.1:$api" 2>/dev/null; then
+        # Never replace an unrelated HTTPS/443 Serve handler.
+        local current
+        current="$(tailscale serve status --json 2>/dev/null || true)"
+        if [[ -n "$current" ]] && ! printf '%s' "$current" | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)
+    occupied = "443" in cfg.get("TCP", {})
+    handlers = [
+        v.get("Handlers", {}).get("/", {}) for v in cfg.get("Web", {}).values()
+    ]
+    ours = any(h.get("Proxy") == sys.argv[1] for h in handlers)
+    sys.exit(0 if not occupied or ours else 1)
+except (ValueError, TypeError, AttributeError):
+    sys.exit(1)
+' "http://127.0.0.1:$api"; then
+            info "HTTPS/443 already serves another app; preserving its configuration."
+        elif tailscale serve --bg --https=443 "http://127.0.0.1:$api" 2>/dev/null; then
             info "Tailscale Serve: https://$dns/v1"
         else
-            info "Tailscale Serve not enabled on the tailnet; enable it at"
+            info "Tailscale Serve unavailable; enable it at"
             info "  https://login.tailscale.com/f/serve and re-run 'install'."
         fi
     fi
@@ -148,9 +165,28 @@ remove_access() {
     rm -f "$UNIT_PATH"
     systemctl --user daemon-reload
     if command -v tailscale >/dev/null 2>&1; then
-        tailscale serve reset 2>/dev/null || true
+        # Only remove the root Serve handler when it still targets AetherGate.
+        # Never call 'tailscale serve reset' (it deletes unrelated handlers).
+        local api current
+        api="$(api_port || true)"
+        current="$(tailscale serve status --json 2>/dev/null || true)"
+        if [[ -n "$api" && -n "$current" ]] &&
+            printf '%s' "$current" | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)
+    handlers = [
+        v.get("Handlers", {}).get("/", {}) for v in cfg.get("Web", {}).values()
+    ]
+    sys.exit(0 if any(h.get("Proxy") == sys.argv[1] for h in handlers) else 1)
+except (ValueError, TypeError, AttributeError):
+    sys.exit(1)
+' "http://127.0.0.1:$api"; then
+            tailscale serve --https=443 --set-path=/ off 2>/dev/null ||
+                info "could not remove the AetherGate root Serve handler"
+        fi
     fi
-    info "removed LAN listener and Tailscale Serve config"
+    info "removed LAN listener; unrelated Tailscale Serve configuration preserved"
 }
 
 case "${1:-}" in
