@@ -52,7 +52,7 @@ from aethergate.contracts.responses import (
     ResponseUsage,
 )
 from aethergate.errors import ProviderError, QueueTimeout
-from aethergate.scheduler.service import SchedulingService, TerminalResult
+from aethergate.scheduler.service import SchedulingService
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,7 @@ async def _stream_response_events(
     usage: Usage | None = None
     poll = service.poll_interval
     cursor = 0
+    disconnected = False
 
     try:
         in_progress = _response_object(
@@ -181,6 +182,7 @@ async def _stream_response_events(
 
         while True:
             if await request.is_disconnected():
+                disconnected = True
                 break
             events = await service.stream_events_after(request_id, cursor)
             for event in events:
@@ -254,8 +256,18 @@ async def _stream_response_events(
             yield _sse(
                 ResponseFailedEvent(sequence_number=next_seq(), response=failed)
             )
+    except (asyncio.CancelledError, GeneratorExit):
+        # The response cycle was cancelled (client disconnect or server shutdown)
+        # or the stream was closed early. Ensure the durable request cannot later
+        # dispatch. A transient server-side error is not a client disconnect and
+        # must not cancel durably admitted work, so it is not caught here.
+        _schedule_durable_cancel(service, request_id)
+        raise
     finally:
-        if final_state is None:
+        if final_state is None and disconnected:
+            # The stream ended because the client disconnected (detected directly)
+            # without reaching a terminal state. Ensure the durable request cannot
+            # later dispatch.
             _schedule_durable_cancel(service, request_id)
 
 
@@ -298,14 +310,17 @@ async def create_response(
             },
         )
 
-    result: TerminalResult | None = None
     try:
         result = await service.wait_for_terminal(enqueued.request_id, enqueued.expires_at)
-    finally:
-        if result is None:
-            _schedule_durable_cancel(service, enqueued.request_id)
-
-    assert result is not None
+    except asyncio.CancelledError:
+        # The response cycle was cancelled (client disconnect or server shutdown)
+        # before a terminal result. A detached task survives the cancellation and
+        # durably cancels the admitted request so it can never dispatch after the
+        # client has given up. A transient server-side error (for example
+        # PostgreSQL raising ``OperationalError``) is NOT a client disconnect and
+        # must not destroy durably admitted work, so it is not caught here.
+        _schedule_durable_cancel(service, enqueued.request_id)
+        raise
 
     if result.state == "succeeded":
         if result.upstream_request_id:

@@ -13,13 +13,16 @@ Provider failure injection uses a deterministic adapter that raises a
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from starlette.responses import Response
 
 from aethergate.adapters.base import (
     ChatRequest,
@@ -28,7 +31,9 @@ from aethergate.adapters.base import (
     Message,
     Usage,
 )
+from aethergate.api.openai_chat import _stream_worker_events, chat_completions
 from aethergate.config import Settings
+from aethergate.contracts.openai import ChatCompletionRequest, ChatMessage
 from aethergate.dev_identity import ensure_dev_identity
 from aethergate.domain import entities as domain
 from aethergate.domain.enums import (
@@ -529,3 +534,164 @@ async def test_database_outage_during_dispatch_no_double_settlement(sched_engine
             )
         ).scalars().all()
         assert len(ledger) == 0
+
+
+# 6. an API-side PostgreSQL error must not cancel durably admitted work
+#
+# A transient server-side failure (the database becoming unreachable and raising
+# ``OperationalError`` from the terminal waiter) is NOT a client disconnect. The
+# endpoint must surface the error (a real 5xx) while leaving the admitted request
+# QUEUED and claimable so a worker can drain it after recovery. Only a genuine
+# response-cycle cancellation (client disconnect) may durably cancel queued work.
+
+
+class _WaiterService(SchedulingService):
+    """A real scheduler whose terminal wait/stream readers raise configured errors.
+
+    ``waiter_exception`` reproduces the API observing an unreachable PostgreSQL
+    (``OperationalError``) versus a client disconnect (``asyncio.CancelledError``).
+    ``stream_exception`` does the same for the SSE event reader.
+    """
+
+    def __init__(
+        self,
+        *,
+        waiter_exception: BaseException | None = None,
+        stream_exception: BaseException | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._waiter_exception = waiter_exception
+        self._stream_exception = stream_exception
+
+    async def wait_for_terminal(self, request_id: str, deadline):
+        raise self._waiter_exception
+
+    async def wait_for_terminal_embedding(self, request_id: str, deadline):
+        raise self._waiter_exception
+
+    async def stream_events_after(self, request_id: str, after_seq: int):
+        raise self._stream_exception
+
+
+class _FakeRequest:
+    """Minimal request stand-in for the endpoint helpers (no ASGI stack)."""
+
+    def __init__(self, *, disconnected: bool = False) -> None:
+        self.state = SimpleNamespace()
+        self._disconnected = disconnected
+
+    async def is_disconnected(self) -> bool:
+        return self._disconnected
+
+
+def _chat_body() -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="gpt-4", messages=[ChatMessage(role="user", content="hi")]
+    )
+
+
+def _db_down() -> OperationalError:
+    return OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+
+async def _request_rows(factory) -> list:
+    async with factory() as session:
+        return (await session.execute(select(models.InferenceRequest))).scalars().all()
+
+
+async def test_api_db_error_waiter_preserves_queued_work(sched_engine, monkeypatch):
+    """Red before the fix: a transient DB error destroyed admitted queued work.
+
+    The endpoint's ``finally`` cancelled the request whenever its terminal waiter
+    raised, so a PostgreSQL ``OperationalError`` (not a client disconnect)
+    cancelled the QUEUED request and lost admitted work. After the fix the error
+    still propagates (the API returns a real 5xx) but the request stays QUEUED.
+    """
+    service, factory, encryptor = await _build_service(sched_engine, adapter=_OkAdapter())
+    async with factory() as session:
+        context = await ensure_dev_identity(session)
+    monkeypatch.setattr("aethergate.api.deps.get_settings", lambda: service._settings)
+
+    failing = _WaiterService(
+        encryptor=encryptor,
+        inference_service=service._inference,
+        session_factory=factory,
+        settings=service._settings,
+        waiter_exception=_db_down(),
+    )
+
+    with pytest.raises(OperationalError):
+        await chat_completions(_chat_body(), _FakeRequest(), Response(), context, failing)
+
+    # Let any (incorrect) detached cancellation task run before asserting.
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    rows = await _request_rows(factory)
+    assert len(rows) == 1
+    assert rows[0].state == RequestState.QUEUED
+
+    # The preserved work remains claimable and drains exactly once.
+    claim = await service.claim_and_reserve("w1")
+    assert not isinstance(claim, str) and claim is not None
+    assert claim.request_id == rows[0].id
+    await service.run_complete(claim)
+    rows = await _request_rows(factory)
+    assert rows[0].state == RequestState.SUCCEEDED
+
+
+async def test_api_client_disconnect_still_cancels_queued_work(sched_engine, monkeypatch):
+    """A genuine client disconnect must still durably cancel pre-dispatch work."""
+    service, factory, encryptor = await _build_service(sched_engine, adapter=_OkAdapter())
+    async with factory() as session:
+        context = await ensure_dev_identity(session)
+    monkeypatch.setattr("aethergate.api.deps.get_settings", lambda: service._settings)
+
+    disconnecting = _WaiterService(
+        encryptor=encryptor,
+        inference_service=service._inference,
+        session_factory=factory,
+        settings=service._settings,
+        waiter_exception=asyncio.CancelledError(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await chat_completions(_chat_body(), _FakeRequest(), Response(), context, disconnecting)
+
+    # The detached cancellation task runs on the loop; allow it to commit.
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+
+    rows = await _request_rows(factory)
+    assert rows[0].state == RequestState.CANCELLED
+    assert await service.claim_and_reserve("w1") is None
+
+
+async def test_api_stream_db_error_preserves_queued_work(sched_engine):
+    """A DB error while streaming must not cancel admitted queued work."""
+    service, factory, _encryptor = await _build_service(sched_engine, adapter=_OkAdapter())
+    async with factory() as session:
+        context = await ensure_dev_identity(session)
+
+    failing = _WaiterService(
+        encryptor=service._encryptor,
+        inference_service=service._inference,
+        session_factory=factory,
+        settings=service._settings,
+        stream_exception=_db_down(),
+    )
+    ids = await _enqueue(failing, context, 1)
+
+    with pytest.raises(OperationalError):
+        async for _ in _stream_worker_events(
+            failing, ids[0], "gid", "gpt-4", _FakeRequest()
+        ):
+            pass
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    rows = await _request_rows(factory)
+    assert rows[0].state == RequestState.QUEUED
+    assert await service.claim_and_reserve("w1") is not None

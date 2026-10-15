@@ -32,7 +32,7 @@ from aethergate.contracts.embeddings import (
     encode_base64_float32,
 )
 from aethergate.errors import ProviderError, QueueTimeout
-from aethergate.scheduler.service import EmbeddingTerminalResult, SchedulingService
+from aethergate.scheduler.service import SchedulingService
 
 logger = logging.getLogger(__name__)
 
@@ -96,16 +96,20 @@ async def embeddings(
         context=context,
     )
 
-    result: EmbeddingTerminalResult | None = None
     try:
         result = await service.wait_for_terminal_embedding(
             enqueued.request_id, enqueued.expires_at
         )
-    finally:
-        if result is None:
-            _schedule_durable_cancel(service, enqueued.request_id)
+    except asyncio.CancelledError:
+        # The response cycle was cancelled (client disconnect or server shutdown)
+        # before a terminal result. A detached task survives the cancellation and
+        # durably cancels the admitted request so it can never dispatch after the
+        # client has given up. A transient server-side error (for example
+        # PostgreSQL raising ``OperationalError``) is NOT a client disconnect and
+        # must not destroy durably admitted work, so it is not caught here.
+        _schedule_durable_cancel(service, enqueued.request_id)
+        raise
 
-    assert result is not None
     if (
         result.state == "succeeded"
         and result.vectors is not None
