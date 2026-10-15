@@ -1,4 +1,81 @@
-# AGV2-031 corrective closure — complete (2026-10-13 UTC)
+# AGV2-031 DB outage gate correction — complete (2026-10-13 UTC)
+
+The additional independent-review finding (PR #5, 2026-10-13T13:30Z) is
+**resolved** on the corrected substantive head
+`d979d7e8b1662792145135e6f1fa4b7b5022a33d`. PR #5 remains open/draft/**unmerged**.
+No release/tag/publication; no duplicate ntfy alert.
+
+## Finding: vacuous DB outage proof
+
+The old `scripts/ci/beta_release_gate.sh` outage step POSTed with
+`Authorization: Bearer outage-probe` (not a real issued credential) and accepted
+`401`/`500`/`503`/connection failure as "denied". An invalid key can be rejected
+even with a healthy database, so it did not prove that a **valid** request fails
+closed *because PostgreSQL is unavailable*, and it arranged no preexisting
+queued/in-flight work.
+
+## Correction
+
+`scripts/ci/beta_release_gate.sh` now:
+- reads the real persisted `AETHERGATE_BETA_INFERENCE_KEY` /
+  `AETHERGATE_BETA_ADMIN_KEY` from the mode-0600 `$WORKDIR/beta_secrets.env`
+  (value never printed or logged);
+- proves a valid request returns `200` **before** the outage;
+- stops the worker, durably enqueues one request (barrier: `queued_total == 1`),
+  then stops PostgreSQL and asserts readiness `503` and the valid request fails
+  closed with a `5xx` (explicitly rejecting vacuous `200`/`201`/`401`/`403`/`000`);
+- restores PostgreSQL and asserts the queued request persisted with **no** new
+  usage/ledger/attempt records from the denied request;
+- restarts the worker and asserts the queued request drains **exactly once**
+  (usage/ledger/attempts each `+1`, zero `outcome_unknown`), then a post-outage
+  valid request returns `200`.
+
+New helper `scripts/ci/beta_db_outage.py` performs the staged snapshots and
+assertions over the admin API (`queue/requests`, `queue/summary`,
+`usage-records`, `ledger-entries`, `observability/summary`).
+
+Focused regression: `test_database_outage_during_dispatch_no_double_settlement`
+in `tests/test_recovery.py` — an in-flight request lost to a DB outage recovers
+as `OUTCOME_UNKNOWN` with exactly one execution attempt, zero usage records and
+zero ledger entries (never re-dispatched or billed twice).
+
+## Verification
+
+- Local operational acceptance: `scripts/ci/beta_release_gate.sh` end-to-end
+  `EXIT=0`; the outage section observed pre-outage `200`, queued barrier
+  `queued_total=1`, readiness `503`, denied request `500`, persisted
+  `queued_total=1` with no denied-request records, drained `+1` usage/ledger/
+  attempt, post-outage `200`.
+- backend suite: **862 collected / exit 0** via canonical `scripts/dev/v2 test`;
+  `ruff check src tests` clean; `git diff --check` clean; secret scan clean.
+
+## Final remote CI (corrected substantive head `d979d7e8b1662792145135e6f1fa4b7b5022a33d`)
+
+All five workflows `completed/success` on the exact head (pull_request events for PR #5):
+- backend — `38413350247`
+- frontend — `38413351513`
+- schema-secret-gate — `38413350479`
+- alpha-golden-path — `38413350025`
+- beta-release-gate — `38413350285`
+
+The final documentation-only tip (this handoff commit) is re-verified green on all
+five workflows; its exact SHA and run IDs are recorded in PR #5's description.
+
+## Corrective commit
+
+- `d979d7e` fix(release): prove DB outage fails closed with a real credential
+
+## Operator actions (unchanged release NO-GO)
+
+- `main` branch protection / independent CODEOWNERS review enforcement remains
+  NO-GO until the operator configures and verifies a protected branch + required
+  independent reviews.
+- The original ntfy alert was delivered prematurely and is **not resent**; no
+  duplicate alert for AGV2-031.
+
+---
+
+# AGV2-031 four-finding corrective closure (superseded by the DB outage correction above)
 
 The independent-review HOLD below is **resolved**. All four findings are closed
 on the substantive head `cf84cfbbd789071e2b0a5b6001f4efed21f5e270`; PR #5 is
