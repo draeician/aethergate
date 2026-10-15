@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from stat import S_IMODE
 
 import httpx
 import pytest
@@ -33,9 +35,8 @@ from aethergate.cli.errors import (
 from aethergate.cli.main import cli
 from aethergate.cli.tokenstore import KeyringTokenStore, MemoryTokenStore
 
+
 def test_credentials_create_writes_private_file_not_stdout(monkeypatch, tmp_path):
-    from contextlib import contextmanager
-    from stat import S_IMODE
 
     class FakeClient:
         def post(self, path, body):
