@@ -26,7 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aethergate.config import get_settings
 from aethergate.domain import entities as domain
-from aethergate.domain.enums import Capability, CredentialScope, QuotaMetric
+from aethergate.domain.enums import (
+    Capability,
+    CredentialScope,
+    QuotaMetric,
+    ThinkingPolicy,
+)
 from aethergate.domain.ids import (
     AuditEventId,
     EndpointId,
@@ -49,6 +54,7 @@ from aethergate.errors import (
 )
 from aethergate.identity.authorization import RESOURCE_DEPLOYMENT, authorize_admin
 from aethergate.persistence import repository
+from aethergate.thinking import validate_thinking_policy
 
 # Audit action names (stable strings; safe metadata only).
 AUDIT_PROVIDER_CREATED = "provider.created"
@@ -807,6 +813,29 @@ async def get_model_alias(
 # ---------------------------------------------------------------------------
 
 
+async def _validate_route_thinking_policy(
+    session: AsyncSession,
+    *,
+    provider_account_id: ProviderAccountId,
+    upstream_model: str | None,
+    thinking_policy: ThinkingPolicy,
+) -> None:
+    """Reject a thinking policy the route's upstream cannot actually represent.
+
+    ``low``/``medium``/``high`` require an upstream that supports distinct
+    reasoning levels; otherwise only ``inherit``/``off``/``on`` are meaningful.
+    """
+    account = await repository.get_provider_account(session, provider_account_id)
+    if account is None:
+        raise AdminResourceNotFound()
+    provider = await repository.get_provider(session, account.provider_id)
+    if provider is None:
+        raise AdminResourceNotFound()
+    validate_thinking_policy(
+        thinking_policy, provider.kind, upstream_model or ""
+    )
+
+
 async def create_route_binding(
     session: AsyncSession,
     *,
@@ -817,6 +846,7 @@ async def create_route_binding(
     upstream_model: str | None = None,
     quota_group_id: QuotaGroupId | None = None,
     default_output_tokens: int | None = None,
+    thinking_policy: ThinkingPolicy = ThinkingPolicy.INHERIT,
     is_active: bool = True,
 ) -> domain.RouteBinding:
     _authorize_write(context)
@@ -825,7 +855,8 @@ async def create_route_binding(
     endpoint = await repository.get_endpoint(session, endpoint_id)
     if endpoint is None:
         raise AdminResourceNotFound()
-    if await repository.get_provider_account(session, provider_account_id) is None:
+    account = await repository.get_provider_account(session, provider_account_id)
+    if account is None:
         raise AdminResourceNotFound()
     if endpoint.provider_account_id != provider_account_id:
         raise CatalogParentMismatchError(
@@ -839,6 +870,12 @@ async def create_route_binding(
             raise CatalogParentMismatchError(
                 "route quota group must belong to the route's provider account"
             )
+    await _validate_route_thinking_policy(
+        session,
+        provider_account_id=provider_account_id,
+        upstream_model=upstream_model,
+        thinking_policy=thinking_policy,
+    )
     binding = await repository.create_route_binding(
         session,
         domain.RouteBinding(
@@ -849,6 +886,7 @@ async def create_route_binding(
             upstream_model=upstream_model,
             quota_group_id=quota_group_id,
             default_output_tokens=default_output_tokens,
+            thinking_policy=thinking_policy,
             is_active=is_active,
         ),
     )
@@ -873,6 +911,7 @@ async def update_route_binding(
     clear_quota_group_id: bool = False,
     default_output_tokens: int | None = None,
     clear_default_output_tokens: bool = False,
+    thinking_policy: ThinkingPolicy | None = None,
     is_active: bool | None = None,
 ) -> domain.RouteBinding:
     _authorize_write(context)
@@ -887,6 +926,19 @@ async def update_route_binding(
             raise CatalogParentMismatchError(
                 "route quota group must belong to the route's provider account"
             )
+    # Revalidate effective route policy whenever either the model or policy changes.
+    if thinking_policy is not None or upstream_model is not None or clear_upstream_model:
+        effective_upstream = (
+            None
+            if clear_upstream_model
+            else (upstream_model if upstream_model is not None else existing.upstream_model)
+        )
+        await _validate_route_thinking_policy(
+            session,
+            provider_account_id=existing.provider_account_id,
+            upstream_model=effective_upstream,
+            thinking_policy=thinking_policy or existing.thinking_policy,
+        )
     updated = await repository.update_route_binding(
         session,
         binding_id,
@@ -896,6 +948,7 @@ async def update_route_binding(
         clear_quota_group_id=clear_quota_group_id,
         default_output_tokens=default_output_tokens,
         clear_default_output_tokens=clear_default_output_tokens,
+        thinking_policy=thinking_policy,
         is_active=is_active,
     )
     assert updated is not None
@@ -909,6 +962,7 @@ async def update_route_binding(
             and default_output_tokens != existing.default_output_tokens
         )
         or (clear_default_output_tokens and existing.default_output_tokens is not None)
+        or (thinking_policy is not None and thinking_policy != existing.thinking_policy)
         or (is_active is not None and is_active != existing.is_active)
     )
     if changed:

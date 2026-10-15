@@ -25,7 +25,15 @@ async def list_models(
     session: SessionDep,
 ) -> ModelList:
     aliases = await repository.list_active_model_aliases(session)
-    return ModelList(data=[ModelObject(id=alias.name) for alias in aliases])
+    return ModelList(
+        data=[
+            ModelObject(
+                id=alias.name,
+                capabilities=[capability.value for capability in alias.capabilities],
+            )
+            for alias in aliases
+        ]
+    )
 
 
 @router.get("/v1/models/{model}", response_model=ModelObject)
@@ -37,4 +45,7 @@ async def get_model(
     alias = await repository.get_model_alias_by_name(session, model)
     if alias is None or not alias.is_active:
         raise ModelAliasNotFound(model)
-    return ModelObject(id=alias.name)
+    return ModelObject(
+        id=alias.name,
+        capabilities=[capability.value for capability in alias.capabilities],
+    )

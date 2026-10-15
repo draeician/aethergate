@@ -26,6 +26,7 @@ from aethergate.domain.enums import (
     QuotaMetric,
     ResourceScopeType,
     Role,
+    ThinkingPolicy,
 )
 from aethergate.domain.ids import (
     ApiCredentialId,
@@ -840,6 +841,7 @@ def _route_binding_to_domain(row: models.RouteBinding) -> domain.RouteBinding:
         upstream_model=row.upstream_model,
         quota_group_id=QuotaGroupId(row.quota_group_id) if row.quota_group_id else None,
         default_output_tokens=row.default_output_tokens,
+        thinking_policy=ThinkingPolicy(row.thinking_policy),
         is_active=row.is_active,
     )
 
@@ -870,6 +872,7 @@ async def create_route_binding(
         upstream_model=entity.upstream_model,
         quota_group_id=str(entity.quota_group_id) if entity.quota_group_id else None,
         default_output_tokens=entity.default_output_tokens,
+        thinking_policy=entity.thinking_policy.value,
         is_active=entity.is_active,
     )
     session.add(row)
@@ -950,12 +953,15 @@ async def update_route_binding(
     clear_quota_group_id: bool = False,
     default_output_tokens: int | None = None,
     clear_default_output_tokens: bool = False,
+    thinking_policy: ThinkingPolicy | None = None,
     is_active: bool | None = None,
 ) -> domain.RouteBinding | None:
     row = await session.get(models.RouteBinding, str(binding_id))
     if row is None:
         return None
     model_alias_id = row.model_alias_id
+    if thinking_policy is not None:
+        row.thinking_policy = thinking_policy.value
     if upstream_model is not None:
         row.upstream_model = upstream_model
     elif clear_upstream_model:

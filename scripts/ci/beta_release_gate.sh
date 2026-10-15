@@ -10,7 +10,7 @@
 #   3. one-use bootstrap + literal-IP catalog + official SDK Models/Chat/Embeddings
 #      with inference-auth bypass off (scripts/ci/beta_smoke.py --phase main);
 #   4. a worker restart recovers cleanly (readiness + worker healthy);
-#   5. backup -> destructive restore (disposable DB only) -> migration head 0017 ->
+#   5. backup -> destructive restore (disposable DB only) -> migration head 0018 ->
 #      post-restore SDK with the SAME credentials (beta_smoke.py --phase post);
 #   6. safe teardown of only the disposable project.
 #

@@ -196,9 +196,19 @@ async def test_models_list_public_active_aliases(api_client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["object"] == "list"
-    ids = {m["id"] for m in data["data"]}
-    assert "gpt-4" in ids
-    assert "inactive-model" not in ids
+    by_id = {m["id"]: m for m in data["data"]}
+    assert "gpt-4" in by_id
+    assert "inactive-model" not in by_id
+    # Pinned OpenAI model-object fields are present.
+    entry = by_id["gpt-4"]
+    assert entry["object"] == "model"
+    assert isinstance(entry["created"], int)
+    assert entry["owned_by"] == "aethergate"
+    # Additive capability extension, no routing/provider detail leaked.
+    assert entry["capabilities"] == ["text"]
+    blob = resp.text
+    for leak in ("192.168.22.50", "11434", "qwen3.8", "acct-ollama", "ep-ollama"):
+        assert leak not in blob
 
 
 async def test_model_retrieval_and_unknown(api_client):
@@ -206,6 +216,7 @@ async def test_model_retrieval_and_unknown(api_client):
     ok = await client.get("/v1/models/gpt-4")
     assert ok.status_code == 200
     assert ok.json()["id"] == "gpt-4"
+    assert ok.json()["capabilities"] == ["text"]
 
     missing = await client.get("/v1/models/does-not-exist")
     assert missing.status_code == 404

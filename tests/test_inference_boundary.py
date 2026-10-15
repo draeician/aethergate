@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from aethergate.adapters.base import Message
+from aethergate.adapters.base import GenerationParams, Message
 from aethergate.domain.entities import SecretRef
+from aethergate.domain.enums import ThinkingPolicy
 from aethergate.domain.ids import SecretRefId
 from aethergate.egress import DestinationPolicy
 from aethergate.errors import DestinationDenied
@@ -30,12 +31,15 @@ def _ref() -> SecretRef:
     )
 
 
-def _resolved(base_destination: str) -> SimpleNamespace:
+def _resolved(
+    base_destination: str, thinking_policy: ThinkingPolicy = ThinkingPolicy.INHERIT
+) -> SimpleNamespace:
     return SimpleNamespace(
         alias=SimpleNamespace(name="golden-model"),
         endpoint=SimpleNamespace(base_destination=base_destination),
         provider_account=SimpleNamespace(secret_ref_id=SecretRefId("sr-1")),
         provider=SimpleNamespace(kind="ollama"),
+        route_binding=SimpleNamespace(thinking_policy=thinking_policy),
         upstream_model="test-model",
     )
 
@@ -76,6 +80,53 @@ async def test_allowed_destination_resolves_secret_after_validation(monkeypatch)
     )
     assert prepared.secret == "material"
     assert [str(r.id) for r in resolver.calls] == ["sr-1"]
+
+
+async def test_route_policy_overrides_client_reasoning_effort(monkeypatch):
+    """An explicit route policy always wins over a client reasoning effort."""
+    resolver = _RecordingResolver()
+
+    async def _get_secret_ref(session, ref_id):
+        return _ref()
+
+    monkeypatch.setattr(
+        "aethergate.persistence.repository.get_secret_ref", _get_secret_ref
+    )
+    service = InferenceService(resolver, DestinationPolicy({"allowed.example.com"}))
+    resolved = _resolved("http://allowed.example.com", ThinkingPolicy.OFF)
+    prepared = await service.prepare_from_resolved(
+        None,
+        resolved,
+        [Message(role="user", content="hi")],
+        GenerationParams(reasoning_effort="high"),
+    )
+    assert prepared.request.reasoning_effort == "none"
+
+
+async def test_inherit_policy_honors_client_reasoning_effort(monkeypatch):
+    resolver = _RecordingResolver()
+
+    async def _get_secret_ref(session, ref_id):
+        return _ref()
+
+    monkeypatch.setattr(
+        "aethergate.persistence.repository.get_secret_ref", _get_secret_ref
+    )
+    service = InferenceService(resolver, DestinationPolicy({"allowed.example.com"}))
+    resolved = _resolved("http://allowed.example.com", ThinkingPolicy.INHERIT)
+
+    honored = await service.prepare_from_resolved(
+        None,
+        resolved,
+        [Message(role="user", content="hi")],
+        GenerationParams(reasoning_effort="high"),
+    )
+    assert honored.request.reasoning_effort == "high"
+
+    omitted = await service.prepare_from_resolved(
+        None, resolved, [Message(role="user", content="hi")]
+    )
+    assert omitted.request.reasoning_effort is None
 
 
 def test_prod_literal_policy_denies_hostname_route_at_dispatch_time():

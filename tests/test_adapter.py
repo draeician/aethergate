@@ -91,6 +91,28 @@ async def test_adapter_disables_retries_and_fallback(monkeypatch):
     assert captured["stream"] is False
 
 
+async def test_adapter_forwards_resolved_reasoning_effort(monkeypatch):
+    """A resolved thinking directive reaches the pinned transport."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "aethergate.adapters.litellm.litellm.acompletion",
+        _make_capture_acompletion(captured, _fake_response()),
+    )
+    await LiteLLMChatAdapter().complete(_request(reasoning_effort="none"), None)
+    assert captured["reasoning_effort"] == "none"
+
+
+async def test_adapter_omits_reasoning_effort_when_unresolved(monkeypatch):
+    """No resolved directive -> the parameter is not sent (provider default)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "aethergate.adapters.litellm.litellm.acompletion",
+        _make_capture_acompletion(captured, _fake_response()),
+    )
+    await LiteLLMChatAdapter().complete(_request(), None)
+    assert "reasoning_effort" not in captured
+
+
 def test_adapter_rejects_unknown_provider_kind():
     with pytest.raises(UnsupportedProvider):
         LiteLLMChatAdapter()._litellm_model(_request(provider_kind="unknown"))

@@ -30,6 +30,7 @@ from aethergate.egress import DestinationPolicy
 from aethergate.errors import SecretResolutionError
 from aethergate.persistence import repository
 from aethergate.secrets import SecretResolver
+from aethergate.thinking import effective_reasoning_effort
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from aethergate.adapters.base import ChatAdapter
@@ -89,13 +90,18 @@ class InferenceService:
         messages: list[Message],
         params: GenerationParams | None,
     ) -> ChatRequest:
+        effective_params = params or GenerationParams()
         return ChatRequest(
             provider_kind=resolved.provider.kind,
             base_destination=resolved.endpoint.base_destination,
             upstream_model=resolved.upstream_model,
             messages=tuple(messages),
-            params=params or GenerationParams(),
+            params=effective_params,
             timeout_seconds=self._timeout,
+            reasoning_effort=effective_reasoning_effort(
+                resolved.route_binding.thinking_policy,
+                effective_params.reasoning_effort,
+            ),
         )
 
     def _build_embedding_request(

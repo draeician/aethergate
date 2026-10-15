@@ -1555,6 +1555,8 @@ export interface components {
             project?: unknown;
             /** Provider */
             provider?: unknown;
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high") | null;
             /** Seed */
             seed?: number | null;
             /** Stop */
@@ -1968,8 +1970,20 @@ export interface components {
              */
             object: "list";
         };
-        /** ModelObject */
+        /**
+         * ModelObject
+         * @description An OpenAI-compatible model object.
+         *
+         *     ``id``/``object``/``created``/``owned_by`` are the pinned OpenAI fields.
+         *     ``capabilities`` is an additive AetherGate extension describing the public
+         *     capability classes a client may use with the alias (for example ``text``,
+         *     ``image``, ``embedding``); it never exposes provider, endpoint, account, or
+         *     routing details. Standard OpenAI SDK clients ignore unknown object fields,
+         *     so the extension is backward-compatible.
+         */
         ModelObject: {
+            /** Capabilities */
+            capabilities?: string[];
             /** Created */
             created?: number;
             /** Id */
@@ -3104,6 +3118,8 @@ export interface components {
             provider_account_id: string;
             /** Quota Group Id */
             quota_group_id?: string | null;
+            /** @default inherit */
+            thinking_policy: components["schemas"]["ThinkingPolicy"];
             /** Upstream Model */
             upstream_model?: string | null;
         };
@@ -3123,6 +3139,7 @@ export interface components {
             provider_account_id: string;
             /** Quota Group Id */
             quota_group_id?: string | null;
+            thinking_policy: components["schemas"]["ThinkingPolicy"];
             /** Upstream Model */
             upstream_model?: string | null;
         };
@@ -3134,6 +3151,7 @@ export interface components {
             is_active?: boolean | null;
             /** Quota Group Id */
             quota_group_id?: string | null;
+            thinking_policy?: components["schemas"]["ThinkingPolicy"] | null;
             /** Upstream Model */
             upstream_model?: string | null;
         };
@@ -3181,6 +3199,20 @@ export interface components {
              */
             include_usage: boolean;
         };
+        /**
+         * ThinkingPolicy
+         * @description Administrative per-route reasoning ("thinking") policy.
+         *
+         *     ``inherit`` sends no explicit thinking directive (the upstream default,
+         *     formerly the only behavior). ``off`` disables upstream reasoning; ``on``
+         *     enables it at a default level. ``low``/``medium``/``high`` request a specific
+         *     reasoning level and are only accepted when the route's upstream can represent
+         *     a distinct level (see :mod:`aethergate.thinking`). The policy is
+         *     administrator-controlled route configuration and is never settable by an
+         *     inference client.
+         * @enum {string}
+         */
+        ThinkingPolicy: "inherit" | "off" | "on" | "low" | "medium" | "high";
         /**
          * UpstreamHealthRead
          * @description Passive, factual per-endpoint upstream health (deployment-scoped).

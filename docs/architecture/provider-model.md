@@ -76,6 +76,29 @@ the invariants above at configuration time rather than only at dispatch:
 - Quota limit edits take effect on future admission without rewriting historical reservation/window
   rows.
 
+## Per-route thinking policy (AGV2-032)
+
+A `RouteBinding` carries an administrative `thinking_policy`
+(`inherit`/`off`/`on`/`low`/`medium`/`high`; migration `0018`, default
+`inherit`), resolved at dispatch time by `aethergate.thinking` into the upstream
+`reasoning_effort`:
+
+- `inherit` sends no directive unless the client supplied `reasoning_effort`,
+  which is then honored (via the OpenAI-compatible chat request parameter);
+- `off` always disables upstream reasoning; `on` enables it at a default level;
+- `low`/`medium`/`high` request a specific level and are accepted only when the
+  route's upstream can genuinely represent a distinct level (the pinned LiteLLM
+  Ollama transport forwards a level only for `gpt-oss` models; other Ollama
+  models collapse any level to a boolean). An unsupported level is rejected at
+  configuration time.
+
+Precedence is settled: an explicit administrative policy always overrides any
+client-supplied `reasoning_effort`, so a client can never override administrative
+routing. Completions are not post-processed to strip reasoning delimiters; the
+upstream is asked not to produce them, and LiteLLM's own transport mapping is
+what reaches Ollama's `think` field. The policy is route configuration, never
+client-settable.
+
 ## Direct dispatch (current milestone)
 
 The first inference path directly dispatches a single resolved route to the provider adapter

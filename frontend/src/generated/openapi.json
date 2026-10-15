@@ -641,6 +641,24 @@
           "provider": {
             "title": "Provider"
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
           "seed": {
             "anyOf": [
               {
@@ -1695,7 +1713,15 @@
       },
       "ModelObject": {
         "additionalProperties": false,
+        "description": "An OpenAI-compatible model object.\n\n``id``/``object``/``created``/``owned_by`` are the pinned OpenAI fields.\n``capabilities`` is an additive AetherGate extension describing the public\ncapability classes a client may use with the alias (for example ``text``,\n``image``, ``embedding``); it never exposes provider, endpoint, account, or\nrouting details. Standard OpenAI SDK clients ignore unknown object fields,\nso the extension is backward-compatible.",
         "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
           "created": {
             "title": "Created",
             "type": "integer"
@@ -4914,6 +4940,10 @@
             ],
             "title": "Quota Group Id"
           },
+          "thinking_policy": {
+            "$ref": "#/components/schemas/ThinkingPolicy",
+            "default": "inherit"
+          },
           "upstream_model": {
             "anyOf": [
               {
@@ -4980,6 +5010,9 @@
             ],
             "title": "Quota Group Id"
           },
+          "thinking_policy": {
+            "$ref": "#/components/schemas/ThinkingPolicy"
+          },
           "upstream_model": {
             "anyOf": [
               {
@@ -4997,6 +5030,7 @@
           "model_alias_id",
           "endpoint_id",
           "provider_account_id",
+          "thinking_policy",
           "is_active"
         ],
         "title": "RouteBindingRead",
@@ -5038,6 +5072,16 @@
               }
             ],
             "title": "Quota Group Id"
+          },
+          "thinking_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ThinkingPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "upstream_model": {
             "anyOf": [
@@ -5164,6 +5208,19 @@
         },
         "title": "StreamOptions",
         "type": "object"
+      },
+      "ThinkingPolicy": {
+        "description": "Administrative per-route reasoning (\"thinking\") policy.\n\n``inherit`` sends no explicit thinking directive (the upstream default,\nformerly the only behavior). ``off`` disables upstream reasoning; ``on``\nenables it at a default level. ``low``/``medium``/``high`` request a specific\nreasoning level and are only accepted when the route's upstream can represent\na distinct level (see :mod:`aethergate.thinking`). The policy is\nadministrator-controlled route configuration and is never settable by an\ninference client.",
+        "enum": [
+          "inherit",
+          "off",
+          "on",
+          "low",
+          "medium",
+          "high"
+        ],
+        "title": "ThinkingPolicy",
+        "type": "string"
       },
       "UpstreamHealthRead": {
         "additionalProperties": false,

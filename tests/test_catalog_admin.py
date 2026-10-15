@@ -816,6 +816,144 @@ async def test_route_omitted_vs_null_patch(catalog_http):
     assert resp.json()["default_output_tokens"] is None
 
 
+async def _ollama_route_seed(client, sa_hdr, *, upstream_model, alias_name="local-model"):
+    provider = await _http_create_provider(
+        client, sa_hdr, name=f"ollama-{uuid.uuid4().hex[:8]}", kind="ollama"
+    )
+    account = await _http_create_account(client, sa_hdr, provider["id"])
+    endpoint = await _http_create_endpoint(client, sa_hdr, account["id"])
+    alias = await _http_create_alias(client, sa_hdr, name=alias_name)
+    return provider, account, endpoint, alias
+
+
+async def test_route_thinking_policy_defaults_to_inherit(catalog_http):
+    client, _ = catalog_http
+    sa_hdr = {"Authorization": f"Bearer {await _http_bootstrap(client)}"}
+    _, account, endpoint, alias = await _ollama_route_seed(
+        client, sa_hdr, upstream_model="qwen3.8-2b-distill:Q6_K"
+    )
+    resp = await client.post(
+        "/admin/v1/route-bindings",
+        json={
+            "model_alias_id": alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": "qwen3.8-2b-distill:Q6_K",
+        },
+        headers=sa_hdr,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["thinking_policy"] == "inherit"
+
+    listed = await client.get("/admin/v1/route-bindings", headers=sa_hdr)
+    assert listed.json()["items"][0]["thinking_policy"] == "inherit"
+
+
+async def test_route_thinking_policy_can_be_set_off_and_updated(catalog_http):
+    client, _ = catalog_http
+    sa_hdr = {"Authorization": f"Bearer {await _http_bootstrap(client)}"}
+    _, account, endpoint, alias = await _ollama_route_seed(
+        client, sa_hdr, upstream_model="qwen3.8-2b-distill:Q6_K"
+    )
+    created = await client.post(
+        "/admin/v1/route-bindings",
+        json={
+            "model_alias_id": alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": "qwen3.8-2b-distill:Q6_K",
+            "thinking_policy": "off",
+        },
+        headers=sa_hdr,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["thinking_policy"] == "off"
+    binding_id = created.json()["id"]
+
+    updated = await client.patch(
+        f"/admin/v1/route-bindings/{binding_id}",
+        json={"thinking_policy": "on"},
+        headers=sa_hdr,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["thinking_policy"] == "on"
+
+
+async def test_route_thinking_level_rejected_for_boolean_upstream(catalog_http):
+    client, _ = catalog_http
+    sa_hdr = {"Authorization": f"Bearer {await _http_bootstrap(client)}"}
+    _, account, endpoint, alias = await _ollama_route_seed(
+        client, sa_hdr, upstream_model="qwen3.8-2b-distill:Q6_K"
+    )
+    resp = await client.post(
+        "/admin/v1/route-bindings",
+        json={
+            "model_alias_id": alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": "qwen3.8-2b-distill:Q6_K",
+            "thinking_policy": "high",
+        },
+        headers=sa_hdr,
+    )
+    assert resp.status_code == 400
+    # No invalid row persisted.
+    assert (await client.get("/admin/v1/route-bindings", headers=sa_hdr)).json()[
+        "total"
+    ] == 0
+
+
+async def test_route_thinking_level_allowed_for_level_capable_upstream(catalog_http):
+    client, _ = catalog_http
+    sa_hdr = {"Authorization": f"Bearer {await _http_bootstrap(client)}"}
+    _, account, endpoint, alias = await _ollama_route_seed(
+        client, sa_hdr, upstream_model="gpt-oss:20b"
+    )
+    resp = await client.post(
+        "/admin/v1/route-bindings",
+        json={
+            "model_alias_id": alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": "gpt-oss:20b",
+            "thinking_policy": "medium",
+        },
+        headers=sa_hdr,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["thinking_policy"] == "medium"
+
+
+async def test_route_thinking_level_rechecked_on_model_change(catalog_http):
+    client, _ = catalog_http
+    sa_hdr = {"Authorization": f"Bearer {await _http_bootstrap(client)}"}
+    _, account, endpoint, alias = await _ollama_route_seed(
+        client, sa_hdr, upstream_model="gpt-oss:20b"
+    )
+    created = await client.post(
+        "/admin/v1/route-bindings",
+        json={
+            "model_alias_id": alias["id"],
+            "endpoint_id": endpoint["id"],
+            "provider_account_id": account["id"],
+            "upstream_model": "gpt-oss:20b",
+            "thinking_policy": "high",
+        },
+        headers=sa_hdr,
+    )
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+    response = await client.patch(
+        f"/admin/v1/route-bindings/{binding_id}",
+        json={"upstream_model": "qwen3.8-2b-distill:Q6_K"},
+        headers=sa_hdr,
+    )
+    assert response.status_code == 400, response.text
+    read = await client.get(f"/admin/v1/route-bindings/{binding_id}", headers=sa_hdr)
+    assert read.json()["upstream_model"] == "gpt-oss:20b"
+    assert read.json()["thinking_policy"] == "high"
+
+
 async def test_concurrent_route_activation_single_winner(
     catalog_engine, catalog_factory, monkeypatch
 ):

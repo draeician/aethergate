@@ -56,12 +56,30 @@ def test_beta1_postgres_is_not_host_published():
     assert "ports" not in postgres
 
 
-def test_beta1_api_is_loopback_only_ephemeral():
+def _render_api_port(host_port: str | None) -> str:
+    """Render the api port mapping, substituting the documented host-port var.
+
+    The only interpolated value allowed in the api port mapping is
+    ``AETHERGATE_API_HOST_PORT``; the bind address and container port must stay
+    literal so the profile can never silently widen to a wildcard/LAN bind.
+    """
     ports = _compose()["services"]["api"]["ports"]
-    assert ports
-    for mapping in ports:
+    assert len(ports) == 1
+    mapping = ports[0]
+    assert mapping.replace("${AETHERGATE_API_HOST_PORT:-}", "").count("${") == 0
+    return mapping.replace("${AETHERGATE_API_HOST_PORT:-}", host_port or "")
+
+
+def test_beta1_api_is_loopback_only():
+    # Unset -> Docker-assigned ephemeral loopback port (unchanged default).
+    # Set -> a fixed loopback port so a host-level/Tailscale listener keeps a
+    # stable upstream across container restart.
+    for host_port in (None, "39549"):
+        mapping = _render_api_port(host_port)
+        assert mapping.startswith("127.0.0.1:")
         assert "0.0.0.0" not in mapping
-        assert "127.0.0.1::" in mapping
+        assert mapping.endswith(":8000")
+        assert mapping.split(":")[1] == (host_port or "")
 
 
 def test_beta1_names_do_not_collide_with_dev_or_nomnom():

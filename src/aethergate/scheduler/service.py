@@ -162,6 +162,7 @@ def serialize_chat_payload(messages: list[Message], params: GenerationParams) ->
             "frequency_penalty": params.frequency_penalty,
             "presence_penalty": params.presence_penalty,
             "seed": params.seed,
+            "reasoning_effort": params.reasoning_effort,
         },
     }
     return json.dumps(data).encode("utf-8")
@@ -194,6 +195,7 @@ def deserialize_chat_payload(data: bytes) -> tuple[list[Message], GenerationPara
         frequency_penalty=p.get("frequency_penalty"),
         presence_penalty=p.get("presence_penalty"),
         seed=p.get("seed"),
+        reasoning_effort=p.get("reasoning_effort"),
     )
     return messages, params
 

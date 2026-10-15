@@ -172,7 +172,28 @@ class EndpointOperationalState(StrEnum):
     DRAINING = "draining"
 
 
+class ThinkingPolicy(StrEnum):
+    """Administrative per-route reasoning ("thinking") policy.
+
+    ``inherit`` sends no explicit thinking directive (the upstream default,
+    formerly the only behavior). ``off`` disables upstream reasoning; ``on``
+    enables it at a default level. ``low``/``medium``/``high`` request a specific
+    reasoning level and are only accepted when the route's upstream can represent
+    a distinct level (see :mod:`aethergate.thinking`). The policy is
+    administrator-controlled route configuration and is never settable by an
+    inference client.
+    """
+
+    INHERIT = "inherit"
+    OFF = "off"
+    ON = "on"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 __all__ = [
+    "ThinkingPolicy",
     "Capability",
     "BillingUnit",
     "PrincipalKind",

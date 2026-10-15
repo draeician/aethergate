@@ -17,6 +17,7 @@ const routeBinding = {
   upstream_model: "qwen3.8",
   quota_group_id: null,
   default_output_tokens: null,
+  thinking_policy: "inherit" as const,
 };
 
 const requestPolicy: PricePolicyRead = {

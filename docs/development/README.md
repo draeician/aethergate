@@ -486,6 +486,19 @@ the former "Not yet instrumented" placeholders with these metrics and a
 `0ms`/`100%`). Backend coverage lives in `tests/test_observability.py`; the
 migration is covered by `tests/test_migrations.py::test_migration_0016_to_0017`.
 
+## Per-route thinking policy (AGV2-032)
+
+Route bindings carry an administrative `thinking_policy` (`inherit`/`off`/`on`/
+`low`/`medium`/`high`, migration `0018`). It is resolved at dispatch time into the
+upstream `reasoning_effort`, which the pinned LiteLLM Ollama transport maps onto
+Ollama's `think`. An explicit policy always overrides any client-supplied
+`reasoning_effort` (clients can never change administrative routing);
+`low`/`medium`/`high` are rejected unless the upstream can represent a distinct
+level (Ollama `gpt-oss` models). Configure with `/admin/v1/route-bindings` or the
+CLI (`create-route-binding --thinking-policy`, `update-route-binding`). Coverage:
+`tests/test_thinking.py`, `tests/test_adapter.py`, `tests/test_catalog_admin.py`,
+`tests/test_inference_boundary.py`, `tests/test_openai_api.py`.
+
 ## Dependency locking
 
 The runtime + dev dependency graph is pinned in the committed `constraints.txt`.
@@ -516,8 +529,8 @@ sets it automatically to a throwaway `aethergate_test` database.
 
 Alpha CI (`.github/workflows/`) additionally enforces, offline and deterministic:
 `ruff check src tests`, `git diff --check`, a repository secret/canary scan
-(`scripts/ci/secret_scan.sh`), empty -> head and populated `0016 -> 0017`
-migrations, `python -m aethergate.config_check`, OpenAPI/generated-client drift,
+(`scripts/ci/secret_scan.sh`), empty -> head and populated `0016 -> 0017` /
+`0017 -> 0018` migrations, `python -m aethergate.config_check`, OpenAPI/generated-client drift,
 the frontend suite, and the offline golden path (fake Ollama + DevOidcIdp +
 real API/worker/web + official OpenAI Python SDK + backup/restore). The live
 nomnom acceptance with real Ollama is run separately via

@@ -70,6 +70,7 @@ class GenerationParams:
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
     seed: int | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,9 @@ class ChatRequest:
     messages: tuple[Message, ...]
     params: GenerationParams = field(default_factory=GenerationParams)
     timeout_seconds: float = 120.0
+    # Resolved ``reasoning_effort`` to send upstream (route policy + client
+    # request combined). ``None`` sends no explicit thinking directive.
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)

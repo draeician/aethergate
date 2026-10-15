@@ -159,6 +159,12 @@ class ChatCompletionRequest(ContractModel):
     frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
     presence_penalty: float | None = Field(default=None, ge=-2, le=2)
     seed: int | None = None
+    # Client-requested reasoning effort. Honored only for routes whose
+    # administrative thinking policy is ``inherit``; an explicit route policy
+    # always takes precedence. See ``aethergate.thinking``.
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = (
+        None
+    )
     n: int = 1
 
     # Transport/provider-control fields are declared only so their presence is
@@ -226,10 +232,21 @@ def _now() -> int:
 
 
 class ModelObject(ContractModel):
+    """An OpenAI-compatible model object.
+
+    ``id``/``object``/``created``/``owned_by`` are the pinned OpenAI fields.
+    ``capabilities`` is an additive AetherGate extension describing the public
+    capability classes a client may use with the alias (for example ``text``,
+    ``image``, ``embedding``); it never exposes provider, endpoint, account, or
+    routing details. Standard OpenAI SDK clients ignore unknown object fields,
+    so the extension is backward-compatible.
+    """
+
     id: str
     object: Literal["model"] = "model"
     created: int = Field(default_factory=_now)
     owned_by: str = "aethergate"
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class ModelList(ContractModel):

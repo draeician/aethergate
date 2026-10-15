@@ -588,8 +588,60 @@ def test_populated_0016_to_0017_preserves_rows() -> None:
         assert _exec_sql(
             url, ["SELECT count(*) FROM execution_attempts WHERE id='att1'"]
         ) == [(1,)]
-        # Head is 0017.
-        assert _exec_sql(url, ["SELECT version_num FROM alembic_version"]) == [("0017",)]
+        # Head is 0018.
+        assert _exec_sql(url, ["SELECT version_num FROM alembic_version"]) == [("0018",)]
+        # Pre-existing route binding inherited the default thinking policy.
+        assert _exec_sql(
+            url,
+            ["SELECT thinking_policy FROM route_bindings WHERE id='rb1'"],
+        ) == [("inherit",)]
+    finally:
+        asyncio.run(drop_database(url))
+
+
+def test_migration_0017_to_0018_thinking_policy() -> None:
+    if not TEST_DATABASE_URL:
+        pytest.skip("AETHERGATE_TEST_DATABASE_URL not set")
+    url = url_for_database(TEST_DATABASE_URL, "aethergate_test_mig1718")
+    asyncio.run(drop_database(url))
+    asyncio.run(ensure_database(url))
+
+    env = {**os.environ, "DATABASE_URL": url}
+    try:
+        _run_alembic("upgrade", "0017", env=env)
+        assert "thinking_policy" not in _columns(url, "route_bindings")
+
+        _run_alembic("upgrade", "head", env=env)
+        assert "thinking_policy" in _columns(url, "route_bindings")
+        assert "thinking_policy" not in _nullable_columns(url, "route_bindings")
+
+        # The CHECK constraint rejects an unsupported policy value.
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            _exec_sql(
+                url,
+                [
+                    "INSERT INTO projects (id, name, is_active) "
+                    "VALUES ('p1','proj',true)",
+                    "INSERT INTO providers (id, kind, name, capabilities, is_active) "
+                    "VALUES ('prov1','ollama','ollama','[]',true)",
+                    "INSERT INTO provider_accounts (id, provider_id, name, is_active) "
+                    "VALUES ('acct1','prov1','acct',true)",
+                    "INSERT INTO endpoints (id, provider_account_id, name, "
+                    "base_destination, max_concurrency, is_active) "
+                    "VALUES ('ep1','acct1','ep','http://localhost',1,true)",
+                    "INSERT INTO model_aliases (id, name, capabilities, is_active) "
+                    "VALUES ('ma1','m1','[]',true)",
+                    "INSERT INTO route_bindings (id, model_alias_id, endpoint_id, "
+                    "provider_account_id, thinking_policy, is_active) "
+                    "VALUES ('rb2','ma1','ep1','acct1','bogus',true)",
+                ],
+            )
+
+        # Reversible: downgrade drops the column again.
+        _run_alembic("downgrade", "0017", env=env)
+        assert "thinking_policy" not in _columns(url, "route_bindings")
     finally:
         asyncio.run(drop_database(url))
 

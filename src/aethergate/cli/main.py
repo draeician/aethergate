@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import click
@@ -476,6 +477,59 @@ def credentials_show(ctx: click.Context, credential_id: str, as_json: bool) -> N
     _show(as_json, ctx, f"/admin/v1/credentials/{credential_id}")
 
 
+@credentials.command("create")
+@click.option("--project", "project_id", required=True)
+@click.option("--principal", "principal_id", required=True)
+@click.option("--name", required=True)
+@click.option(
+    "--audience", type=click.Choice(["inference", "admin"]), default="inference"
+)
+@click.option(
+    "--key-file", required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Save the one-time raw key to a new mode-0600 file (never stdout).",
+)
+@_json_opt
+@click.pass_context
+def credentials_create(
+    ctx: click.Context,
+    project_id: str,
+    principal_id: str,
+    name: str,
+    audience: str,
+    key_file: Path,
+    as_json: bool,
+) -> None:
+    """Create a scoped credential; save its one-time raw key without printing."""
+    if key_file.exists():
+        raise UsageError("key file already exists; refusing to overwrite")
+    if not key_file.parent.is_dir():
+        raise UsageError("key file parent directory does not exist")
+    with _client_ctx(ctx) as (_profile, client):
+        data = client.post(
+            "/admin/v1/credentials",
+            {
+                "project_id": project_id,
+                "principal_id": principal_id,
+                "name": name,
+                "audience": audience,
+            },
+        )
+    try:
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data["raw_key"] + "\n")
+    except OSError as exc:
+        credential_id = data["credential"]["id"]
+        raise UsageError(
+            f"credential {credential_id} was issued but the key could not be saved; "
+            "revoke it through the admin API before retrying"
+        ) from exc
+    _emit_data(
+        as_json, {"credential": data["credential"], "key_file": str(key_file)}
+    )
+
+
 # --- role assignments -------------------------------------------------------
 
 
@@ -548,6 +602,136 @@ _catalog_group("price-policies", "Route price policies.", "price-policies")
 def create_provider(ctx: click.Context, kind: str, name: str, as_json: bool) -> None:
     with _client_ctx(ctx) as (_profile, client):
         data = client.post("/admin/v1/providers", {"kind": kind, "name": name})
+    _emit_data(as_json, data)
+
+
+# --- catalog create/update (thin commands over /admin/v1) -------------------
+
+_CAPABILITIES = ("text", "image", "audio_stt", "audio_tts", "embedding")
+_THINKING_POLICIES = ("inherit", "off", "on", "low", "medium", "high")
+
+
+@cli.command("create-provider-account")
+@click.argument("name")
+@click.option("--provider", "provider_id", required=True)
+@_json_opt
+@click.pass_context
+def create_provider_account(
+    ctx: click.Context, name: str, provider_id: str, as_json: bool
+) -> None:
+    with _client_ctx(ctx) as (_profile, client):
+        data = client.post(
+            "/admin/v1/provider-accounts",
+            {"provider_id": provider_id, "name": name},
+        )
+    _emit_data(as_json, data)
+
+
+@cli.command("create-endpoint")
+@click.argument("name")
+@click.option("--provider-account", "provider_account_id", required=True)
+@click.option("--base-destination", required=True)
+@click.option("--max-concurrency", type=int, default=1)
+@_json_opt
+@click.pass_context
+def create_endpoint(
+    ctx: click.Context,
+    name: str,
+    provider_account_id: str,
+    base_destination: str,
+    max_concurrency: int,
+    as_json: bool,
+) -> None:
+    with _client_ctx(ctx) as (_profile, client):
+        data = client.post(
+            "/admin/v1/endpoints",
+            {
+                "provider_account_id": provider_account_id,
+                "name": name,
+                "base_destination": base_destination,
+                "max_concurrency": max_concurrency,
+            },
+        )
+    _emit_data(as_json, data)
+
+
+@cli.command("create-model-alias")
+@click.argument("name")
+@click.option(
+    "--capability",
+    "capabilities",
+    multiple=True,
+    type=click.Choice(_CAPABILITIES),
+)
+@_json_opt
+@click.pass_context
+def create_model_alias(
+    ctx: click.Context, name: str, capabilities: tuple[str, ...], as_json: bool
+) -> None:
+    with _client_ctx(ctx) as (_profile, client):
+        data = client.post(
+            "/admin/v1/model-aliases",
+            {"name": name, "capabilities": list(capabilities)},
+        )
+    _emit_data(as_json, data)
+
+
+@cli.command("create-route-binding")
+@click.option("--model-alias", "model_alias_id", required=True)
+@click.option("--endpoint", "endpoint_id", required=True)
+@click.option("--provider-account", "provider_account_id", required=True)
+@click.option("--upstream-model", default=None)
+@click.option(
+    "--thinking-policy", type=click.Choice(_THINKING_POLICIES), default="inherit"
+)
+@_json_opt
+@click.pass_context
+def create_route_binding(
+    ctx: click.Context,
+    model_alias_id: str,
+    endpoint_id: str,
+    provider_account_id: str,
+    upstream_model: str | None,
+    thinking_policy: str,
+    as_json: bool,
+) -> None:
+    body: dict[str, Any] = {
+        "model_alias_id": model_alias_id,
+        "endpoint_id": endpoint_id,
+        "provider_account_id": provider_account_id,
+        "thinking_policy": thinking_policy,
+    }
+    if upstream_model is not None:
+        body["upstream_model"] = upstream_model
+    with _client_ctx(ctx) as (_profile, client):
+        data = client.post("/admin/v1/route-bindings", body)
+    _emit_data(as_json, data)
+
+
+@cli.command("update-route-binding")
+@click.argument("binding_id")
+@click.option("--thinking-policy", type=click.Choice(_THINKING_POLICIES))
+@click.option("--upstream-model", default=None)
+@click.option("--is-active/--no-is-active", "is_active", default=None)
+@_json_opt
+@click.pass_context
+def update_route_binding(
+    ctx: click.Context,
+    binding_id: str,
+    thinking_policy: str | None,
+    upstream_model: str | None,
+    is_active: bool | None,
+    as_json: bool,
+) -> None:
+    body: dict[str, Any] = {}
+    if thinking_policy is not None:
+        body["thinking_policy"] = thinking_policy
+    if upstream_model is not None:
+        body["upstream_model"] = upstream_model
+    if is_active is not None:
+        body["is_active"] = is_active
+    with _client_ctx(ctx) as (_profile, client):
+        data = client.patch(f"/admin/v1/route-bindings/{binding_id}", body)
     _emit_data(as_json, data)
 
 
