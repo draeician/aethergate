@@ -1,3 +1,14 @@
+# AGV2-031 post-merge CI failure — AGV2-031-PM1 active (2026-10-15 UTC)
+
+- PR #5 was operator-authorized and successfully merged to canonical `main` at `5695637e821e8c4dd33051e3d937cf3b6c88c628`, preserving previous AGV2-031 code head `d3319091a91baabe8f29adeec023dc584d5626f2`.
+- On this exact `main` merge SHA, push-event `beta-release-gate` workflow **38681868099** FAILED (job `116247985882`): verified queued request with worker stopped `queued_total=1`, PostgreSQL outage (readiness 503, valid request HTTP 500), then `beta_db_outage.py --stage verify-persisted` failed: **persisted queued request was lost during the outage**. This was not seen on the green feature-head PR CI. Link: https://github.com/draeician/aethergate/actions/runs/38681868099.
+- Two push workflows succeeded (frontend 38681868242, schema-secret-gate 38681868088). Backend 38681868122 and alpha-golden-path 38681868090 were still running at last check. Check their final results rather than assuming.
+- **Hypothesis**: background synchronous HTTP caller may fail when DB drops; API response `finally` durably cancels its queued work. Confirm observed row state and race. Preserve intended client cancellation semantics; use a proper durable fixture without a dependent live HTTP waiter if supported. Do not weaken security/scheduling policies to force a pass.
+- Follow `docs/development/current-task.md` on `fix/agv2-031-postmerge-beta-gate` for targeted corrective work, tests, review and notification requirements. Separate old completion records below remain historical evidence, not Beta release approval.
+- No Beta 1 tag/public release/production deployment. Do not auto-merge corrective PR. Repo `main` branch protection remains unconfigured as last verified.
+
+---
+
 # AGV2-031 DB outage gate correction — complete (2026-10-13 UTC)
 
 The additional independent-review finding (PR #5, 2026-10-13T13:30Z) is
